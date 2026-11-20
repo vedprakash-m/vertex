@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -18,6 +19,7 @@ from src.ai.structured_feature_runner import (
 from src.ai.tiered_router import RouteOutcome, Tier, TierResult
 from src.core.context_compiler import ContextCompileRequest, DeterministicContextCompiler, ValidationContext
 from src.core.exceptions import StateError
+from src.core.selection_identity import UNVERIFIED
 from tests.unit.test_structured_feature_runner import _compiled, _context, _identity, _runner, _spec
 
 
@@ -148,6 +150,292 @@ def test_compiled_prompt_hash_prevents_stale_released_cache_replay(tmp_path: Pat
     assert provider.call_count == 2
 
 
+def test_expired_released_cache_row_recomputes_after_seven_days(tmp_path: Path) -> None:
+    cache = ReleasedResultCache(
+        tmp_path / "released_cache.sqlite3",
+        record_release=lambda *_args: "origin-run",
+        verify_release=lambda *_args: True,
+    )
+    provider = Mock(side_effect=["first-value", "second-value"])
+    runner = StructuredFeatureRunner(
+        context=_context(tmp_path),
+        frontier_eligible=True,
+        ceiling_ledger=Mock(),
+        released_cache=cache,
+        deterministic_cache=DeterministicResultCache(tmp_path / "deterministic.sqlite3"),
+    )
+    spec = _spec(
+        tmp_path,
+        build_context=lambda _: ContextBuildResult(compiled=_compiled()),
+        call_provider=provider,
+        request_hash=lambda value: value,
+        deployment_fingerprint="test",
+        validator_version="v1",
+        serialize_response=str,
+        deserialize_response=str,
+    )
+    assert runner.run(spec, "same").value == "first-value"
+    with sqlite3.connect(tmp_path / "released_cache.sqlite3") as connection:
+        connection.execute(
+            "UPDATE released_result_cache SET cached_at = ?",
+            ((datetime.now(timezone.utc) - timedelta(days=7, seconds=1)).isoformat(),),
+        )
+
+    result = runner.run(spec, "same")
+
+    assert result.tier == Tier.FRONTIER
+    assert result.value == "second-value"
+    assert provider.call_count == 2
+
+
+@pytest.mark.parametrize("invalid_time", ["future", "non-utc"])
+def test_released_cache_rejects_noncanonical_utc_time(
+    tmp_path: Path, invalid_time: str,
+) -> None:
+    cache = ReleasedResultCache(
+        tmp_path / "released_cache.sqlite3",
+        record_release=lambda *_args: "origin-run",
+        verify_release=lambda *_args: True,
+    )
+    provider = Mock(side_effect=["first-value", "second-value"])
+    runner = StructuredFeatureRunner(
+        context=_context(tmp_path),
+        frontier_eligible=True,
+        ceiling_ledger=Mock(),
+        released_cache=cache,
+        deterministic_cache=DeterministicResultCache(tmp_path / "deterministic.sqlite3"),
+    )
+    spec = _spec(
+        tmp_path,
+        build_context=lambda _: ContextBuildResult(compiled=_compiled()),
+        call_provider=provider,
+        request_hash=lambda value: value,
+        deployment_fingerprint="test",
+        validator_version="v1",
+        serialize_response=str,
+        deserialize_response=str,
+    )
+    assert runner.run(spec, "same").value == "first-value"
+    now = datetime.now(timezone.utc)
+    if invalid_time == "future":
+        cached_at = (now + timedelta(seconds=30)).isoformat()
+    else:
+        cached_at = (now - timedelta(minutes=1)).astimezone(timezone(timedelta(hours=5))).isoformat()
+    with sqlite3.connect(tmp_path / "released_cache.sqlite3") as connection:
+        connection.execute("UPDATE released_result_cache SET cached_at = ?", (cached_at,))
+
+    result = runner.run(spec, "same")
+
+    assert result.tier == Tier.FRONTIER
+    assert result.value == "second-value"
+    assert provider.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "changed",
+    ["prompt", "deployment", "validator"],
+)
+def test_released_cache_cannot_reuse_across_frozen_identity_changes(
+    tmp_path: Path,
+    changed: str,
+) -> None:
+    compiled = [_compiled()]
+    provider = Mock(side_effect=["first-value", "second-value"])
+    spec = _spec(
+        tmp_path,
+        build_context=lambda _: ContextBuildResult(compiled=compiled[0]),
+        call_provider=provider,
+        request_hash=lambda request: request,
+        deployment_fingerprint="model-v1",
+        prompt_version="v1",
+        validator_version="validator-v1",
+        serialize_response=str,
+        deserialize_response=str,
+    )
+    runner = _runner(tmp_path)
+
+    first = runner.run(spec, "same")
+    if changed == "prompt":
+        replacement_prompt = "fresh frozen prompt"
+        compiled[0] = replace(
+            compiled[0],
+            prompt_text=replacement_prompt,
+            manifest=replace(
+                compiled[0].manifest,
+                prompt_version="v2",
+                context_hash=hashlib.sha256(
+                    replacement_prompt.encode("utf-8")
+                ).hexdigest(),
+            ),
+        )
+        changed_spec = replace(spec, prompt_version="v2")
+    elif changed == "deployment":
+        changed_spec = replace(spec, deployment_fingerprint="model-v2")
+    else:
+        changed_spec = replace(spec, validator_version="validator-v2")
+
+    second = runner.run(changed_spec, "same")
+
+    assert (first.tier, first.value) == (Tier.FRONTIER, "first-value")
+    assert (second.tier, second.value) == (Tier.FRONTIER, "second-value")
+    assert provider.call_count == 2
+
+
+@pytest.mark.parametrize("selection", [UNVERIFIED, "", "sha256:not-a-digest"])
+def test_unverified_or_malformed_selection_is_not_cached(
+    tmp_path: Path, selection: str,
+) -> None:
+    compiled = replace(
+        _compiled(),
+        manifest=replace(_compiled().manifest, selection_identity=selection),
+        selection_identity=selection,
+    )
+    provider = Mock(side_effect=["first-value", "second-value"])
+    cache = ReleasedResultCache(
+        tmp_path / "released_cache.sqlite3",
+        record_release=lambda *_args: "origin-run",
+        verify_release=lambda *_args: True,
+    )
+    runner = StructuredFeatureRunner(
+        context=_context(tmp_path),
+        frontier_eligible=True,
+        ceiling_ledger=Mock(),
+        released_cache=cache,
+        deterministic_cache=Mock(),
+    )
+    spec = _spec(
+        tmp_path,
+        build_context=lambda _: ContextBuildResult(compiled=compiled),
+        call_provider=provider,
+        request_hash=lambda value: value,
+        deployment_fingerprint="test",
+        validator_version="v1",
+        serialize_response=str,
+        deserialize_response=str,
+    )
+
+    assert runner.run(spec, "same").value == "first-value"
+    assert runner.run(spec, "same").value == "second-value"
+    assert provider.call_count == 2
+    assert not cache._db_path.exists()
+
+
+def test_changed_verified_selection_does_not_reuse_released_value(tmp_path: Path) -> None:
+    active = [_compiled()]
+    provider = Mock(side_effect=["first-selection", "second-selection"])
+    cache = ReleasedResultCache(
+        tmp_path / "released_cache.sqlite3",
+        record_release=lambda *_args: "origin-run",
+        verify_release=lambda *_args: True,
+    )
+    runner = StructuredFeatureRunner(
+        context=_context(tmp_path),
+        frontier_eligible=True,
+        ceiling_ledger=Mock(),
+        released_cache=cache,
+        deterministic_cache=Mock(),
+    )
+    spec = _spec(
+        tmp_path,
+        build_context=lambda _: ContextBuildResult(compiled=active[0]),
+        call_provider=provider,
+        request_hash=lambda value: value,
+        deployment_fingerprint="test",
+        validator_version="v1",
+        serialize_response=str,
+        deserialize_response=str,
+    )
+    assert runner.run(spec, "same").value == "first-selection"
+
+    selection = "sha256:" + "b" * 64
+    active[0] = replace(
+        active[0],
+        manifest=replace(active[0].manifest, selection_identity=selection),
+        selection_identity=selection,
+    )
+    assert runner.run(spec, "same").value == "second-selection"
+    assert provider.call_count == 2
+
+
+@pytest.mark.parametrize("changed", ["prompt", "deployment", "validator"])
+def test_released_cache_cannot_reuse_across_frozen_identity_changes(
+    tmp_path: Path, changed: str,
+) -> None:
+    compiled = [_compiled()]
+    provider = Mock(side_effect=["first-value", "second-value"])
+    spec = _spec(
+        tmp_path,
+        build_context=lambda _: ContextBuildResult(compiled=compiled[0]),
+        call_provider=provider,
+        request_hash=lambda request: request,
+        deployment_fingerprint="model-v1",
+        prompt_version="v1",
+        validator_version="validator-v1",
+        serialize_response=str,
+        deserialize_response=str,
+    )
+    runner = _runner(tmp_path)
+
+    first = runner.run(spec, "same")
+    if changed == "prompt":
+        replacement_prompt = "fresh frozen prompt"
+        compiled[0] = replace(
+            compiled[0],
+            prompt_text=replacement_prompt,
+            manifest=replace(
+                compiled[0].manifest,
+                prompt_version="v2",
+                context_hash=hashlib.sha256(replacement_prompt.encode("utf-8")).hexdigest(),
+            ),
+        )
+        changed_spec = replace(spec, prompt_version="v2")
+    elif changed == "deployment":
+        changed_spec = replace(spec, deployment_fingerprint="model-v2")
+    else:
+        changed_spec = replace(spec, validator_version="validator-v2")
+
+    second = runner.run(changed_spec, "same")
+    assert (first.tier, first.value) == (Tier.FRONTIER, "first-value")
+    assert (second.tier, second.value) == (Tier.FRONTIER, "second-value")
+    assert provider.call_count == 2
+
+
+@pytest.mark.parametrize("missing", ["prompt_version", "deployment_fingerprint", "validator_version"])
+def test_released_cache_refuses_incomplete_frozen_identity(
+    tmp_path: Path, missing: str,
+) -> None:
+    compiled = _compiled()
+    options = {
+        "prompt_version": compiled.manifest.prompt_version,
+        "deployment_fingerprint": "model-v1",
+        "validator_version": "validator-v1",
+    }
+    options[missing] = " \t"
+    if missing == "prompt_version":
+        compiled = replace(
+            compiled,
+            manifest=replace(compiled.manifest, prompt_version=" \t"),
+        )
+    provider = Mock(side_effect=["first", "second"])
+    spec = _spec(
+        tmp_path,
+        build_context=lambda _: ContextBuildResult(compiled=compiled),
+        call_provider=provider,
+        request_hash=lambda request: request,
+        serialize_response=str,
+        deserialize_response=str,
+        **options,
+    )
+    runner = _runner(tmp_path)
+
+    first = runner.run(spec, "same")
+    second = runner.run(spec, "same")
+
+    assert (first.tier, first.value) == (Tier.FRONTIER, "first")
+    assert (second.tier, second.value) == (Tier.FRONTIER, "second")
+    assert provider.call_count == 2
+
+
 def test_model_cache_identity_changes_with_compiler_cache_key(tmp_path: Path) -> None:
     compiled = _compiled()
     runner = _runner(tmp_path)
@@ -245,7 +533,11 @@ def test_model_cache_partitions_compiler_schema_boundaries(tmp_path: Path) -> No
     ledger = Mock()
     runner = StructuredFeatureRunner(
         context=_context(tmp_path), frontier_eligible=True, ceiling_ledger=ledger,
-        released_cache=ReleasedResultCache(tmp_path / "released_cache.sqlite3"),
+        released_cache=ReleasedResultCache(
+            tmp_path / "released_cache.sqlite3",
+            record_release=lambda *_args: "origin-run",
+            verify_release=lambda *_args: True,
+        ),
         deterministic_cache=DeterministicResultCache(tmp_path / "deterministic_cache.sqlite3"),
     )
 
@@ -264,7 +556,11 @@ def test_model_cache_partitions_compiler_schema_boundaries(tmp_path: Path) -> No
 
 def test_old_released_cache_key_remains_but_misses(tmp_path: Path) -> None:
     db_path = tmp_path / "released_cache.sqlite3"
-    cache = ReleasedResultCache(db_path)
+    cache = ReleasedResultCache(
+        db_path,
+        record_release=lambda *_args: "origin-run",
+        verify_release=lambda *_args: True,
+    )
     ledger = Mock()
     runner = StructuredFeatureRunner(
         context=_context(tmp_path), frontier_eligible=True, ceiling_ledger=ledger,
@@ -291,9 +587,10 @@ def test_old_released_cache_key_remains_but_misses(tmp_path: Path) -> None:
     assert cache.get(identity, deserialize=str) is None
     with sqlite3.connect(db_path) as connection:
         connection.execute(
-            "INSERT INTO released_result_cache VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO released_result_cache VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (old_key, identity.feature, identity.principal, identity.classification, "old-value",
-             hashlib.sha256(b"old-value").hexdigest(), "old-run", "2026-01-01T00:00:00Z"),
+             hashlib.sha256(b"old-value").hexdigest(), "old-run", "2026-01-01T00:00:00Z",
+             json.dumps(old_material, separators=(",", ":"))),
         )
         old_row = connection.execute(
             "SELECT * FROM released_result_cache WHERE cache_key = ?", (old_key,),
@@ -305,10 +602,10 @@ def test_old_released_cache_key_remains_but_misses(tmp_path: Path) -> None:
     assert (second.tier, second.value) == (Tier.CACHE, "new-value")
     assert provider.call_count == ledger.reserve_frontier_call.call_count == 1
     with sqlite3.connect(db_path) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM released_result_cache").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM released_result_cache").fetchone()[0] == 1
         assert connection.execute(
             "SELECT * FROM released_result_cache WHERE cache_key = ?", (old_key,),
-        ).fetchone() == old_row
+        ).fetchone() is None
 
 
 def test_model_cache_identity_changes_with_execution_classification(tmp_path) -> None:
@@ -339,7 +636,11 @@ def test_model_cache_identity_changes_with_execution_classification(tmp_path) ->
 def test_model_cache_cannot_reuse_across_execution_classifications(
     tmp_path, first_classification, second_classification,
 ) -> None:
-    cache = ReleasedResultCache(tmp_path / "shared-model.sqlite3")
+    cache = ReleasedResultCache(
+        tmp_path / "shared-model.sqlite3",
+        record_release=lambda *_args: "origin-run",
+        verify_release=lambda *_args: True,
+    )
     provider = Mock(side_effect=["first-profile", "second-profile"])
     spec = _spec(
         tmp_path, build_context=lambda _: ContextBuildResult(compiled=_compiled()),
@@ -382,7 +683,11 @@ def test_model_cache_changes_with_compiler_policy_independently_of_routing_polic
 
 
 def test_shared_model_cache_cannot_cross_programs(tmp_path) -> None:
-    cache = ReleasedResultCache(tmp_path / "shared-model.sqlite3")
+    cache = ReleasedResultCache(
+        tmp_path / "shared-model.sqlite3",
+        record_release=lambda *_args: "origin-run",
+        verify_release=lambda *_args: True,
+    )
     values = []
     for program in ("acme", "beta"):
         compiled = replace(_compiled(), manifest=replace(_compiled().manifest, program_id=program))

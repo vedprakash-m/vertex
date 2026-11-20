@@ -89,8 +89,13 @@ def render_reviewer_summary(
         lines.append(f"Enrichments ({len(enrichments)}):")
         for enrichment in enrichments:
             preview = enrichment.excerpt.strip().replace("\n", " ")[:120]
+            source_time = (
+                enrichment.timestamp.isoformat()
+                if enrichment.timestamp is not None
+                else "unknown source time"
+            )
             lines.append(
-                f"- {enrichment.source} by {enrichment.author} on {enrichment.timestamp.isoformat()}: {preview}"
+                f"- {enrichment.source} by {enrichment.author} on {source_time}: {preview}"
             )
     if changed_date is not None:
         lines.append(f"ADO item changed on {changed_date.isoformat()}.")

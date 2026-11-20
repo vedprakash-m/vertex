@@ -646,7 +646,7 @@ def test_action_extractor_rejects_missing_due_date() -> None:
         ActionExtractor(client=client).extract_actions(program_id="acme", signals=(signal,))
 
 
-def test_action_extractor_skips_non_transcript_signals_without_calling_ai() -> None:
+def test_action_extractor_deterministically_extracts_non_transcript_signals_without_calling_ai() -> None:
     signal = Signal(
         id="signal-3",
         timestamp=datetime(2026, 5, 10, 9, 0, tzinfo=timezone.utc),
@@ -664,7 +664,9 @@ def test_action_extractor_skips_non_transcript_signals_without_calling_ai() -> N
 
     actions = ActionExtractor(client=client).extract_actions(program_id="acme", signals=(signal,))
 
-    assert actions == ()
+    assert [(action.text, action.source_type) for action in actions] == [
+        ("Need to confirm the checkpoint by May 20.", ActionSourceType.SIGNAL),
+    ]
     assert client.calls == 0
 
 

@@ -14,9 +14,61 @@ from src.core.knowledge.vault import ingest_knowledge_source, load_vault_entry, 
 from src.core.ledger.candidate_store import load_pending_candidates as load_pending_ledger_candidates
 from src.core.ledger.event_log import ConfidenceTier
 from src.core.ledger.source_refs import KnowledgeDocumentRef, OperatorAssertionRef
+from src.core.operator_identity import OperatorIdentity
 
 
 runner = CliRunner()
+
+
+def _enable_knowledge_review(monkeypatch, programs_root: Path) -> OperatorIdentity:
+    identity = OperatorIdentity(
+        actor="operator",
+        principal=r"SYNTHETIC\knowledge-reviewer",
+        machine="synthetic-host",
+        session="synthetic-session",
+    )
+    program = programs_root / "acme"
+    program.mkdir(parents=True, exist_ok=True)
+    (program / "program.yaml").write_text(
+        "id: acme\nname: Acme\nknowledge_scopes:\n  - domain:storage-platform\n",
+        encoding="utf-8",
+    )
+    (program / "review.yaml").write_text(
+        "reviewers: []\n"
+        "required: false\n"
+        "knowledge_review_principals:\n"
+        f"  - '{identity.principal}'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.commands.knowledge.capture_operator_identity",
+        lambda *_args, **_kwargs: identity,
+    )
+    return identity
+
+
+def _review_knowledge_candidate(programs_root: Path, candidate_id: str):
+    return runner.invoke(
+        app,
+        [
+            "--no-catchup",
+            "knowledge",
+            "triage",
+            "review",
+            "--candidate",
+            candidate_id,
+            "--actor",
+            "operator",
+            "--program",
+            "acme",
+            "--valid-until",
+            "2099-01-01T00:00:00+00:00",
+            "--reason",
+            "synthetic source and entity verified",
+            "--programs-root",
+            str(programs_root),
+        ],
+    )
 
 
 def test_knowledge_assert_writes_claim_revision(monkeypatch, tmp_path: Path) -> None:
@@ -1054,7 +1106,7 @@ def test_knowledge_status_reports_scope_active_claims_by_confidence(monkeypatch,
     payload = json.loads(status_result.stdout)
 
     assert status_result.exit_code == 0
-    assert payload["registered_predicate_count"] == 4
+    assert payload["registered_predicate_count"] == 17
     assert payload["scopes"][0]["predicate_count"] == 1
     assert payload["scopes"][0]["active_claims_by_confidence"] == {
         "ai_extracted": 0,
@@ -2281,6 +2333,7 @@ def test_knowledge_extract_program_scope_routes_event_markers_and_claims_from_sa
 def test_knowledge_redact_vault_cascades_claims_and_active_candidates(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("cli.maybe_run_scheduled_compaction", lambda *_args, **_kwargs: None)
     programs_root = tmp_path / "programs"
+    _enable_knowledge_review(monkeypatch, programs_root)
     program_dir = programs_root / "acme"
     program_dir.mkdir(parents=True, exist_ok=True)
     (program_dir / "program.yaml").write_text(
@@ -2330,6 +2383,7 @@ def test_knowledge_redact_vault_cascades_claims_and_active_candidates(monkeypatc
     pending_path = tmp_path / "knowledge" / "candidates" / "pending.jsonl"
     pending_rows = [json.loads(line) for line in pending_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     approved_candidate_id = next(row["candidate_id"] for row in pending_rows if row["proposed_claim"]["subject"] == "sku_generation:gen9")
+    review_result = _review_knowledge_candidate(programs_root, approved_candidate_id)
 
     approve_result = runner.invoke(
         app,
@@ -2342,6 +2396,8 @@ def test_knowledge_redact_vault_cascades_claims_and_active_candidates(monkeypatc
             approved_candidate_id,
             "--actor",
             "operator",
+            "--program",
+            "acme",
             "--programs-root",
             str(programs_root),
         ],
@@ -2401,6 +2457,7 @@ def test_knowledge_redact_vault_cascades_claims_and_active_candidates(monkeypatc
 
     assert ingest_result.exit_code == 0
     assert extract_result.exit_code == 0
+    assert review_result.exit_code == 0
     assert approve_result.exit_code == 0
     assert redact_result.exit_code == 0
     assert show_result.exit_code == 0
@@ -2416,6 +2473,7 @@ def test_knowledge_redact_vault_cascades_claims_and_active_candidates(monkeypatc
 def test_knowledge_redact_vault_reports_affected_backups_when_root_provided(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("cli.maybe_run_scheduled_compaction", lambda *_args, **_kwargs: None)
     programs_root = tmp_path / "programs"
+    _enable_knowledge_review(monkeypatch, programs_root)
     source_path = tmp_path / "knowledge-source.md"
     source_path.write_text(
         "Claim: subject=sku_generation:gen9; predicate=first_deployment; value=2025-H2\n",
@@ -2451,6 +2509,7 @@ def test_knowledge_redact_vault_reports_affected_backups_when_root_provided(monk
         ],
     )
     candidate_id = json.loads((tmp_path / "knowledge" / "candidates" / "pending.jsonl").read_text(encoding="utf-8").splitlines()[0])["candidate_id"]
+    review_result = _review_knowledge_candidate(programs_root, candidate_id)
     approve_result = runner.invoke(
         app,
         [
@@ -2462,6 +2521,8 @@ def test_knowledge_redact_vault_reports_affected_backups_when_root_provided(monk
             candidate_id,
             "--actor",
             "operator",
+            "--program",
+            "acme",
             "--programs-root",
             str(programs_root),
         ],
@@ -2490,6 +2551,7 @@ def test_knowledge_redact_vault_reports_affected_backups_when_root_provided(monk
 
     assert ingest_result.exit_code == 0
     assert extract_result.exit_code == 0
+    assert review_result.exit_code == 0
     assert approve_result.exit_code == 0
     assert redact_result.exit_code == 0
     assert "Affected backups:" in redact_result.stdout
@@ -2499,6 +2561,7 @@ def test_knowledge_redact_vault_reports_affected_backups_when_root_provided(monk
 def test_knowledge_gc_deletes_only_old_unreferenced_vault_entries(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("cli.maybe_run_scheduled_compaction", lambda *_args, **_kwargs: None)
     programs_root = tmp_path / "programs"
+    _enable_knowledge_review(monkeypatch, programs_root)
     source_old_referenced = tmp_path / "old-referenced.md"
     source_old_orphan = tmp_path / "old-orphan.md"
     source_recent = tmp_path / "recent.md"
@@ -2547,6 +2610,7 @@ def test_knowledge_gc_deletes_only_old_unreferenced_vault_entries(monkeypatch, t
     )
     pending_path = tmp_path / "knowledge" / "candidates" / "pending.jsonl"
     candidate_id = json.loads(pending_path.read_text(encoding="utf-8").splitlines()[0])["candidate_id"]
+    review_result = _review_knowledge_candidate(programs_root, candidate_id)
     approve_result = runner.invoke(
         app,
         [
@@ -2558,6 +2622,8 @@ def test_knowledge_gc_deletes_only_old_unreferenced_vault_entries(monkeypatch, t
             candidate_id,
             "--actor",
             "operator",
+            "--program",
+            "acme",
             "--programs-root",
             str(programs_root),
         ],
@@ -2591,6 +2657,7 @@ def test_knowledge_gc_deletes_only_old_unreferenced_vault_entries(monkeypatch, t
     gc_payload = json.loads(gc_result.stdout)
 
     assert extract_result.exit_code == 0
+    assert review_result.exit_code == 0
     assert approve_result.exit_code == 0
     assert dry_run_result.exit_code == 0
     assert gc_result.exit_code == 0

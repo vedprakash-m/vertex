@@ -26,9 +26,13 @@ from src.core.edition_resolver import find_edition_yaml, get_program_output_dir,
 from src.core.draft_artifact_store import load_draft_state as load_optional_draft_state
 from src.core.draft_artifact_store import load_draft_manifest as load_optional_draft_manifest
 from src.core.exceptions import ConfigError, StateError
-from src.core.manifest_writer import chart_gate_evidence_sha256, load_run_evidence_snapshot
+from src.core.manifest_writer import chart_gate_evidence_sha256, hash_jsonable, load_run_evidence_snapshot
 from src.core.models import ReviewSection, ReviewState, ReviewStatus, RunEvidenceSnapshot
 from src.core.overrides_store import OverridesDocument, load_overrides, merge_overrides
+from src.core.program_verdict import (
+    validate_retained_program_verdict,
+    validate_retained_program_verdict_comparison,
+)
 from src.core.quality_gates import GateEvaluation, QualityGateReport, evaluate_chart_gates
 from src.core.review_status_store import load_review_status
 
@@ -49,6 +53,8 @@ class ConfirmDraftManifest:
     milestone_assessments: Any
     milestone_trajectory_snapshot: Any
     run_evidence_snapshot: RunEvidenceSnapshot | None = None
+    program_verdict_observation: dict[str, Any] | None = None
+    program_verdict_comparison: dict[str, Any] | None = None
     chart_hard_gate_failures: tuple[str, ...] = ()
     recorded_qg22_passed: bool = False
     chart_freshness_evidence: tuple[dict[str, Any], ...] = ()
@@ -213,6 +219,53 @@ def load_confirm_draft_manifest(
                 "Invalid or missing chart evidence binding between the draft and manifest. "
                 "Preserve the existing artifacts and re-run `vertex report --dry-run` before confirming."
             )
+    observation = metadata.get("program_verdict_observation") if isinstance(metadata, dict) else None
+    comparison = metadata.get("program_verdict_comparison") if isinstance(metadata, dict) else None
+    verdict_reference = draft_state.get("program_verdict_observation_sha256")
+    strict_verdict_draft = (
+        draft_state.get("program_fact_snapshot") is not None
+        and draft_state.get("edition_type") != "lookback"
+        and capture is not None
+        and verdict_reference is not None
+    )
+    if strict_verdict_draft:
+        if not isinstance(observation, dict) or not isinstance(comparison, dict):
+            raise typer.BadParameter(
+                "This program-backed draft has no bound ProgramVerdict observation. "
+                "Preserve the existing artifacts and re-run `vertex report --dry-run` before confirming."
+            )
+        snapshot_hash = payload.get("snapshot_hash") if payload is not None else None
+        if not isinstance(snapshot_hash, str):
+            raise typer.BadParameter("The retained draft snapshot binding is invalid.")
+        if capture is None:
+            raise typer.BadParameter(
+                "The retained draft evidence capture is unavailable."
+            )
+        try:
+            if (
+                not isinstance(verdict_reference, str)
+                or hash_jsonable(observation) != verdict_reference
+            ):
+                raise ConfigError("The retained program verdict observation reference is invalid.")
+            observation_inputs_sha256 = validate_retained_program_verdict(
+                observation,
+                capture=capture,
+                report_snapshot_hash=snapshot_hash,
+            )
+            validate_retained_program_verdict_comparison(
+                comparison,
+                capture_sha256=capture.sha256,
+                observation_inputs_sha256=observation_inputs_sha256,
+            )
+        except ConfigError as error:
+            raise typer.BadParameter(
+                "The retained ProgramVerdict observation is invalid. "
+                "Preserve the existing artifacts and re-run `vertex report --dry-run` before confirming."
+            ) from error
+    elif (observation is not None or comparison is not None) and (
+        not isinstance(observation, dict) or not isinstance(comparison, dict)
+    ):
+        raise typer.BadParameter("The retained ProgramVerdict observation is invalid.")
     return ConfirmDraftManifest(
         edition_name=edition_name,
         issue_number=issue_number,
@@ -233,6 +286,8 @@ def load_confirm_draft_manifest(
         ),
         recorded_qg22_passed=qg_results.get("QG-22") is True,
         chart_freshness_evidence=tuple(chart_evidence or ()),
+        program_verdict_observation=dict(observation) if isinstance(observation, dict) else None,
+        program_verdict_comparison=dict(comparison) if isinstance(comparison, dict) else None,
     )
 
 

@@ -14,6 +14,8 @@ from src.core.gather_run_manifest import (
     GatherRunManifest,
     GatherRunStatus,
     RequiredScopeStatus,
+    is_mismatched_oracle_result,
+    is_weak_oracle_result,
     resolve_latest_committed_manifest,
 )
 from src.core.reality_completeness import RealityCompletenessVector
@@ -34,6 +36,10 @@ def project_effective_completeness(
     extra_reasons: tuple[str, ...] = (),
 ) -> EffectiveCompleteness:
     reasons: list[str] = list(extra_reasons)
+    if manifest is None and not reasons:
+        reasons.append("manifest_missing")
+    if vector is None:
+        reasons.append("vector_unavailable")
     if vector is not None:
         reasons += [
             f"source_{sv.status}:{sv.surface}"
@@ -52,6 +58,10 @@ def project_effective_completeness(
                 reasons.append(f"query_incomplete:{entry.scope_id}:{entry.completeness_state}")
             if entry.failure_category:
                 reasons.append(f"query_failed:{entry.scope_id}")
+            if is_mismatched_oracle_result(entry.oracle_result):
+                reasons.append(f"query_oracle_mismatch:{entry.scope_id}")
+            elif is_weak_oracle_result(entry.oracle_result):
+                reasons.append(f"query_oracle_weak:{entry.scope_id}")
         reasons += [f"channel_degraded:{c.channel}" for c in manifest.channel_outcomes if c.degraded]
         if manifest.failed_refs:
             reasons.append(f"failed_refs:{len(manifest.failed_refs)}")

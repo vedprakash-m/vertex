@@ -17,7 +17,9 @@ from unittest.mock import Mock
 import pytest
 
 from src.ai.ai_mode import AIMode
-from src.ai.client import AIClient, BudgetExceeded
+from src.ai import structured_feature_runner as runner_module
+from src.ai.client import AIClient, AIClientError, BudgetExceeded
+from src.ai.deployment_fallback import FallbackAIClient
 from src.ai import context_tokenizers
 from src.ai.context_tokenizers import TiktokenTokenEstimator
 from src.ai.cost_guard import CostGuard
@@ -61,7 +63,7 @@ from src.core.context_compiler import (
     context_manifest_path,
 )
 from src.core.exceptions import StateError
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def _context(tmp_path: Path, **overrides) -> RunnerContext:
@@ -74,6 +76,14 @@ def _context(tmp_path: Path, **overrides) -> RunnerContext:
     )
     base.update(overrides)
     return RunnerContext(**base)
+
+
+def _release_bound_cache(path: Path) -> ReleasedResultCache:
+    return ReleasedResultCache(
+        path,
+        record_release=lambda _identity, _payload: "synthetic-release",
+        verify_release=lambda _identity, _payload, _run_id: True,
+    )
 
 
 def _manifest() -> ContextManifest:
@@ -96,11 +106,18 @@ def _manifest() -> ContextManifest:
         cache_key="key",
         context_hash=hashlib.sha256(b"prompt").hexdigest(),
         compiled_at=datetime.now(timezone.utc),
+        selection_identity="sha256:" + "a" * 64,
     )
 
 
 def _compiled() -> CompiledContext:
-    return CompiledContext(prompt_text="prompt", included=(), excluded=(), manifest=_manifest())
+    return CompiledContext(
+        prompt_text="prompt",
+        included=(),
+        excluded=(),
+        manifest=_manifest(),
+        selection_identity="sha256:" + "a" * 64,
+    )
 
 
 def _fallback_released(value: str = "fallback-value") -> FeatureOutcome[str]:
@@ -129,7 +146,14 @@ def _spec(tmp_path: Path, **overrides) -> StructuredFeatureSpec[str, str]:
 
 def _runner(tmp_path: Path, *, frontier_eligible: bool = True, **kwargs) -> StructuredFeatureRunner:
     ledger = CallCeilingLedger(tmp_path / "ceilings.sqlite3")
-    kwargs.setdefault("released_cache", ReleasedResultCache(tmp_path / "released_cache.sqlite3"))
+    kwargs.setdefault(
+        "released_cache",
+        ReleasedResultCache(
+            tmp_path / "released_cache.sqlite3",
+            record_release=lambda *_args: "origin-run",
+            verify_release=lambda *_args: True,
+        ),
+    )
     kwargs.setdefault("deterministic_cache", DeterministicResultCache(tmp_path / "deterministic_cache.sqlite3"))
     return StructuredFeatureRunner(
         context=_context(tmp_path),
@@ -345,6 +369,46 @@ def test_provider_exception_returns_unavailable_and_retryable(tmp_path: Path) ->
     assert outcome.status == FeatureOutcomeStatus.UNAVAILABLE
     assert outcome.retryable is True
     assert outcome.value is None
+
+
+def test_double_provider_outage_never_becomes_success_or_enters_release_cache(tmp_path: Path) -> None:
+    primary = Mock()
+    backup = Mock()
+    primary.chat.side_effect = AIClientError("synthetic primary outage")
+    backup.chat.side_effect = AIClientError("synthetic backup outage")
+    client = FallbackAIClient(
+        deployments=("primary", "backup"),
+        temperature=0.0,
+        budget_usd=1.0,
+        client_factory=Mock(side_effect=[primary, backup]),
+    )
+    cache = Mock(spec=ReleasedResultCache)
+    cache.get.return_value = None
+    fallback = Mock(return_value=_fallback_released("must-not-release"))
+    spec = _spec(
+        tmp_path,
+        build_context=lambda _: ContextBuildResult(compiled=_compiled()),
+        call_provider=lambda _request, _compiled: client.chat("system", "user"),
+        fallback_handler=fallback,
+        request_hash=lambda request: request,
+        deployment_fingerprint="frozen-fallback-chain",
+        validator_version="validator-v1",
+        serialize_response=lambda value: value,
+        deserialize_response=lambda value: value,
+    )
+    runner = _runner(tmp_path, released_cache=cache)
+
+    outcome = runner.run(spec, "request")
+
+    assert outcome.status == FeatureOutcomeStatus.UNAVAILABLE
+    assert outcome.value is None
+    assert not outcome.released
+    assert outcome.retryable
+    primary.chat.assert_called_once()
+    backup.chat.assert_called_once()
+    fallback.assert_not_called()
+    cache.get.assert_called_once()
+    cache.put.assert_not_called()
 
 
 def test_failed_validation_blocks_and_does_not_release(tmp_path: Path) -> None:
@@ -723,7 +787,14 @@ def test_legacy_cache_override_forwards_runner_validation(tmp_path: Path) -> Non
         tmp_path, call_provider=provider, request_hash=lambda request: "same-identity",
         semantic_validator=lambda request, response: ValidationResult(valid=request != "reject", reason="rejected"),
     )
-    runner = _runner(tmp_path, released_cache=ForwardingCache(cache_path))
+    runner = _runner(
+        tmp_path,
+        released_cache=ForwardingCache(
+            cache_path,
+            record_release=lambda *_args: "origin-run",
+            verify_release=lambda *_args: True,
+        ),
+    )
 
     assert runner.run(spec, "origin").value == "first"
     assert runner.run(spec, "valid").value == "first"
@@ -746,7 +817,11 @@ def test_injected_cache_cannot_substitute_a_different_validated_value(
                 return None
             return "unvalidated" if replacement == "other-value" else None
 
-    cache = SubstitutingCache(tmp_path / "released.sqlite3")
+    cache = SubstitutingCache(
+        tmp_path / "released.sqlite3",
+        record_release=lambda *_args: "origin-run",
+        verify_release=lambda *_args: True,
+    )
     provider = Mock(return_value="approved")
     runner = _runner(tmp_path, released_cache=cache)
     spec = _cacheable_spec(tmp_path, call_provider=provider)
@@ -763,7 +838,11 @@ def test_injected_cache_must_run_semantic_eviction_check(tmp_path: Path) -> None
         def get(self, identity, *, deserialize, **kwargs):
             return super().get(identity, deserialize=lambda payload: deserialize(payload))
 
-    cache = IgnoringCache(tmp_path / "released.sqlite3")
+    cache = IgnoringCache(
+        tmp_path / "released.sqlite3",
+        record_release=lambda *_args: "origin-run",
+        verify_release=lambda *_args: True,
+    )
     provider = Mock(return_value="approved")
     runner = _runner(tmp_path, released_cache=cache)
     spec = _cacheable_spec(tmp_path, call_provider=provider)
@@ -1111,7 +1190,11 @@ def test_corrupt_runner_cache_stops_before_deserialization_and_dispatch(
     tmp_path: Path, eviction_fails: bool,
 ) -> None:
     db_path = tmp_path / "cache.sqlite3"
-    cache = ReleasedResultCache(db_path)
+    cache = ReleasedResultCache(
+        db_path,
+        record_release=lambda *_args: "origin-run",
+        verify_release=lambda *_args: True,
+    )
     provider = Mock(return_value="released")
     deserialize = Mock(side_effect=lambda value: value)
     ledger = Mock(spec=CallCeilingLedger)
@@ -1215,6 +1298,7 @@ def _identity(**overrides) -> CacheIdentity:
         execution_classification="internal",
         principal="operator",
         snapshot_id="snap-1",
+        selection_identity="sha256:" + "a" * 64,
     )
     base.update(overrides)
     return CacheIdentity(**base)
@@ -1225,7 +1309,7 @@ def test_cache_identity_differs_by_every_field() -> None:
     fields = [
         "program_id", "feature", "request_hash", "context_hash", "compiler_cache_key", "prompt_version", "policy_version", "compiler_policy_version",
         "deployment_fingerprint", "tokenizer_id", "response_schema_version", "validator_version",
-        "classification", "execution_classification", "principal", "snapshot_id",
+        "classification", "execution_classification", "principal", "snapshot_id", "selection_identity",
     ]
     keys = {base.cache_key()}
     for field_name in fields:
@@ -1242,6 +1326,359 @@ def test_released_result_cache_round_trips(tmp_path: Path) -> None:
 
     cache.put(identity, "the-value", serialize=lambda v: v, released_content_hash=hashlib.sha256(b"the-value").hexdigest(), release_run_id="run-1")
     assert cache.get(identity, deserialize=lambda v: v) == "the-value"
+
+
+def test_runner_bypasses_unbound_released_cache(tmp_path: Path) -> None:
+    cache = ReleasedResultCache(tmp_path / "cache.sqlite3")
+    provider = Mock(side_effect=["first", "second"])
+    runner = _runner(tmp_path, released_cache=cache)
+    spec = _cacheable_spec(tmp_path, call_provider=provider)
+
+    assert runner.run(spec, "request").value == "first"
+    assert runner.run(spec, "request").value == "second"
+    assert provider.call_count == 2
+    assert not (tmp_path / "cache.sqlite3").exists()
+
+
+def test_runner_sweeps_revoked_retained_selection_before_reuse(tmp_path: Path) -> None:
+    db_path = tmp_path / "cache.sqlite3"
+    verifier = Mock(return_value=False)
+    cache = ReleasedResultCache(
+        db_path,
+        record_release=lambda _identity, _payload: "retained-release",
+        verify_release=verifier,
+    )
+    identity = _identity()
+    cache.put(
+        identity, "revoked", serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"revoked").hexdigest(), release_run_id="run",
+    )
+    provider = Mock(return_value="fresh")
+    runner = StructuredFeatureRunner(
+        context=_context(tmp_path),
+        frontier_eligible=True,
+        ceiling_ledger=Mock(spec=CallCeilingLedger),
+        released_cache=cache,
+        deterministic_cache=DeterministicResultCache(tmp_path / "deterministic.sqlite3"),
+    )
+    spec = _cacheable_spec(tmp_path, call_provider=provider)
+
+    outcome = runner.run(spec, "request")
+
+    assert outcome.tier == Tier.FRONTIER
+    assert outcome.value == "fresh"
+    provider.assert_called_once()
+    verifier.assert_called_once_with(
+        identity, "revoked", "retained-release",
+    )
+
+
+@pytest.mark.parametrize("field", ["principal", "snapshot_id"])
+def test_cache_refuses_malformed_principal_snapshot_selection(field: str) -> None:
+    with pytest.raises(StateError, match=field):
+        _identity(**{field: " "})
+
+
+def test_cache_refuses_changed_retained_selection_and_evicts_row(tmp_path: Path) -> None:
+    db_path = tmp_path / "cache.sqlite3"
+    cache = ReleasedResultCache(
+        db_path,
+        record_release=lambda identity, _payload: f"release:{identity.snapshot_id}",
+        verify_release=lambda identity, _payload, run_id: run_id == f"release:{identity.snapshot_id}",
+    )
+    identity = _identity(snapshot_id="snap-1")
+    cache.put(
+        identity, "value", serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"value").hexdigest(), release_run_id="run",
+    )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE released_result_cache SET selection_json = ? WHERE cache_key = ?",
+            (
+                replace(identity, snapshot_id="snap-tampered").selection_json(),
+                identity.cache_key(),
+            ),
+        )
+
+    with pytest.raises(StateError, match="selection identity"):
+        cache.get(identity, deserialize=lambda value: value)
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM released_result_cache").fetchone() == (0,)
+
+
+def test_released_cache_migrates_legacy_selection_schema(tmp_path: Path) -> None:
+    db_path = tmp_path / "cache.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "CREATE TABLE released_result_cache ("
+            "cache_key TEXT PRIMARY KEY, feature TEXT NOT NULL, principal TEXT NOT NULL, "
+            "classification TEXT NOT NULL, payload TEXT NOT NULL, "
+            "released_content_hash TEXT NOT NULL, release_run_id TEXT NOT NULL, "
+            "cached_at TEXT NOT NULL)"
+        )
+
+    cache = ReleasedResultCache(db_path)
+    assert cache.get(_identity(), deserialize=lambda value: value) is None
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(released_result_cache)")
+        }
+    assert "selection_json" in columns
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        None,
+        "[]",
+        json.dumps(
+            [
+                "acme", "f", "rh", "ch", "compiler-key", "v1", "pv1",
+                "compiler.v1", "dep1", "tok1", "1", "v1", "internal",
+                "internal", " ", "snap-1",
+            ]
+        ),
+    ],
+)
+def test_cache_refuses_malformed_selection_forms(selection: object) -> None:
+    with pytest.raises(StateError, match="selection identity"):
+        runner_module._identity_from_selection_json(selection)
+
+
+@pytest.mark.parametrize(
+    ("cached_at", "now", "message"),
+    [
+        ("2026-11-18T12:00:00+00:00", datetime(2026, 11, 18, 12), "evaluation time"),
+        (None, datetime(2026, 11, 18, 12, tzinfo=timezone.utc), "cached_at"),
+        ("not-a-time", datetime(2026, 11, 18, 12, tzinfo=timezone.utc), "cached_at"),
+    ],
+)
+def test_cache_refuses_malformed_timestamp_forms(
+    cached_at: object, now: datetime, message: str,
+) -> None:
+    with pytest.raises(StateError, match=message):
+        runner_module._released_cached_at_is_stale(cached_at, now=now)
+
+
+def test_cache_normalizes_non_utc_evaluation_clock() -> None:
+    now = datetime(2026, 11, 19, 13, 0, tzinfo=timezone(timedelta(hours=1)))
+    assert runner_module._released_cached_at_is_stale(
+        "2026-11-18T12:00:00+00:00", now=now,
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("cached_at", "expected"),
+    [
+        ("2026-11-10T12:00:00+00:00", "miss"),
+        ("2026-11-19T12:00:01+00:00", "error"),
+        ("2026-11-18T12:00:00", "error"),
+    ],
+)
+def test_cache_refuses_expired_or_invalid_retained_timestamp(
+    tmp_path: Path, cached_at: str, expected: str,
+) -> None:
+    db_path = tmp_path / "cache.sqlite3"
+    cache = ReleasedResultCache(
+        db_path,
+        record_release=lambda _identity, _payload: "release",
+        verify_release=lambda _identity, _payload, _run_id: True,
+    )
+    identity = _identity()
+    cache.put(
+        identity, "value", serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"value").hexdigest(), release_run_id="run",
+    )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE released_result_cache SET cached_at = ? WHERE cache_key = ?",
+            (cached_at, identity.cache_key()),
+        )
+
+    now = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
+    if expected == "error":
+        with pytest.raises(StateError, match="cached_at"):
+            cache.get(identity, deserialize=lambda value: value, now=now)
+    else:
+        assert cache.get(identity, deserialize=lambda value: value, now=now) is None
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM released_result_cache").fetchone() == (0,)
+
+
+def test_released_cache_sweep_revokes_stale_and_malformed_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "cache.sqlite3"
+
+    def verify(identity: CacheIdentity, _payload: str, _run_id: str) -> bool:
+        return identity.snapshot_id != "snap-revoked"
+
+    cache = ReleasedResultCache(
+        db_path,
+        record_release=lambda identity, _payload: f"release:{identity.snapshot_id}",
+        verify_release=verify,
+    )
+    identities = {
+        key: _identity(request_hash=key, snapshot_id=f"snap-{key}")
+        for key in ("good", "stale", "malformed", "revoked")
+    }
+    for key, identity in identities.items():
+        cache.put(
+            identity, key, serialize=lambda value: value,
+            released_content_hash=hashlib.sha256(key.encode("utf-8")).hexdigest(),
+            release_run_id="run",
+        )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE released_result_cache SET cached_at = ? WHERE cache_key = ?",
+            ("2026-11-10T12:00:00+00:00", identities["stale"].cache_key()),
+        )
+        connection.execute(
+            "UPDATE released_result_cache SET selection_json = '{' WHERE cache_key = ?",
+            (identities["malformed"].cache_key(),),
+        )
+
+    assert cache.sweep(now=datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)) == 3
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT cache_key FROM released_result_cache"
+        ).fetchall() == [(identities["good"].cache_key(),)]
+
+
+def test_released_cache_sweep_refuses_mismatched_hash_and_blank_origin(tmp_path: Path) -> None:
+    db_path = tmp_path / "cache.sqlite3"
+    cache = _release_bound_cache(db_path)
+    hash_identity = _identity(request_hash="hash")
+    origin_identity = _identity(request_hash="origin")
+    for key, identity in (("hash", hash_identity), ("origin", origin_identity)):
+        cache.put(
+            identity, key, serialize=lambda value: value,
+            released_content_hash=hashlib.sha256(key.encode("utf-8")).hexdigest(),
+            release_run_id="run",
+        )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE released_result_cache SET released_content_hash = ? "
+            "WHERE cache_key = ?",
+            ("invalid", hash_identity.cache_key()),
+        )
+        connection.execute(
+            "UPDATE released_result_cache SET release_run_id = ' ' "
+            "WHERE cache_key = ?",
+            (origin_identity.cache_key(),),
+        )
+
+    assert cache.sweep() == 2
+
+
+def test_released_cache_sweep_surfaces_invalid_verifier_result(tmp_path: Path) -> None:
+    cache = ReleasedResultCache(
+        tmp_path / "cache.sqlite3",
+        record_release=lambda _identity, _payload: "release",
+        verify_release=lambda _identity, _payload, _run_id: cast(bool, 1),
+    )
+    cache.put(
+        _identity(), "value", serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"value").hexdigest(), release_run_id="run",
+    )
+
+    with pytest.raises(StateError, match="verification result"):
+        cache.sweep()
+
+
+@pytest.mark.parametrize("failure", ["read", "delete"])
+def test_released_cache_sweep_surfaces_storage_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    db_path = tmp_path / "cache.sqlite3"
+    cache = _release_bound_cache(db_path)
+    identity = _identity()
+    cache.put(
+        identity, "value", serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"value").hexdigest(), release_run_id="run",
+    )
+    with sqlite3.connect(db_path) as connection:
+        if failure == "delete":
+            connection.execute(
+                "UPDATE released_result_cache SET cached_at = ?",
+                ("2026-11-10T12:00:00+00:00",),
+            )
+            connection.execute(
+                "CREATE TRIGGER reject_cache_delete BEFORE DELETE ON released_result_cache "
+                "BEGIN SELECT RAISE(ABORT, 'private-trigger'); END"
+            )
+    if failure == "read":
+        monkeypatch.setattr(
+            runner_module, "open_program_db", Mock(side_effect=sqlite3.DatabaseError("read failed")),
+        )
+
+    with pytest.raises(StateError, match="Unable to (read|evict)"):
+        cache.sweep(now=datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc))
+
+
+def test_released_cache_surfaces_stale_eviction_failure(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "cache.sqlite3"
+    cache = ReleasedResultCache(
+        db_path,
+        record_release=lambda _identity, _payload: "release",
+        verify_release=lambda _identity, _payload, _run_id: True,
+    )
+    identity = _identity()
+    cache.put(
+        identity, "value", serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"value").hexdigest(), release_run_id="run",
+    )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE released_result_cache SET cached_at = ?",
+            ("2026-11-10T12:00:00+00:00",),
+        )
+        connection.execute(
+            "CREATE TRIGGER reject_cache_delete BEFORE DELETE ON released_result_cache "
+            "BEGIN SELECT RAISE(ABORT, 'private-trigger'); END"
+        )
+
+    with pytest.raises(StateError, match="evict invalid"):
+        cache.get(
+            identity, deserialize=lambda value: value,
+            now=datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc),
+        )
+
+
+def test_released_cache_concurrent_sweeps_are_idempotent(tmp_path: Path) -> None:
+    db_path = tmp_path / "cache.sqlite3"
+    cache = ReleasedResultCache(
+        db_path,
+        record_release=lambda _identity, _payload: "release",
+        verify_release=lambda _identity, _payload, _run_id: True,
+    )
+    identities = tuple(_identity(request_hash=str(index)) for index in range(4))
+    for index, identity in enumerate(identities):
+        value = str(index)
+        cache.put(
+            identity, value, serialize=lambda item: item,
+            released_content_hash=hashlib.sha256(value.encode("utf-8")).hexdigest(),
+            release_run_id="run",
+        )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE released_result_cache SET cached_at = ?",
+            ("2026-11-10T12:00:00+00:00",),
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        removed = list(
+            executor.map(
+                lambda _: cache.sweep(
+                    now=datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc),
+                ),
+                range(4),
+            )
+        )
+
+    assert sum(removed) == len(identities)
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM released_result_cache").fetchone() == (0,)
 
 
 @pytest.mark.parametrize("missing", ["recorder", "verifier"])
@@ -2066,7 +2503,11 @@ def test_released_cache_evicts_malformed_json_with_matching_digest(tmp_path: Pat
 
 def test_malformed_json_cache_stops_runner_before_provider_or_reservation(tmp_path: Path) -> None:
     db_path = tmp_path / "cache.sqlite3"
-    cache = ReleasedResultCache(db_path)
+    cache = ReleasedResultCache(
+        db_path,
+        record_release=lambda *_args: "origin-run",
+        verify_release=lambda *_args: True,
+    )
     provider = Mock(return_value="released")
     ledger = Mock(spec=CallCeilingLedger)
     runner = StructuredFeatureRunner(
@@ -2305,13 +2746,14 @@ def test_runner_constructs_default_stores_for_none_dependencies(
     assert runner.run(deterministic, "det").value == "deterministic"
     assert runner.run(deterministic, "det").tier == Tier.CACHE
     assert runner.run(released, "frontier").value == "frontier"
-    assert runner.run(released, "frontier").tier == Tier.CACHE
+    repeated = runner.run(released, "frontier")
+    assert repeated.status == FeatureOutcomeStatus.DETERMINISTIC_FALLBACK
+    assert repeated.tier == Tier.DETERMINISTIC
     handler.assert_called_once()
     provider.assert_called_once()
-    assert all(
-        (tmp_path / f"{kind}.sqlite3").exists()
-        for kind in ("call_ceiling_ledger", "released_result_cache", "deterministic_result_cache")
-    )
+    assert (tmp_path / "call_ceiling_ledger.sqlite3").exists()
+    assert not (tmp_path / "released_result_cache.sqlite3").exists()
+    assert (tmp_path / "deterministic_result_cache.sqlite3").exists()
 
 
 @pytest.mark.parametrize("truthiness", ["false", "raises"])
@@ -2700,7 +3142,11 @@ def test_runner_rejects_decoded_none_before_new_execution(
         context=_context(tmp_path),
         frontier_eligible=True,
         ceiling_ledger=ledger,
-        released_cache=ReleasedResultCache(db_path),
+        released_cache=ReleasedResultCache(
+            db_path,
+            record_release=lambda *_args: "origin-run",
+            verify_release=lambda *_args: True,
+        ),
         deterministic_cache=DeterministicResultCache(db_path),
     )
     if cache_kind == "released":
@@ -2951,7 +3397,7 @@ def test_runner_rejects_wrong_decoded_write_type_before_release_or_storage(
     deserialize.assert_called_once_with(payload)
     assert validator.call_count == int(cache_kind == "released")
     record_release.assert_not_called()
-    verify_release.assert_not_called()
+    assert verify_release.call_count == int(cache_kind == "released" and retained)
     fallback.assert_not_called()
     decisions.assert_not_called()
     batch_builder.assert_not_called()
@@ -3046,7 +3492,7 @@ def test_runner_rejects_wrong_fresh_cache_write_type_before_serialization(
     serialize.assert_not_called()
     deserialize.assert_not_called()
     record_release.assert_not_called()
-    verify_release.assert_not_called()
+    assert verify_release.call_count == int(cache_kind == "released" and retained)
     if cache_kind == "released":
         decisions.assert_called_once()
         decision = decisions.call_args.args[0]
@@ -3200,10 +3646,11 @@ def test_runner_rejects_unexpected_provider_type_before_semantic_validation(
         tmp_path, call_provider=provider, semantic_validator=validator,
         build_context=lambda _: ContextBuildResult(compiled=_compiled()),
     )
+    released_cache = ReleasedResultCache(tmp_path / "released.sqlite3")
     runner = StructuredFeatureRunner(
         context=_context(tmp_path), frontier_eligible=True, ceiling_ledger=ledger,
         decision_sink=decisions,
-        released_cache=ReleasedResultCache(tmp_path / "released.sqlite3"),
+        released_cache=released_cache,
         deterministic_cache=DeterministicResultCache(tmp_path / "deterministic.sqlite3"),
     )
 
@@ -3242,10 +3689,17 @@ def test_unexpected_provider_type_preserves_state_error_when_decision_sink_fails
             tmp_path, call_provider=provider, semantic_validator=validator,
             build_context=lambda _: ContextBuildResult(compiled=_compiled()),
         )
+    released_cache = ReleasedResultCache(tmp_path / "released.sqlite3")
+    if cache_enabled:
+        released_cache = ReleasedResultCache(
+            tmp_path / "released.sqlite3",
+            record_release=lambda *_args: "origin-run",
+            verify_release=lambda *_args: True,
+        )
     runner = StructuredFeatureRunner(
         context=_context(tmp_path), frontier_eligible=True, ceiling_ledger=ledger,
         decision_sink=decisions,
-        released_cache=ReleasedResultCache(tmp_path / "released.sqlite3"),
+        released_cache=released_cache,
         deterministic_cache=DeterministicResultCache(tmp_path / "deterministic.sqlite3"),
     )
     initial_failures = sink_failure_count()
@@ -3320,7 +3774,7 @@ def test_runner_decision_sink_failure_is_counted_without_changing_outcome(
 
 
 @pytest.mark.parametrize("inject", [False, True])
-def test_runner_notifies_only_its_injected_decision_sink(tmp_path: Path, inject: bool) -> None:
+def test_runner_notifies_injected_or_invocation_decision_sink(tmp_path: Path, inject: bool) -> None:
     sink = Mock()
     runner = _runner(tmp_path, decision_sink=sink if inject else None)
     spec = _spec(
@@ -3332,7 +3786,7 @@ def test_runner_notifies_only_its_injected_decision_sink(tmp_path: Path, inject:
     finally:
         unregister_decision_sink(sink)
 
-    assert sink.call_count == int(inject)
+    assert sink.call_count == 1
 
 
 @pytest.mark.parametrize("after_write", [False, True])
@@ -3561,7 +4015,7 @@ def test_runner_rejects_unreadable_cache_write_before_release_or_storage(
     serialize.assert_called_once_with("value")
     deserialize.assert_called_once_with(payload)
     record_release.assert_not_called()
-    verify_release.assert_not_called()
+    assert verify_release.call_count == int(cache_kind == "released" and retained)
     fallback.assert_not_called()
     decisions.assert_not_called()
     batch_builder.assert_not_called()
@@ -3757,7 +4211,11 @@ def test_released_cache_refusal_does_not_undo_prior_handler_execution(
     )
     runner = StructuredFeatureRunner(
         context=_context(tmp_path), frontier_eligible=True, ceiling_ledger=ledger,
-        released_cache=ReleasedResultCache(db_path),
+        released_cache=ReleasedResultCache(
+            db_path,
+            record_release=lambda *_args: "origin-run",
+            verify_release=lambda *_args: True,
+        ),
         deterministic_cache=DeterministicResultCache(db_path),
     )
     runner.run(spec, "request")
@@ -3799,7 +4257,11 @@ def test_runner_reuses_non_none_falsey_cache_values(
         context=_context(tmp_path),
         frontier_eligible=True,
         ceiling_ledger=ledger,
-        released_cache=ReleasedResultCache(db_path),
+        released_cache=ReleasedResultCache(
+            db_path,
+            record_release=lambda *_args: "origin-run",
+            verify_release=lambda *_args: True,
+        ),
         deterministic_cache=DeterministicResultCache(db_path),
     )
     if cache_kind == "released":

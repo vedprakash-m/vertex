@@ -22,6 +22,8 @@ from src.core.actuation_outbox import outbox_db_path
 from src.core.ai_telemetry import read_ai_telemetry
 from src.core.cockpit_models import (
     COCKPIT_SCHEMA_VERSION,
+    CockpitExceptionClass,
+    CockpitExceptionView,
     CockpitFinding,
     CockpitSnapshot,
     EconomicsCockpitSummary,
@@ -39,7 +41,7 @@ from src.core.cockpit_models import (
 )
 from src.core.context_proposal_review import load_context_maintenance_review
 from src.core.edition_resolver import PROGRAMS_ROOT
-from src.core.exceptions import ConfigError
+from src.core.exceptions import ConfigError, StateError
 from src.core.fact_lineage_coverage import compute_lineage_coverage
 from src.core.fact_sor_state import resolve_family_sor_mode
 from src.core.maturity_engine import load_earned_autonomy_state
@@ -55,6 +57,7 @@ from src.core.measurement_store import (
 )
 from src.core.proposal_autonomy_ladder import PROPOSAL_CLASSES, resolve_ceiling
 from src.core.risk_register_engine import HIGH_RISK_SCORE_THRESHOLD, compute_risk_score, load_risk_register
+from src.core.risk_dedupe import detect_risk_duplicates
 from src.core.run_telemetry import read_run_telemetry
 from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN
 from src.core.workspace_paths import is_bare_identifier
@@ -69,6 +72,16 @@ _AUTONOMY_LEVEL_PERMITTED_ACTION = {
 }
 
 _ACTIVE_RISK_STATUS_VALUES = frozenset({"open", "escalated"})
+_FRESH_EXCEPTION_REVALIDATION_EFFECT = (
+    "Rechecks the current finding before any operator action. "
+    "The cockpit view itself performs no mutation or dispatch."
+)
+_RETAINED_EXCEPTION_REVALIDATION_EFFECT = (
+    "Verifies that the retained finding matches the recorded snapshot input hash. "
+    "It does not evaluate current state or perform mutation or dispatch."
+)
+_SAFE_CLI_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+_SAFE_HASH = re.compile(r"^[0-9a-f]{64}$")
 
 
 def build_cockpit_snapshot(
@@ -325,6 +338,74 @@ def _build_economics_summary(
 def _build_program_summary(
     program_id: str, *, programs_root: Path, observed_at: datetime
 ) -> tuple[ProgramCockpitSummary, list[CockpitFinding]]:
+    from src.core.program_verdict import load_latest_program_verdict
+
+    try:
+        verdict = load_latest_program_verdict(program_id, programs_root=programs_root)
+    except (ConfigError, OSError, UnicodeError):
+        return ProgramCockpitSummary(
+            overall_risk="unknown",
+            readiness_percent=None,
+            blocker_count=None,
+            top_three_candidates=(),
+            next_action=None,
+        ), [
+            CockpitFinding(
+                finding_id="program.verdict.read_failed",
+                area="program",
+                status="blocked",
+                summary="Snapshot-bound program verdict is unavailable.",
+                detail=(
+                    "The latest retained verdict manifest is invalid or unreadable. "
+                    "Do not substitute a live risk recomputation for that snapshot."
+                ),
+                owner=None,
+                next_command=f"vertex report --edition <edition> --dry-run",
+                evidence_refs=(),
+                observed_at=observed_at,
+            )
+        ]
+    if verdict is not None:
+        risk_map = {
+            "blocked": "red",
+            "high": "red",
+            "medium": "yellow",
+            "low": "green",
+            "done": "green",
+            "unknown": "unknown",
+        }
+        overall_risk = risk_map[verdict.health.value]
+        finding_status = (
+            "warn"
+            if verdict.health.value in {"blocked", "high", "medium"}
+            else "info"
+        )
+        return ProgramCockpitSummary(
+            overall_risk=overall_risk,
+            readiness_percent=None,
+            blocker_count=None,
+            top_three_candidates=(),
+            next_action="Review the latest snapshot-bound program verdict.",
+        ), [
+            CockpitFinding(
+                finding_id="program.verdict.snapshot_bound",
+                area="program",
+                status=finding_status,
+                summary="Program summary uses the latest snapshot-bound verdict.",
+                detail=(
+                    f"Verdict snapshot {verdict.snapshot_id} is selected for this cockpit projection; "
+                    f"schedule risk is {verdict.schedule_risk.value}, {len(verdict.reason_codes)} adverse "
+                    f"reason(s) and {len(verdict.evidence_gap_codes)} evidence gap(s) remain explicit. "
+                    f"This observe mode confidence is {verdict.confidence.value}; this is not operational "
+                    "authority or live-current-state qualification."
+                ),
+                owner=None,
+                next_command=f"vertex report --edition <edition> --dry-run",
+                evidence_refs=(verdict.snapshot_id, *verdict.source_refs),
+                observed_at=observed_at,
+            )
+        ]
+
     findings: list[CockpitFinding] = []
     try:
         if resolve_family_sor_mode(
@@ -371,6 +452,28 @@ def _build_program_summary(
         ), findings
 
     active_risks = [risk for risk in risks if getattr(risk.status, "value", risk.status).lower() in _ACTIVE_RISK_STATUS_VALUES]
+    active_risk_ids = {str(risk.id) for risk in active_risks}
+    ambiguous_lifecycle_findings = tuple(
+        finding
+        for finding in detect_risk_duplicates(tuple(risks))
+        if (
+            finding.kind in {"supersede_dangling", "supersede_cycle", "supersede_fork"}
+            and bool(active_risk_ids.intersection(finding.risk_ids))
+        )
+        or (
+            finding.kind == "duplicate"
+            and len(active_risk_ids.intersection(finding.risk_ids)) > 1
+            and any(
+                risk.id in active_risk_ids
+                and risk.dedupe_key == finding.dedupe_key
+                for risk in risks
+            )
+        )
+        or (
+            finding.kind == "supersede_merge"
+            and len(active_risk_ids.intersection(finding.risk_ids)) > 1
+        )
+    )
     high_risk_ids: list[str] = []
     failed_risk_ids: list[str] = []
     for risk in active_risks:
@@ -383,24 +486,49 @@ def _build_program_summary(
             high_risk_ids.append(str(risk.id))
     high_risk_count = len(high_risk_ids)
 
-    if failed_risk_ids:
-        overall_risk = "unknown"
+    if ambiguous_lifecycle_findings:
+        ambiguous_ids = tuple(sorted({
+            risk_id
+            for finding in ambiguous_lifecycle_findings
+            for risk_id in finding.risk_ids
+            if risk_id in active_risk_ids
+        }))
         findings.append(
             CockpitFinding(
-                finding_id="program.risk.score_failed",
+                finding_id="program.risk.lifecycle_ambiguous",
                 area="program",
                 status="blocked",
-                summary=f"{len(failed_risk_ids)} active risk(s) could not be scored; program risk is unknown.",
+                summary="Active risk lifecycle is ambiguous; program risk is unknown.",
                 detail=(
-                    "The total high-risk count is unavailable. Successfully scored high risks "
-                    "remain visible separately; review the referenced entries before relying on the summary."
+                    "Duplicate or conflicting lifecycle references prevent a trustworthy active-risk aggregate. "
+                    "Review the referenced risks and reconcile their lifecycle before relying on the summary."
                 ),
                 owner=None,
                 next_command=f"vertex risks list --program {program_id}",
-                evidence_refs=tuple(failed_risk_ids),
+                evidence_refs=ambiguous_ids,
                 observed_at=observed_at,
             )
         )
+
+    if failed_risk_ids or ambiguous_lifecycle_findings:
+        overall_risk = "unknown"
+        if failed_risk_ids:
+            findings.append(
+                CockpitFinding(
+                    finding_id="program.risk.score_failed",
+                    area="program",
+                    status="blocked",
+                    summary=f"{len(failed_risk_ids)} active risk(s) could not be scored; program risk is unknown.",
+                    detail=(
+                        "The total high-risk count is unavailable. Successfully scored high risks "
+                        "remain visible separately; review the referenced entries before relying on the summary."
+                    ),
+                    owner=None,
+                    next_command=f"vertex risks list --program {program_id}",
+                    evidence_refs=tuple(failed_risk_ids),
+                    observed_at=observed_at,
+                )
+            )
     elif high_risk_count > 0:
         overall_risk = "red"
     elif active_risks:
@@ -430,7 +558,7 @@ def _build_program_summary(
     summary = ProgramCockpitSummary(
         overall_risk=overall_risk,
         readiness_percent=None,
-        blocker_count=None if failed_risk_ids else high_risk_count,
+        blocker_count=None if failed_risk_ids or ambiguous_lifecycle_findings else high_risk_count,
         top_three_candidates=(),
         next_action=None,
     )
@@ -444,17 +572,38 @@ def _build_completeness_findings(
 
     try:
         effective = build_program_effective_completeness(program_id, programs_root=programs_root)
-    except Exception:  # cockpit stays renderable; doctor surfaces the underlying failure
+    except (ConfigError, KeyError, OSError, StateError, TypeError, ValueError, sqlite3.DatabaseError):
+        return [
+            CockpitFinding(
+                finding_id="source.completeness.unavailable",
+                area="source",
+                status="warn",
+                summary="Completeness projection is unavailable.",
+                detail=(
+                    "The latest source-completeness projection could not be evaluated. "
+                    "Do not interpret absence of this projection as complete coverage."
+                ),
+                owner=None,
+                next_command=f"vertex doctor --rev-health --program {program_id}",
+                evidence_refs=("completeness_projection_unavailable",),
+                observed_at=observed_at,
+            )
+        ]
+    if effective is None or (effective.value is not None and not effective.reasons):
         return []
-    if effective is None or not effective.downgraded:
-        return []
+    if effective.value is None:
+        display_value = "unavailable" if effective.base is None else "unknown"
+        summary = f"Completeness is {display_value}: latest-run evidence is not complete."
+    else:
+        display_value = f"{effective.value:.0%}"
+        summary = f"Completeness remains {display_value}; source limitations are explicit."
     return [
         CockpitFinding(
             finding_id="source.completeness.downgraded",
             area="source",
             status="warn",
-            summary="Completeness is unknown: a source in the latest run was partial, truncated, failed or quarantined.",
-            detail=f"Reported completeness {effective.base:.0%} downgraded to unknown; reasons: {', '.join(effective.reasons)}.",
+            summary=summary,
+            detail=f"Effective completeness is {display_value}; reasons: {', '.join(effective.reasons)}.",
             owner=None,
             next_command=f"vertex doctor --rev-health --program {program_id}",
             evidence_refs=effective.reasons,
@@ -990,4 +1139,112 @@ def _pick_next_action(findings: list[CockpitFinding]) -> str | None:
     return None
 
 
-__all__ = ["build_cockpit_snapshot"]
+def _exception_class_for_finding(finding: CockpitFinding) -> CockpitExceptionClass:
+    token = f"{finding.area}.{finding.finding_id}".lower()
+    if "approval" in token or ("proposal" in token and "expir" in token):
+        return CockpitExceptionClass.APPROVAL_EXPIRY
+    if "intent" in token or "uncertain" in token:
+        return CockpitExceptionClass.UNCERTAIN_INTENT
+    if "binding" in token or "lineage" in token:
+        return CockpitExceptionClass.BINDING_AMBIGUITY
+    if "knowledge" in token or "correction" in token or "context_gap" in token or "context_proposal" in token:
+        return CockpitExceptionClass.KNOWLEDGE_CORRECTION
+    if "draft" in token or finding.area == "program":
+        return CockpitExceptionClass.BLOCKED_DRAFT
+    if finding.area == "source" or "source" in token:
+        return CockpitExceptionClass.SOURCE_GAP
+    if finding.area in {"intelligence", "trust"}:
+        return (
+            CockpitExceptionClass.BINDING_AMBIGUITY
+            if finding.area == "intelligence"
+            else CockpitExceptionClass.KNOWLEDGE_CORRECTION
+        )
+    return CockpitExceptionClass.RUNTIME_INCIDENT
+
+
+def _revalidation_command(
+    snapshot: CockpitSnapshot, finding: CockpitFinding, *, retained: bool
+) -> str | None:
+    if (
+        not is_bare_identifier(snapshot.program_id)
+        or _SAFE_CLI_TOKEN.fullmatch(snapshot.program_id) is None
+        or _SAFE_CLI_TOKEN.fullmatch(finding.finding_id) is None
+        or (
+            snapshot.edition_id is not None
+            and _SAFE_CLI_TOKEN.fullmatch(snapshot.edition_id) is None
+        )
+    ):
+        return None
+    edition = (
+        f" --edition {snapshot.edition_id}"
+        if snapshot.edition_id is not None
+        else ""
+    )
+    command = (
+        f"vertex cockpit explain --program {snapshot.program_id}{edition} "
+        f"--finding {finding.finding_id}"
+    )
+    if not retained:
+        return command
+    if _SAFE_HASH.fullmatch(snapshot.input_hash) is None:
+        return None
+    return (
+        f"vertex cockpit explain --program {snapshot.program_id}{edition} "
+        f"--as-of {snapshot.generated_at.isoformat()} "
+        f"--finding {finding.finding_id} --expect-input-hash {snapshot.input_hash}"
+    )
+
+
+def build_cockpit_exception_views(
+    snapshot: CockpitSnapshot, *, retained: bool = False
+) -> tuple[CockpitExceptionView, ...]:
+    views: list[CockpitExceptionView] = []
+    for finding in select_cockpit_exceptions(snapshot.findings):
+        revalidation_command = _revalidation_command(snapshot, finding, retained=retained)
+        safe_options: tuple[str, ...] = (
+            (
+                "Verify the selected retained snapshot with the read-only revalidation command.",
+                "Do not execute historical guidance until current CLI/TUI checks approve its payload, "
+                "authority, target, revision, audience and policy state.",
+            )
+            if retained
+            else (
+                "Re-run the read-only finding explanation against current inputs.",
+                "Do not execute a recorded next command until the owning CLI/TUI revalidates payload, "
+                "authority, target, revision, audience and policy state.",
+            )
+        )
+        if revalidation_command is None:
+            safe_options = (
+                "A safe revalidation command is not available because the selected identifiers are not "
+                "valid copyable CLI tokens.",
+            )
+        views.append(CockpitExceptionView(
+            exception_class=_exception_class_for_finding(finding),
+            finding_id=finding.finding_id,
+            area=finding.area,
+            status=finding.status,
+            what_failed=finding.summary,
+            consequence=finding.detail,
+            owner=finding.owner,
+            evidence_refs=finding.evidence_refs,
+            snapshot_generated_at=snapshot.generated_at,
+            snapshot_input_hash=snapshot.input_hash,
+            confidence=None,
+            safe_options=safe_options,
+            expected_effect=(
+                _RETAINED_EXCEPTION_REVALIDATION_EFFECT
+                if retained
+                else _FRESH_EXCEPTION_REVALIDATION_EFFECT
+            ),
+            diff_preview=None,
+            next_command=finding.next_command,
+            authority_required=None,
+            expiry_or_escalation=None,
+            revalidation_command=revalidation_command,
+            observed_at=finding.observed_at,
+        ))
+    return tuple(views)
+
+
+__all__ = ["build_cockpit_exception_views", "build_cockpit_snapshot"]

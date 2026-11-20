@@ -51,6 +51,41 @@ def test_representative_invalid_payloads_fail(event_type: str, payload: dict[str
         validate_event_payload(event_type, payload)
 
 
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        ("operator.correction.v1", None),
+        (
+            "operator.correction.v1",
+            {"corrects_event_id": "01EVENT", "corrected_payload": "invalid", "reason": "edited"},
+        ),
+        (
+            "discovery.candidate_approved.v1",
+            {
+                "candidate_id": "cand-1",
+                "resulting_event_id": "evt-result",
+                "triage_actor": "operator",
+                "edited": "yes",
+            },
+        ),
+        (
+            "program.charter_revised.v1",
+            {
+                "charter_id": "charter-1",
+                "revision_summary": "updated",
+                "changed_fields": [],
+                "prior_charter_event_id": "01EVENT",
+            },
+        ),
+    ],
+)
+def test_payload_validation_rejects_invalid_top_level_and_field_shapes(
+    event_type: str, payload: dict[str, object] | None
+) -> None:
+    with pytest.raises(ValueError):
+        get_event_schema(event_type).validate(payload)  # type: ignore[arg-type]
+
+
 def test_unknown_event_type_is_rejected() -> None:
     with pytest.raises(ValueError):
         get_event_schema("unknown.event.v1")

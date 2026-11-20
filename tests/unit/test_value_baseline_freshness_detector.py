@@ -176,7 +176,13 @@ class TestIncomparableMetric:
 
 
 class TestIncomparableCertification:
-    def _cert(self, *, manual: int, vertex: int) -> TimeSavingsCertification:
+    def _cert(
+        self,
+        *,
+        manual: int,
+        vertex: int,
+        confidence_interval_low: float | None = 0.81,
+    ) -> TimeSavingsCertification:
         return TimeSavingsCertification(
             schema_version="1",
             program_id="test-prog",
@@ -187,7 +193,7 @@ class TestIncomparableCertification:
             manual_median_active_seconds=600.0,
             vertex_median_active_seconds=120.0,
             savings_ratio=0.80,
-            confidence_interval_low=0.75,
+            confidence_interval_low=confidence_interval_low,
         )
 
     def test_cert_below_min_pairs_is_incomparable(self) -> None:
@@ -218,6 +224,29 @@ class TestIncomparableCertification:
         ).is_degraded
         assert not detect_value_baseline_freshness(
             _summary(cert=cert), observed_at=_NOW, min_matched_pairs=3
+        ).is_degraded
+
+    @pytest.mark.parametrize("confidence_interval_low", [None, 0.75, 0.80])
+    def test_cert_without_strictly_positive_confidence_margin_is_incomparable(
+        self, confidence_interval_low: float | None
+    ) -> None:
+        cert = self._cert(
+            manual=8, vertex=8, confidence_interval_low=confidence_interval_low
+        )
+
+        finding = detect_value_baseline_freshness(_summary(cert=cert), observed_at=_NOW)
+
+        assert finding.is_degraded
+        assert finding.reason == "incomparable"
+        assert "95% confidence lower bound" in finding.detail
+
+    def test_cert_confidence_lower_bound_strictly_above_floor_is_comparable(self) -> None:
+        cert = self._cert(
+            manual=8, vertex=8, confidence_interval_low=0.8000001
+        )
+
+        assert not detect_value_baseline_freshness(
+            _summary(cert=cert), observed_at=_NOW
         ).is_degraded
 
 

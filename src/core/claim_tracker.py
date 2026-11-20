@@ -10,10 +10,14 @@ import re
 from time import monotonic
 from typing import Any, Literal, cast
 from uuid import NAMESPACE_URL, uuid5
-
 import portalocker
 
 from src.core.claim_extraction_calibration_store import ClaimExtractionCalibrationRecord, append_claim_extraction_calibration_record
+from src.core.claim_evidence_map import (
+    ClaimEvidenceLink,
+    FindingKind,
+    evaluate_truth_consistency,
+)
 from src.core.jsonl_utils import (
     compute_file_checksum,
     jsonl_checksum_matches,
@@ -539,6 +543,31 @@ def record_confirmed_claims(
     existing_claims = load_open_claims(program_id, programs_root)
     existing_asks = load_open_decision_asks(program_id, programs_root)
     warnings = list(extracted.warnings)
+    evidence_result = evaluate_truth_consistency(
+        (
+            ClaimEvidenceLink(
+                claim_id=claim.id,
+                claim_text=claim.text,
+                evidence_refs=claim.entity_refs,
+            )
+            for claim in extracted.claims
+        ),
+        tuple(f"WI:{item.id}" for item in items),
+    )
+    if evidence_result.findings:
+        unsupported = sum(
+            finding.kind is FindingKind.UNSUPPORTED_CLAIM
+            for finding in evidence_result.findings
+        )
+        dangling = sum(
+            finding.kind is FindingKind.DANGLING_EVIDENCE_REF
+            for finding in evidence_result.findings
+        )
+        warnings.append(
+            "Claim evidence consistency (observe-only): "
+            f"{unsupported} unsupported claim(s), "
+            f"{dangling} dangling evidence reference(s)."
+        )
     written_claims: list[ClaimEntry] = []
     written_asks: list[DecisionAsk] = []
     skipped_claims = 0

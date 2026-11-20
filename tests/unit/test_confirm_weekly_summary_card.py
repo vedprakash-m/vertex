@@ -121,17 +121,10 @@ def test_post_card_success(monkeypatch) -> None:
     assert sent == [{"payload": True}]
 
 
-def test_build_teams_sender_posts_card(monkeypatch) -> None:
-    posted: list[dict] = []
+def test_build_teams_sender_fails_closed_at_outbox_boundary(monkeypatch) -> None:
+    from src.core.exceptions import StateError
 
-    class _FakeClient:
-        def __init__(self, *, webhook_url):
-            self.webhook_url = webhook_url
-
-        def post_card(self, payload):
-            posted.append(payload)
-
-    monkeypatch.setattr(weekly_summary_card, "TeamsWebhookClient", _FakeClient)
+    monkeypatch.delenv("VERTEX_ALLOW_DIRECT_ACTUATION", raising=False)
     sender = build_confirm_weekly_summary_teams_sender("https://hook")
-    sender({"a": 1})
-    assert posted == [{"a": 1}]
+    with pytest.raises(StateError, match="outbox"):
+        sender({"a": 1})

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,13 +11,18 @@ import pytest
 from src.core.ado_hydration import ADOHydrationConfig, ADOHydrationProvider
 from src.core.ado_hydration_checkpoints import (
     CheckpointAdvance,
+    HydrationCheckpoint,
     HydrationSubresource,
     advance_checkpoint,
+    commit_checkpoint_advances,
     ensure_checkpoint_table,
+    plan_checkpoint_reseeds,
     read_checkpoints,
+    read_hydration_evidence,
 )
 from src.core.channel_registry_store import ChannelRegistryStore
-from src.core.integration_types import HydrationMode
+from src.core.exceptions import ConfigError
+from src.core.integration_types import ChannelConfig, HydrationMode
 from tests.unit.test_ado_hydration import _FakeADOClient, _registration
 
 _AT = datetime(2026, 5, 25, tzinfo=timezone.utc)
@@ -33,7 +39,7 @@ def _conn() -> sqlite3.Connection:
 
 
 def test_missing_row_reads_unknown() -> None:
-    checkpoints = read_checkpoints(_conn(), (42,))
+    checkpoints = read_checkpoints(_conn(), "default", (42,))
     checkpoint = checkpoints[(42, HydrationSubresource.REVISIONS)]
     assert checkpoint.state == "unknown"
     assert checkpoint.cursor is None
@@ -43,38 +49,108 @@ def test_missing_row_reads_unknown() -> None:
 def test_advance_is_visible_only_after_commit_and_rolls_back_with_transaction() -> None:
     conn = _conn()
     conn.execute("BEGIN")
-    advance_checkpoint(conn, CheckpointAdvance(42, HydrationSubresource.COMMENTS, "3"), at=_AT)
+    advance_checkpoint(
+        conn,
+        CheckpointAdvance(42, HydrationSubresource.COMMENTS, "3"),
+        provider_instance_id="default",
+        at=_AT,
+    )
     conn.rollback()
-    assert read_checkpoints(conn, (42,))[(42, HydrationSubresource.COMMENTS)].state == "unknown"
+    assert read_checkpoints(conn, "default", (42,))[
+        (42, HydrationSubresource.COMMENTS)
+    ].state == "unknown"
 
     conn.execute("BEGIN")
-    advance_checkpoint(conn, CheckpointAdvance(42, HydrationSubresource.COMMENTS, "3"), at=_AT)
+    advance_checkpoint(
+        conn,
+        CheckpointAdvance(42, HydrationSubresource.COMMENTS, "3"),
+        provider_instance_id="default",
+        at=_AT,
+    )
     conn.commit()
-    checkpoint = read_checkpoints(conn, (42,))[(42, HydrationSubresource.COMMENTS)]
-    assert (checkpoint.state, checkpoint.cursor, checkpoint.schema_version) == ("current", "3", 1)
+    checkpoint = read_checkpoints(conn, "default", (42,))[
+        (42, HydrationSubresource.COMMENTS)
+    ]
+    assert (checkpoint.state, checkpoint.cursor, checkpoint.schema_version) == ("current", "3", 2)
 
 
 def test_advance_outside_transaction_is_rejected() -> None:
     with pytest.raises(RuntimeError):
-        advance_checkpoint(_conn(), CheckpointAdvance(42, HydrationSubresource.REVISIONS, "2"), at=_AT)
+        advance_checkpoint(
+            _conn(),
+            CheckpointAdvance(42, HydrationSubresource.REVISIONS, "2"),
+            provider_instance_id="default",
+            at=_AT,
+        )
 
 
 def test_unknown_subresource_is_rejected_by_schema() -> None:
     conn = _conn()
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
-            "INSERT INTO ado_hydration_checkpoints(work_item_id, subresource, schema_version, cursor, updated_at)"
-            " VALUES (1, 'attachment_content', 1, 'x', 'now')"
+            "INSERT INTO ado_hydration_checkpoints"
+            "(provider_instance_id, work_item_id, subresource, schema_version, cursor, updated_at)"
+            " VALUES ('default', 1, 'attachment_content', 2, 'x', 'now')"
         )
 
 
 def test_older_schema_version_row_reads_unknown() -> None:
     conn = _conn()
     conn.execute(
-        "INSERT INTO ado_hydration_checkpoints(work_item_id, subresource, schema_version, cursor, updated_at)"
-        " VALUES (42, 'revisions', 0, '9', 'now')"
+        "INSERT INTO ado_hydration_checkpoints"
+        "(provider_instance_id, work_item_id, subresource, schema_version, cursor, updated_at)"
+        " VALUES ('default', 42, 'revisions', 1, '9', 'now')"
     )
-    assert read_checkpoints(conn, (42,))[(42, HydrationSubresource.REVISIONS)].state == "unknown"
+    assert read_checkpoints(conn, "default", (42,))[
+        (42, HydrationSubresource.REVISIONS)
+    ].state == "unknown"
+
+
+def test_provider_instance_checkpoint_keys_are_isolated() -> None:
+    conn = _conn()
+    conn.execute("BEGIN")
+    advance_checkpoint(
+        conn,
+        CheckpointAdvance(42, HydrationSubresource.REVISIONS, "2"),
+        provider_instance_id="org-a",
+        at=_AT,
+    )
+    conn.commit()
+
+    org_a = read_checkpoints(conn, "org-a", (42,))
+    org_b = read_checkpoints(conn, "org-b", (42,))
+
+    assert org_a[(42, HydrationSubresource.REVISIONS)].state == "current"
+    assert org_b[(42, HydrationSubresource.REVISIONS)].state == "unknown"
+
+
+def test_legacy_checkpoint_table_is_preserved_but_never_reused() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE ado_hydration_checkpoints (
+            work_item_id INTEGER NOT NULL,
+            subresource TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            cursor TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (work_item_id, subresource)
+        );
+        INSERT INTO ado_hydration_checkpoints
+            (work_item_id, subresource, schema_version, cursor, updated_at)
+            VALUES (42, 'revisions', 1, 'legacy', '2026-05-25T00:00:00+00:00');
+        """
+    )
+
+    ensure_checkpoint_table(conn)
+
+    assert read_checkpoints(conn, "default", (42,))[
+        (42, HydrationSubresource.REVISIONS)
+    ].state == "unknown"
+    assert conn.execute(
+        "SELECT cursor FROM ado_hydration_checkpoints_legacy_v1"
+    ).fetchone()["cursor"] == "legacy"
 
 
 def _seeded_store(tmp_path: Path) -> ChannelRegistryStore:
@@ -96,7 +172,7 @@ def test_store_mark_verified_commits_checkpoints_atomically(tmp_path: Path) -> N
         _AT,
         checkpoint_advances=(CheckpointAdvance(42, HydrationSubresource.REVISIONS, "2"),),
     )
-    checkpoints = store.read_hydration_checkpoints((42,))
+    checkpoints = store.read_hydration_checkpoints("default", (42,))
     assert checkpoints[(42, HydrationSubresource.REVISIONS)].cursor == "2"
     assert checkpoints[(42, HydrationSubresource.COMMENTS)].state == "unknown"
 
@@ -111,7 +187,63 @@ def test_store_failed_evidence_commit_leaves_checkpoint_unknown(tmp_path: Path) 
             _AT,
             checkpoint_advances=(CheckpointAdvance(42, HydrationSubresource.REVISIONS, "2"), bad),
         )
-    assert store.read_hydration_checkpoints((42,))[(42, HydrationSubresource.REVISIONS)].state == "unknown"
+    assert store.read_hydration_checkpoints("default", (42,))[
+        (42, HydrationSubresource.REVISIONS)
+    ].state == "unknown"
+    assert store.pullable_registrations("ado")[0].last_verified_at is None
+
+
+def test_store_rejects_checkpoint_provider_mismatch_before_mutation(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+    advance = CheckpointAdvance(
+        42, HydrationSubresource.REVISIONS, "2", provider_instance_id="org-a"
+    )
+
+    with pytest.raises(ValueError, match="one provider instance"):
+        store.mark_verified(
+            "ado",
+            (("42", "work_item"),),
+            _AT,
+            provider_instance_id="default",
+            checkpoint_advances=(advance,),
+        )
+
+    assert store.pullable_registrations("ado")[0].last_verified_at is None
+
+
+@pytest.mark.parametrize(
+    ("channel", "verified_refs"),
+    [
+        ("ado", ()),
+        ("ado", (("42", "work_item"),)),
+        ("kusto", (("99", "work_item"),)),
+    ],
+)
+def test_store_rejects_checkpoint_advance_outside_verified_refs(
+    tmp_path: Path,
+    channel: str,
+    verified_refs: tuple[tuple[str, str], ...],
+) -> None:
+    store = _seeded_store(tmp_path)
+
+    with pytest.raises(ValueError, match="verified work-item evidence"):
+        store.mark_verified(
+            channel,
+            verified_refs,
+            _AT,
+            checkpoint_advances=(
+                CheckpointAdvance(
+                    99,
+                    HydrationSubresource.REVISIONS,
+                    "2",
+                ),
+            ),
+        )
+
+    checkpoint = store.read_hydration_checkpoints("default", (99,))[
+        (99, HydrationSubresource.REVISIONS)
+    ]
+    assert checkpoint.state == "unknown"
     assert store.pullable_registrations("ado")[0].last_verified_at is None
 
 
@@ -142,14 +274,18 @@ class _RelationsClient(_FakeADOClient):
 
 
 def _provider(client: Any, checkpoints: dict[tuple[int, HydrationSubresource], Any] | None) -> ADOHydrationProvider:
-    reader = None if checkpoints is None else (lambda ids: {key: value for key, value in checkpoints.items() if key[0] in ids})
+    reader = None if checkpoints is None else (
+        lambda provider_instance_id, ids: {
+            key: value for key, value in checkpoints.items() if key[0] in ids
+        }
+    )
     return ADOHydrationProvider(client, checkpoint_reader=reader)
 
 
 def _current(wid: int, sub: HydrationSubresource, cursor: str) -> Any:
     from src.core.ado_hydration_checkpoints import HydrationCheckpoint
 
-    return HydrationCheckpoint(wid, sub, "current", 1, cursor)
+    return HydrationCheckpoint(wid, sub, "current", 2, cursor)
 
 
 def test_unknown_checkpoint_forces_full_detail_rehydration_of_verified_item() -> None:
@@ -162,6 +298,24 @@ def test_unknown_checkpoint_forces_full_detail_rehydration_of_verified_item() ->
     advances = {(a.work_item_id, a.subresource): a.cursor for a in result.resources.checkpoint_advances}
     assert advances[(42, HydrationSubresource.REVISIONS)] == "2"
     assert advances[(42, HydrationSubresource.COMMENTS)] == "1"
+
+
+def test_hydration_reads_and_advances_the_registration_provider_scope() -> None:
+    reads: list[tuple[str, tuple[int, ...]]] = []
+    provider = ADOHydrationProvider(
+        _FakeADOClient(),
+        checkpoint_reader=lambda provider_id, ids: reads.append((provider_id, ids)) or {},
+    )
+    reg = replace(_registration("42", last_verified_at=_VERIFIED), provider_instance_id="org-a")
+
+    result = provider.hydrate(
+        (reg,), _SINCE, "demo", ADOHydrationConfig(), mode=HydrationMode.FULL
+    )
+
+    assert reads == [("org-a", (42,))]
+    assert {advance.provider_instance_id for advance in result.resources.checkpoint_advances} == {
+        "org-a"
+    }
 
 
 def test_current_checkpoint_keeps_incremental_skip_for_unchanged_item() -> None:
@@ -177,7 +331,10 @@ def test_current_checkpoint_keeps_incremental_skip_for_unchanged_item() -> None:
     result = provider.hydrate((reg,), _SINCE, "demo", ADOHydrationConfig(), mode=HydrationMode.FULL)
     assert client.revision_calls == []
     assert result.hydrated_ref_ids == (("42", "work_item"),)
-    assert result.resources.checkpoint_advances == ()
+    assert {
+        advance.subresource
+        for advance in result.resources.checkpoint_advances
+    } == {HydrationSubresource.ITEM}
 
 
 def test_relations_and_attachment_metadata_checkpoints_without_download() -> None:
@@ -198,4 +355,11 @@ def test_failed_detail_does_not_propose_history_checkpoints() -> None:
         (_registration("42"),), _SINCE, "demo", ADOHydrationConfig(), mode=HydrationMode.FULL
     )
     assert result.failed_ref_ids == (("42", "work_item"),)
-    assert result.resources.checkpoint_advances == ()
+    assert {
+        (advance.work_item_id, advance.subresource)
+        for advance in result.resources.checkpoint_advances
+    } == {
+        (42, HydrationSubresource.ITEM),
+        (42, HydrationSubresource.REVISIONS),
+    }
+    assert result.resources.checkpoint_evidence_ref_ids == (("42", "work_item"),)

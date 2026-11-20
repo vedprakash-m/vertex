@@ -4,7 +4,16 @@ from datetime import date, datetime, timezone
 
 from src.core.attribution_engine import build_delta_link, build_inline_citations, build_reviewer_citations
 from src.core.attribution_engine import build_section_citations
-from src.core.models import AttributionTier, Comment, Confidence, EvidencePacket, RiskLevel, WorkItem
+from src.core.lineage import _latest_evidence_timestamp as latest_lineage_timestamp
+from src.core.models import (
+    AttributionTier,
+    Comment,
+    Confidence,
+    Enrichment,
+    EvidencePacket,
+    RiskLevel,
+    WorkItem,
+)
 
 
 def _item(work_item_id: int, title: str) -> WorkItem:
@@ -64,3 +73,33 @@ def test_attribution_engine_orders_citations_by_latest_evidence() -> None:
     assert section_citations[0].tier == AttributionTier.TIER2
     assert reviewer_citations[0].tier == AttributionTier.TIER3
     assert build_delta_link(2, "State").endswith("/2/revisions?field=State")
+
+
+def test_attribution_engine_ignores_unknown_enrichment_time_when_ordering() -> None:
+    dated = _evidence(1, datetime(2026, 5, 1, tzinfo=timezone.utc))
+    unknown = EvidencePacket(
+        work_item_id=2,
+        revisions=(),
+        comments=(),
+        enrichments=(
+            Enrichment(
+                source="mail",
+                source_id="unknown-time",
+                author="operator@example.com",
+                timestamp=None,
+                excerpt="Undated evidence",
+                permalink=None,
+            ),
+        ),
+        confidence=Confidence.LOW,
+        tier=AttributionTier.TIER3,
+        summary_for_reviewer="Undated evidence",
+    )
+
+    citations = build_inline_citations(
+        (_item(1, "Dated"), _item(2, "Undated")),
+        {1: dated, 2: unknown},
+    )
+
+    assert [citation.work_item_id for citation in citations] == [1, 2]
+    assert latest_lineage_timestamp(unknown) is None

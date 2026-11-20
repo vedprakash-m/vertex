@@ -166,7 +166,7 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="Track B (closed 2026-07-08): render_stage.py's former 7th risk-read call site now reuses ctx.risks, falling back to _load_current_risks only for isolated-stage execution",
         path="src/core/stages/render_stage.py",
-        line=632,
+        line=667,
         must_contain="_load_current_risks",
     ),
     Citation(

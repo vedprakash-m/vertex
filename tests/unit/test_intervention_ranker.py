@@ -9,7 +9,7 @@ from src.core.models import Confidence
 from src.core.models_v2 import ClaimEntry, Contradiction, ContradictionPacket, DataSourceType, DecisionAsk, IncidentEntry, ResolvedContradiction
 
 
-def test_rank_brief_interventions_prefers_lower_edit_magnitude_for_similar_claims(tmp_path: Path) -> None:
+def test_rank_brief_interventions_does_not_consume_legacy_edit_magnitude(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     journal_dir = programs_root / "acme" / "journal"
     journal_dir.mkdir(parents=True, exist_ok=True)
@@ -109,9 +109,9 @@ def test_rank_brief_interventions_prefers_lower_edit_magnitude_for_similar_claim
     assert interventions[1].title == "Stage nudge for decision ask d-1"
     assert interventions[1].proposal_id == "decision-ask-d-1-nudge"
     assert interventions[1].confidence is Confidence.NONE
-    assert interventions[2].title == "Review claim c-repair"
+    assert interventions[2].title == "Review claim c-deploy"
     assert interventions[2].confidence is Confidence.NONE
-    assert interventions[3].title == "Review claim c-deploy"
+    assert interventions[3].title == "Review claim c-repair"
     assert interventions[3].confidence is Confidence.NONE
 
 

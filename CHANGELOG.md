@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-11-19
+
+| Feature | Change |
+|---|---|
+| RELO-W4 lifecycle and relevance convergence | Retire the callerless sprint-planner, generic lifecycle and long-horizon relevance modules and their isolated tests. Keep attribution in registered ledger outcome schemas and bitemporal/expiry relevance in `ProgramReality.knowledge_context()`; no cross-domain owner policy or planning caller is introduced. |
+| Knowledge candidate completion, partial | Classify predicates into the eight maintained-context classes; review-gate new extracted candidates with explicit native-principal authorization and expiry; retain review renewal and verified resolution in existing candidate history; expose class/review/resolution state in triage, status, context and doctor consumers. Live reviewer routing, review-window policy and operational qualification remain owner-gated. |
+
+Removed: `src/core/sprint_planner.py`, `src/core/object_lifecycle.py`, `src/core/long_horizon_relevance.py`, `tests/golden/test_sprint_planner.py`, `tests/unit/test_object_lifecycle.py`, and `tests/unit/test_long_horizon_relevance.py`. Modified: `tests/contracts/test_architecture_fitness.py`, `tests/contracts/test_program_reality_authority.py`, `tests/unit/test_knowledge_claim_store.py`, `tests/unit/test_ledger_event_types.py`, and `specs/vertex-tech-spec.md`.
+
+Knowledge candidate files: `src/core/knowledge/predicate_registry.py`, `src/core/knowledge_candidate_store.py`, `src/core/knowledge_claim_store.py`, `src/core/knowledge_index.py`, `src/core/config_loader.py`, `src/commands/knowledge.py`, `src/commands/doctor_checks/kb_checks.py`, `src/ai/discovery/kb_claim_extractor.py`, `programs/_templates/example_tpm/review.yaml`, and the canonical specifications. Tests: `tests/unit/test_knowledge_candidate_completion.py`, `tests/unit/test_commands_knowledge.py`, `tests/golden/test_knowledge_context.py`.
+
+## 2026-11-18
+
+| Feature | Change |
+|---|---|
+| Durable actuation restart, partial | Resume a `succeeded` create dispatch from the retained acknowledgement receipt after an expired worker lease, under the current workspace fence and without another provider callback. Missing, changed or malformed receipt evidence refuses local completion; `audited` restart, remote-effect and generalized recovery qualification remain open. |
+| Generalized operation fault matrix, partial | Classify pre-dispatch retry, timeout, duplicate, ambiguity and compensation across the four registered operation contracts and two synthetic provider lanes; retain compensation intent in the success receipt so restart cannot incorrectly complete a compensable effect. Unknown providers, automatic compensation and provider qualification remain open. |
+
+Modified files: `src/core/actuation_outbox.py`, `specs/vertex-tech-spec.md`. Tests: `tests/contracts/test_outbox_create_fault_matrix.py`.
+
 ## 2026-11-17
 
 | Feature | Change |

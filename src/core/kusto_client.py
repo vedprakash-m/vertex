@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sized
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Literal, overload
 
 from src.adapters.microsoft.kusto_runtime import load_kusto_sdk_types
+from src.core.config_loader import KustoQuerySettings
 from src.core.exceptions import AuthError, QueryError
+from src.core.integration_types import KustoResultColumn, KustoResultSet
+from src.core.kusto_result_contract import build_kusto_result_schema
 from src.core.kusto_result_limits import KustoResultLimits, admit_kusto_rows
 from src.core.models_v2 import KustoQuery
 
@@ -105,6 +108,44 @@ class KustoClient:
             raise QueryError(f"Kusto query failed for {cluster}/{database}: {last_error}") from last_error
         raise QueryError("Kusto query did not execute.")
 
+    def execute_typed(
+        self,
+        query: KustoQuery | KustoQuerySettings,
+        *,
+        observed_at: datetime | None = None,
+    ) -> KustoResultSet:
+        timeout = getattr(query, "timeout_seconds", None) or self.TIMEOUT_SECONDS
+        rows, columns = self.execute_with_schema(
+            query.cluster,
+            query.database,
+            query.kql,
+            timeout=timeout,
+            no_safety=getattr(query, "kusto_no_safety", False),
+            result_limits=query.result_limits,
+        )
+        typed_columns = tuple(
+            KustoResultColumn(column.name, column.type_name)
+            for column in columns
+        )
+        cardinality = getattr(query, "expected_cardinality", "zero_ok")
+        schema = build_kusto_result_schema(
+            rows,
+            columns=typed_columns,
+            expected_cardinality=cardinality,
+        )
+        from src.core.metric_binding_validator import kusto_scalar_cardinality_error
+
+        error = kusto_scalar_cardinality_error(query.id, cardinality, len(rows))
+        if error is not None:
+            raise QueryError(error)
+        return KustoResultSet(
+            query_id=query.id,
+            rows=tuple(rows),  # type: ignore[arg-type]
+            observed_at=observed_at or datetime.now(timezone.utc),
+            row_count=len(rows),
+            schema=schema,
+        )
+
     def _get_or_create_client(self, cluster: str) -> Any:
         if cluster not in self._clients:
             client_class, kcsb_class, _request_properties_class, credential_class = self._get_sdk_types()
@@ -165,12 +206,34 @@ class KustoClient:
         return "defaultazurecredential" in normalized or "aadsts" in normalized or "az login" in normalized
 
 
-def build_live_kusto_query_executor() -> Callable[[KustoQuery], list[dict[str, Any]]]:
+@overload
+def build_live_kusto_query_executor(
+    *, typed: Literal[False] = False,
+) -> Callable[[KustoQuery | KustoQuerySettings], list[dict[str, Any]]]: ...
+
+
+@overload
+def build_live_kusto_query_executor(
+    *, typed: Literal[True],
+) -> Callable[[KustoQuery | KustoQuerySettings], KustoResultSet]: ...
+
+
+def build_live_kusto_query_executor(
+    *,
+    typed: bool = False,
+) -> Callable[
+    [KustoQuery | KustoQuerySettings],
+    list[dict[str, Any]] | KustoResultSet,
+]:
     from src.core.metric_binding_validator import kusto_scalar_cardinality_error
 
     client = KustoClient()
 
-    def execute(query: KustoQuery) -> list[dict[str, Any]]:
+    def execute(
+        query: KustoQuery | KustoQuerySettings,
+    ) -> list[dict[str, Any]] | KustoResultSet:
+        if typed:
+            return client.execute_typed(query)
         kwargs: dict[str, Any] = {"no_safety": getattr(query, "kusto_no_safety", False)}
         per_query_timeout = getattr(query, "timeout_seconds", None)
         if per_query_timeout is not None:

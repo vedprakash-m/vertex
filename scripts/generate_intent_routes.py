@@ -10,10 +10,13 @@ import yaml
 from typer.main import get_command
 from typer.core import TyperCommand, TyperGroup, TyperOption
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import cli
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_PATH = REPO_ROOT / "vertex" / "intent_routes.yaml"
 SCHEMA_VERSION = "1"
 

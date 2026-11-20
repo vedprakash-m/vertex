@@ -27,6 +27,7 @@ from src.core.model_registry import (
     DEFAULT_POLICY_BLOCK_ON_BUMP,
     ModelBumpDetectedError,
     ModelPin,
+    assess_model_pin_lifecycle,
     default_pin,
     model_registry_path,
     read_model_pin,
@@ -34,6 +35,7 @@ from src.core.model_registry import (
     record_model_deployment_used,
     register_model_pin,
 )
+from src.core.exceptions import StateError
 from src.core.state_reader_registry import STATE_READER_REGISTRY
 
 
@@ -210,6 +212,97 @@ def test_recert_at_is_optional(tmp_path: Path) -> None:
     loaded = read_model_pin("x", programs_root=tmp_path)
     assert loaded is not None
     assert loaded.recert_at is None
+
+
+@pytest.mark.parametrize(
+    (
+        "recert_age_days",
+        "review_offset_days",
+        "needs_recert",
+        "past_review",
+        "synthetic_harness_eligible",
+    ),
+    [
+        (0, 30, False, False, True),
+        (89, 30, False, False, True),
+        (90, 30, True, False, False),
+        (120, 30, True, False, False),
+        (0, 0, False, True, False),
+        (0, -1, False, True, False),
+    ],
+)
+def test_model_pin_lifecycle_frozen_recert_matrix(
+    recert_age_days: int,
+    review_offset_days: int,
+    needs_recert: bool,
+    past_review: bool,
+    synthetic_harness_eligible: bool,
+) -> None:
+    now = datetime(2026, 11, 18, tzinfo=timezone.utc)
+    pin = ModelPin(
+        feature_name="synthetic-outage-feature",
+        model_id="frozen-model",
+        deployment_id="frozen-deployment",
+        pinned_at=now - timedelta(days=180),
+        deprecation_review_at=now + timedelta(days=review_offset_days),
+        recert_at=now - timedelta(days=recert_age_days),
+    )
+
+    lifecycle = assess_model_pin_lifecycle(pin, now=now)
+
+    assert lifecycle.needs_recert is needs_recert
+    assert lifecycle.past_review is past_review
+    assert lifecycle.synthetic_harness_eligible is synthetic_harness_eligible
+    assert lifecycle.owner_action == (
+        "synthetic harness only; owner recertification and live qualification required"
+        if synthetic_harness_eligible
+        else "model-owner recertification and deprecation review required"
+    )
+
+
+def test_model_pin_lifecycle_refuses_missing_or_future_recert() -> None:
+    now = datetime(2026, 11, 18, tzinfo=timezone.utc)
+    base = default_pin("synthetic-outage-feature", now=now)
+
+    missing = assess_model_pin_lifecycle(base, now=now)
+    future = assess_model_pin_lifecycle(
+        ModelPin(
+            feature_name=base.feature_name,
+            model_id=base.model_id,
+            deployment_id=base.deployment_id,
+            pinned_at=base.pinned_at,
+            deprecation_review_at=base.deprecation_review_at,
+            recert_at=now + timedelta(seconds=1),
+        ),
+        now=now,
+    )
+
+    assert missing.needs_recert is True and not missing.synthetic_harness_eligible
+    assert future.needs_recert is True and not future.synthetic_harness_eligible
+
+
+@pytest.mark.parametrize("window_days", [0, -1, True, 1.5, "90"])
+def test_model_pin_lifecycle_rejects_invalid_recert_window(window_days: object) -> None:
+    now = datetime(2026, 11, 18, tzinfo=timezone.utc)
+    pin = default_pin("synthetic-outage-feature", now=now)
+
+    with pytest.raises(StateError, match="positive integer"):
+        assess_model_pin_lifecycle(pin, now=now, recert_window_days=window_days)  # type: ignore[arg-type]
+
+
+def test_model_pin_lifecycle_rejects_naive_dates() -> None:
+    now = datetime(2026, 11, 18)
+    pin = ModelPin(
+        feature_name="synthetic-outage-feature",
+        model_id="frozen-model",
+        deployment_id="frozen-deployment",
+        pinned_at=now,
+        deprecation_review_at=now + timedelta(days=1),
+        recert_at=None,
+    )
+
+    with pytest.raises(StateError, match="timezone-aware"):
+        assess_model_pin_lifecycle(pin, now=now.replace(tzinfo=timezone.utc))
 
 
 # ---------------------------------------------------------------------------

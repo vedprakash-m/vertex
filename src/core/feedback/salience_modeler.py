@@ -19,7 +19,7 @@ from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "2.0"
 DEFAULT_MIN_WEIGHT = 0.2
 DEFAULT_EMA_ALPHA = 0.1
 DEFAULT_CONFIRMATION_WEIGHT = 2.0
@@ -88,7 +88,7 @@ def refresh_author_salience(
     as_of: datetime | None = None,
     dry_run: bool = False,
 ) -> tuple[AuthorSalienceModel, Path | None]:
-    observations = read_edit_pattern_observations(program_id, programs_root=programs_root)
+    observations: tuple[EditPatternObservation, ...] = ()
     salience_events = read_salience_events(program_id, programs_root=programs_root)
     settings = _load_salience_settings(program_id, programs_root=programs_root)
     model = build_author_salience(
@@ -182,6 +182,8 @@ def build_author_salience(
 def load_author_salience(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> AuthorSalienceModel | None:
     payload = load_advisory_yaml(get_author_salience_path(program_id, programs_root=programs_root))
     if payload is None:
+        return None
+    if str(payload.get("schema_version") or "") != SCHEMA_VERSION:
         return None
     try:
         return AuthorSalienceModel(
@@ -375,7 +377,7 @@ def predict_salience_event_weights(
     settings = _load_salience_settings(program_id, programs_root=programs_root)
     model = build_author_salience(
         program_id,
-        observations=read_edit_pattern_observations(program_id, programs_root=programs_root),
+        observations=(),
         salience_events=read_salience_events(program_id, programs_root=programs_root),
         min_weight=settings.min_weight,
         ema_alpha=settings.ema_alpha,

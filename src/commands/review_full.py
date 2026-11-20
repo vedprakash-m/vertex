@@ -92,7 +92,7 @@ from src.core.models_v2 import RiskEntry, RiskStatus
 from src.m365.adaptive_card_renderer import AdaptiveCardRenderer
 from src.m365.agency_bridge import AgencyBridge
 from src.m365.enricher import M365Enricher
-from src.m365.teams_webhook_client import TeamsWebhookClient
+from src.m365.outbound_dispatch import dispatch_teams_card_via_outbox
 
 
 log = logging.getLogger(__name__)
@@ -635,10 +635,11 @@ def _write_section_review_adaptive_cards(
 
 
 def _build_section_review_teams_sender(webhook_url: str) -> SectionReviewCardSender:
-    client = TeamsWebhookClient(webhook_url=webhook_url)
+    del webhook_url
 
     def _sender(section_id: str, payload: dict[str, Any]) -> None:
-        client.post_card(payload)
+        del section_id
+        dispatch_teams_card_via_outbox(payload)
 
     return _sender
 

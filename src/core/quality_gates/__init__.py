@@ -17,7 +17,7 @@ from src.core.journal import PROGRAMS_ROOT
 from src.core.ledger.event_log import compute_envelope_hash, read_events, verify_event_log, write_event
 from src.core.ledger.program_views import project_program_events
 from src.core.models import DeltaKind, DeltaSet, DimensionRisk, FreshnessReport, ReviewState, ReviewStatus, RiskLevel, RunManifest, WorkItem
-from src.core.models_v2 import DependencyStatus, MilestoneStatus, Scorecard, Signal, Workstream
+from src.core.models_v2 import DependencyStatus, MilestoneStatus, RiskEntry, Scorecard, Signal, Workstream
 from src.core.narrative_store import load_archived_narratives
 from src.core.overrides_store import OverridesDocument
 from src.core.projections.snapshot_manager import get_snapshot_dir
@@ -171,6 +171,7 @@ def evaluate_phase_1b_gates(
     program_maturity_level: int = 0,
     workstreams: tuple[Workstream, ...] | list[Workstream] = (),
     scorecards: tuple[Scorecard, ...] | list[Scorecard] = (),
+    risk_entries: tuple[RiskEntry, ...] | list[RiskEntry] | None = None,
     channel_states: dict[str, dict[str, Any]] | None = None,
     archive_root: Path = ARCHIVE_ROOT,
     programs_root: Path = PROGRAMS_ROOT,
@@ -192,6 +193,9 @@ def evaluate_phase_1b_gates(
     resolved_journal_signals = tuple(journal_signals)
     resolved_workstreams = tuple(workstreams)
     resolved_scorecards = tuple(scorecards)
+    resolved_risk_entries = (
+        tuple(risk_entries) if risk_entries is not None else None
+    )
     resolved_as_of = as_of or datetime.now(timezone.utc)
     today = _coerce_date(resolved_as_of)
     as_of_timestamp = _coerce_datetime(resolved_as_of)
@@ -254,6 +258,7 @@ def evaluate_phase_1b_gates(
             scorecards=resolved_scorecards,
             archive_root=archive_root,
             programs_root=programs_root,
+            risk_entries=resolved_risk_entries,
         ),
         _evaluate_high_risk_coverage_gate(
             items=scoped_items,
@@ -278,6 +283,7 @@ def evaluate_phase_1b_gates(
             as_of=as_of_timestamp,
             program_id=program_id,
             programs_root=programs_root,
+            risk_entries=resolved_risk_entries,
         ),
         _evaluate_cross_program_dependency_cascade_gate(
             items=resolved_items,
@@ -573,13 +579,21 @@ def _evaluate_chronic_high_dimension_gate(
     scorecards: tuple[Scorecard, ...],
     archive_root: Path,
     programs_root: Path,
+    risk_entries: tuple[RiskEntry, ...] | None = None,
 ) -> GateEvaluation:
     if edition_name is None or program_id is None or not dimension_risks:
         return GateEvaluation("QG-12", True, "Chronic high-risk escalation gate passed.", 2, forceable=True)
 
     open_risks = tuple(
         risk
-        for risk in _load_current_risks(program_id, programs_root=programs_root)
+        for risk in (
+            risk_entries
+            if risk_entries is not None
+            else _load_current_risks(
+                program_id,
+                programs_root=programs_root,
+            )
+        )
         if risk.status.value != "closed"
     )
     return _evaluate_chronic_high_dimension_gate_impl(
@@ -625,12 +639,14 @@ def _evaluate_milestone_risk_linkage_gate(
     as_of: datetime,
     program_id: str | None,
     programs_root: Path,
+    risk_entries: tuple[RiskEntry, ...] | None = None,
 ) -> GateEvaluation:
     return _evaluate_milestone_risk_linkage_gate_impl(
         items=items,
         as_of=as_of,
         program_id=program_id,
         programs_root=programs_root,
+        risk_entries=risk_entries,
     )
 
 

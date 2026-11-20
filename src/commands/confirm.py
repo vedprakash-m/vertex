@@ -11,7 +11,7 @@ from typing import Any, cast
 import typer
 import yaml
 from src.commands.confirm_stages.deserialization import deserialize_items as _deserialize_items
-from src.commands.confirm_stages.deserialization import deserialize_kusto_sections as _deserialize_kusto_sections, restore_chart_placements as _restore_chart_placements
+from src.commands.confirm_stages.deserialization import deserialize_kusto_sections as _deserialize_kusto_sections, restore_chart_placements as _restore_chart_placements, restored_chart_gate_report as _restored_chart_gate_report
 from src.commands.confirm_stages.deserialization import parse_datetime_required as _parse_datetime_required
 from src.commands.confirm_stages.draft_loaders import ChartFreshnessExpired as _ChartFreshnessExpired
 from src.commands.confirm_stages.draft_loaders import chart_gate_failure_report as _chart_gate_failure_report
@@ -28,6 +28,7 @@ from src.commands.confirm_stages.validation import read_confirming_author as _re
 from src.commands.confirm_stages.claim_resolution import resolve_confirm_claim_extraction as _resolve_confirm_claim_extraction
 from src.commands.confirm_stages.claim_resolution import prepare_confirm_claim_extraction_for_v2 as _prepare_confirm_claim_extraction_for_v2
 from src.commands.confirm_stages.claim_resolution import evaluate_claim_extraction_calibration_gate as _evaluate_claim_extraction_calibration_gate
+from src.commands.confirm_stages.claim_resolution import evaluate_claim_evidence_gate as _evaluate_claim_evidence_gate
 from src.commands.confirm_stages.claim_resolution import record_confirmed_claims_for_v2 as _record_confirmed_claims_for_v2_impl
 from src.commands.confirm_stages.baseline_followthrough import apply_baseline_followthrough as _apply_baseline_followthrough
 from src.commands.confirm_stages.archive_transaction import evidence_fence_resources as _evidence_fence_resources
@@ -37,8 +38,7 @@ from src.commands.confirm_stages.signal_metrics import compute_provenance_confid
 from src.commands.confirm_stages.signal_metrics import compute_source_health_pct as _compute_source_health_pct
 from src.commands.confirm_stages.optimization_proposals import write_optimization_proposals as _write_optimization_proposals
 from src.commands.confirm_stages.post_confirm_artifacts import confirm_additional_failures as _confirm_additional_failures_impl
-from src.commands.confirm_stages.post_confirm_artifacts import record_edit_patterns_for_v2 as _record_edit_patterns_for_v2_impl
-from src.commands.confirm_stages.post_confirm_artifacts import record_learning_distillation as _record_learning_distillation_impl
+from src.commands.confirm_stages.post_confirm_artifacts import record_governed_feedback_for_v2 as _record_governed_feedback_for_v2_impl
 from src.commands.confirm_stages.post_confirm_artifacts import record_ncfl_proposals as _record_ncfl_proposals_impl
 from src.commands.confirm_stages.post_confirm_artifacts import record_review_tracking as _record_review_tracking_impl
 from src.commands.confirm_stages.post_confirm_artifacts import record_workstream_associations as _record_workstream_associations_impl
@@ -65,7 +65,7 @@ from src.core.analytics_store import record_gate_failures_from_report
 from src.core.ban_list_validator import find_ban_list_violations
 from src.core.claim_tracker import ClaimExtractionResult
 from src.core.alerts import append_or_suppress_alert, surface_alert_banner as _surface_alert_banner
-from src.core.config_loader import EDITIONS_ROOT as _CONFIRM_EDITIONS_ROOT, EditorialRules, PROGRAMS_ROOT as _CONFIRM_PROGRAMS_ROOT, REPORTS_ROOT, load_bundle
+from src.core.config_loader import EDITIONS_ROOT as _CONFIRM_EDITIONS_ROOT, PROGRAMS_ROOT as _CONFIRM_PROGRAMS_ROOT, REPORTS_ROOT, load_bundle
 from src.core.continuation_contract import build_bridge_section_roster_ids, build_continuation_contract
 from src.core.delta_engine import build_deltas
 from src.core.edition_resolver import get_program_output_dir, resolve_edition, resolve_edition_paths as _resolve_edition_paths
@@ -446,7 +446,9 @@ def confirm_issue(
     qg_report = combine_gate_reports(
         artifacts[0],
         _evaluate_claim_extraction_calibration_gate(calibration_record),
+        _evaluate_claim_evidence_gate(extraction_result, items=artifacts[6].items),
     )
+    manifest = replace(artifacts[3], qg_results=qg_report.qg_results)
 
     if not dry_run and qg_report.failing_results:
         _gate_resolved_v2 = resolve_edition(
@@ -477,7 +479,6 @@ def confirm_issue(
         for result in qg_report.failing_results
         if result.exit_code > 1 and force and result.forceable
     )
-    manifest = artifacts[3]
     current_draft_manifest_id = draft_manifest.manifest_id
     evidence_window_start = artifacts[6].ado_data_as_of - __import__("datetime", fromlist=["timedelta"]).timedelta(days=bundle.config.ado.date_window_days)
     evidence_by_item = {
@@ -836,25 +837,25 @@ def confirm_issue(
     )
     if review_tracking_warning is not None:
         warnings = warnings + (review_tracking_warning,)
-    edit_pattern_warning = _record_edit_patterns_for_v2_impl(
+    governed_feedback_path, governed_feedback_warning = _record_governed_feedback_for_v2_impl(
         edition_name=edition_name,
         issue_number=issue_number,
         draft_state=draft_state,
         report=artifacts[6],
         confirmed_at=confirmed_at,
+        confirmed_by=confirmed_by or "",
         reports_root=resolved_reports_root,
         **artifact_root_kwargs,
     )
-    if edit_pattern_warning is not None:
-        warnings = warnings + (edit_pattern_warning,)
-    learning_md_path, learning_json_path, learning_summary, learning_warning = _record_learning_distillation(
-        edition_name=edition_name,
-        issue_number=issue_number,
-        editorial_rules=bundle.editorial_rules,
-        programs_root=programs_root,
+    if governed_feedback_warning is not None:
+        warnings = warnings + (governed_feedback_warning,)
+    learning_md_path = None
+    learning_json_path = None
+    learning_summary = (
+        f"Governed feedback: typed corrections recorded at {governed_feedback_path}."
+        if governed_feedback_path is not None
+        else None
     )
-    if learning_warning is not None:
-        warnings = warnings + (learning_warning,)
 
     workstream_association_log_path, workstream_association_warning = _record_workstream_associations_impl(
         edition_name=edition_name,
@@ -1433,6 +1434,15 @@ def _build_confirm_artifacts(
         "ai_safety": draft_manifest.ai_safety,
         "milestone_assessments": draft_manifest.milestone_assessments,
         "milestone_trajectory_snapshot": draft_manifest.milestone_trajectory_snapshot,
+        **(
+            {
+                "program_verdict_observation": deepcopy(draft_manifest.program_verdict_observation),
+                "program_verdict_comparison": deepcopy(draft_manifest.program_verdict_comparison),
+            }
+            if draft_manifest.program_verdict_observation is not None
+            and draft_manifest.program_verdict_comparison is not None
+            else {}
+        ),
     }
     provisional_manifest = build_run_manifest(
         manifest_id=report.manifest_id,
@@ -1607,7 +1617,7 @@ def _build_confirm_artifacts(
     chart_failures = _chart_gate_failure_report(draft_manifest, draft_state, started_at)
     qg_report = combine_gate_reports(
         qg_phase_1a, qg_phase_1b, qg_phase_1c, continuity_qg, bridge_qg, readiness_qg,
-        context_integrity_qg, chart_failures,
+        context_integrity_qg, chart_failures, _restored_chart_gate_report(render_context, started_at),
     )
     source_health_qg = evaluate_source_health_gates(
         program_id=program_id,
@@ -1689,35 +1699,22 @@ def _load_persisted_stale_claim_ids(
         return ()
     return load_stale_claim_ids(program_id, issue_number, programs_root=programs_root)
 
-def _record_learning_distillation(
-    *,
-    edition_name: str,
-    issue_number: int,
-    editorial_rules: EditorialRules,
-    programs_root: Path | None = None,
-) -> tuple[Path | None, Path | None, str | None, str | None]:
-    return _record_learning_distillation_impl(
-        edition_name=edition_name,
-        issue_number=issue_number,
-        editorial_rules=editorial_rules,
-        programs_root=programs_root,  # type: ignore[arg-type]
-    )
-
-
-def _record_edit_patterns_for_v2(
+def _record_governed_feedback_for_v2(
     *,
     edition_name: str,
     issue_number: int,
     draft_state: dict[str, Any],
     report: ReportData,
     confirmed_at: datetime,
+    confirmed_by: str,
     reports_root: Path,
-) -> str | None:
-    return _record_edit_patterns_for_v2_impl(
+) -> tuple[Path | None, str | None]:
+    return _record_governed_feedback_for_v2_impl(
         edition_name=edition_name,
         issue_number=issue_number,
         draft_state=draft_state,
         report=report,
         confirmed_at=confirmed_at,
+        confirmed_by=confirmed_by,
         reports_root=reports_root,
     )

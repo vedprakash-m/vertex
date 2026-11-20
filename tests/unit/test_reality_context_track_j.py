@@ -305,7 +305,6 @@ def test_trust_caution_and_flags_survive_real_prompt_clipping(monkeypatch, tmp_p
     monkeypatch.setattr(report_ai, "_matching_program_workstream_ids", lambda *args: workstream_ids)
     for name in (
         "_edit_pattern_context_lines",
-        "summarize_recent_calibration",
         "_confidence_band_context_lines",
         "_prompt_version_confidence_context_lines",
         "_prompt_version_context_lines",

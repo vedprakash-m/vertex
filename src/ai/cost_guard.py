@@ -5,6 +5,7 @@ import math
 import os
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,12 +38,13 @@ class CostRunState:
 
 @dataclass(frozen=True, slots=True)
 class CostReservation:
-    """One durable pre-dispatch reservation, settled at most once."""
+    """One ledger-identity-bound pre-dispatch reservation, settled at most once."""
 
     reservation_id: int
     estimated_cost_usd: float
     state: CostRunState
     _ledger_path: Path | None = field(default=None, repr=False)
+    _ledger_id: str | None = field(default=None, repr=False)
     chain_id: int | None = None
 
 
@@ -163,6 +165,7 @@ class CostGuard:
             with open_program_db(ledger_path, durability="strict") as connection:
                 _ensure_sqlite_schema(connection)
                 connection.execute("BEGIN IMMEDIATE")
+                ledger_id = _ensure_ledger_identity(connection)
                 row = connection.execute(
                     "SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at "
                     "FROM ai_cost_runs WHERE edition = ? AND run_id = ?",
@@ -178,6 +181,7 @@ class CostGuard:
                     ).fetchone()
                     if row is None or chain_row is None or chain_row["status"] != "reserved":
                         raise StateError("Cost chain reservation is unknown or already released")
+                    _verify_ledger_identity(connection, chain)
                     remaining = _coerce_state_float(chain_row["reserved_usd"], field_name="reserved_usd")
                     if estimated_cost_usd > remaining + 1e-12:
                         raise StateError("Attempt estimate exceeds the cost chain reservation's remainder")
@@ -220,6 +224,7 @@ class CostGuard:
             estimated_cost_usd=estimated_cost_usd,
             state=updated,
             _ledger_path=ledger_path,
+            _ledger_id=ledger_id,
             chain_id=chain_id,
         )
         try:
@@ -250,6 +255,7 @@ class CostGuard:
                 _ensure_sqlite_schema(connection)
                 _ensure_chain_schema(connection)
                 connection.execute("BEGIN IMMEDIATE")
+                _verify_ledger_identity(connection, chain)
                 row = connection.execute(
                     "SELECT reserved_usd, status FROM ai_cost_chains WHERE chain_id = ? AND edition = ? AND run_id = ?",
                     (chain.chain_id, self._edition, self._run_id),
@@ -311,7 +317,10 @@ class CostGuard:
         if not ledger_path.exists():
             return None
         try:
-            with open_program_db(ledger_path, read_only=True) as connection:
+            with open_program_db(ledger_path, durability="strict") as connection:
+                _ensure_sqlite_schema(connection)
+                connection.execute("BEGIN IMMEDIATE")
+                ledger_id = _ensure_ledger_identity(connection)
                 row = connection.execute(
                     "SELECT reservation_id FROM ai_cost_reservations WHERE edition = ? AND run_id = ? "
                     "AND status = 'reserved' AND ABS(reserved_usd - ?) < 0.000000000001 ORDER BY reservation_id LIMIT 1",
@@ -330,7 +339,106 @@ class CostGuard:
             estimated_cost_usd=reserved_cost_usd,
             state=self.current_state(),
             _ledger_path=ledger_path,
+            _ledger_id=ledger_id,
         )
+
+    def load_reservation(self, reservation_id: int) -> CostReservation:
+        """Reconstruct one reserved attempt handle for a new process.
+
+        This is a read-only reconciliation boundary. Settled rows are not
+        reloaded, and an uncertain provider attempt remains reserved until a
+        caller explicitly reconciles actual cost with :meth:`reconcile_reservation`.
+        """
+        return self._load_reservation(reservation_id, require_reserved=True)
+
+    def _load_reservation(
+        self,
+        reservation_id: int,
+        *,
+        require_reserved: bool,
+    ) -> CostReservation:
+        reservation_id = _validate_reservation_id(reservation_id)
+        ledger_path = self.ledger_path.resolve()
+        try:
+            with open_program_db(ledger_path, read_only=True) as connection:
+                ledger_id = _read_ledger_identity(connection)
+                row = connection.execute(
+                    "SELECT reserved_usd, status FROM ai_cost_reservations "
+                    "WHERE reservation_id = ? AND edition = ? AND run_id = ?",
+                    (reservation_id, self._edition, self._run_id),
+                ).fetchone()
+                if row is None:
+                    raise StateError("Cost reservation is not associated with this run")
+                if require_reserved and row["status"] != "reserved":
+                    raise StateError("Cost reservation is not reserved for this run")
+                draw_table = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'ai_cost_chain_draws'"
+                ).fetchone()
+                chain_row = (
+                    connection.execute(
+                        "SELECT chain_id FROM ai_cost_chain_draws WHERE reservation_id = ?",
+                        (reservation_id,),
+                    ).fetchone()
+                    if draw_table is not None
+                    else None
+                )
+                state_row = connection.execute(
+                    "SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, "
+                    "started_at, updated_at FROM ai_cost_runs "
+                    "WHERE edition = ? AND run_id = ?",
+                    (self._edition, self._run_id),
+                ).fetchone()
+                if state_row is None:
+                    raise StateError("Cost reservation has no run state")
+                return CostReservation(
+                    reservation_id=reservation_id,
+                    estimated_cost_usd=_coerce_state_float(
+                        row["reserved_usd"],
+                        field_name="reserved_usd",
+                    ),
+                    state=_state_from_sqlite_row(state_row),
+                    _ledger_path=ledger_path,
+                    _ledger_id=ledger_id,
+                    chain_id=(
+                        _coerce_state_int(
+                            chain_row["chain_id"],
+                            field_name="chain_id",
+                        )
+                        if chain_row is not None
+                        else None
+                    ),
+                )
+        except sqlite3.OperationalError as error:
+            raise StateError("Cost reservation ledger is unavailable or has no durable identity") from error
+        except sqlite3.DatabaseError as error:
+            raise StateError("Cost reservation ledger is invalid") from error
+
+    def reconcile_reservation(
+        self,
+        reservation_id: int,
+        *,
+        actual_cost_usd: float,
+        ai_calls: int = 1,
+    ) -> CostRunState:
+        """Settle one retained uncertain attempt using a reservation ID from telemetry."""
+        reservation = self.load_reservation(reservation_id)
+        return self.settle_call(
+            reservation,
+            actual_cost_usd,
+            ai_calls=ai_calls,
+        )
+
+    def reconcile_chain_remainder(self, reservation_id: int) -> CostRunState:
+        """Release only the undrawn remainder for a retained reservation's chain.
+
+        The reservation may already be settled. Drawn attempt rows remain
+        reserved until each provider outcome is reconciled explicitly.
+        """
+        chain = self._load_reservation(reservation_id, require_reserved=False)
+        if chain.chain_id is None:
+            raise StateError("Cost reservation is not associated with a cost chain")
+        return self.release_chain(chain)
 
     def settle_call(self, reservation: CostReservation, actual_cost_usd: float, *, ai_calls: int = 1) -> CostRunState:
         """Settle exactly the call reservation that preceded a response."""
@@ -354,12 +462,15 @@ class CostGuard:
         ledger_path = self.ledger_path.resolve()
         if reservation._ledger_path is None:
             raise StateError("Cost reservation is not bound to a ledger")
+        if reservation._ledger_id is None:
+            raise StateError("Cost reservation is not bound to a ledger identity")
         if reservation._ledger_path != ledger_path:
             raise StateError("Cost reservation belongs to a different ledger")
         try:
             with open_program_db(ledger_path, durability="strict") as connection:
                 _ensure_sqlite_schema(connection)
                 connection.execute("BEGIN IMMEDIATE")
+                _verify_ledger_identity(connection, reservation)
                 reservation_row = connection.execute(
                     "SELECT reserved_usd, status FROM ai_cost_reservations WHERE reservation_id = ? AND edition = ? AND run_id = ?",
                     (reservation.reservation_id, self._edition, self._run_id),
@@ -445,6 +556,7 @@ class CostGuard:
             with open_program_db(self.ledger_path, durability="strict") as connection:
                 _ensure_sqlite_schema(connection)
                 connection.execute("BEGIN IMMEDIATE")
+                _ensure_ledger_identity(connection)
                 row = connection.execute(
                     "SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at "
                     "FROM ai_cost_runs WHERE edition = ? AND run_id = ?",
@@ -757,6 +869,49 @@ def _ensure_sqlite_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_cost_ledger_identity (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            ledger_id TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _ensure_ledger_identity(connection: sqlite3.Connection) -> str:
+    connection.execute(
+        "INSERT OR IGNORE INTO ai_cost_ledger_identity (singleton, ledger_id) VALUES (1, ?)",
+        (uuid.uuid4().hex,),
+    )
+    return _read_ledger_identity(connection)
+
+
+def _read_ledger_identity(connection: sqlite3.Connection) -> str:
+    row = connection.execute(
+        "SELECT ledger_id FROM ai_cost_ledger_identity WHERE singleton = 1"
+    ).fetchone()
+    raw = row["ledger_id"] if row is not None else None
+    if not isinstance(raw, str) or len(raw) != 32:
+        raise StateError("Cost guard ledger has no durable identity")
+    try:
+        parsed = uuid.UUID(hex=raw)
+    except ValueError:
+        raise StateError("Cost guard ledger has an invalid durable identity") from None
+    if parsed.hex != raw:
+        raise StateError("Cost guard ledger has an invalid durable identity")
+    return raw
+
+
+def _verify_ledger_identity(connection: sqlite3.Connection, reservation: CostReservation) -> None:
+    if reservation._ledger_id is None or reservation._ledger_id != _read_ledger_identity(connection):
+        raise StateError("Cost reservation belongs to a replaced ledger")
+
+
+def _validate_reservation_id(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_SQLITE_INTEGER:
+        raise StateError("Invalid cost guard reservation_id value")
+    return value
 
 
 def _upsert_sqlite_state(connection: sqlite3.Connection, state: CostRunState) -> None:

@@ -30,6 +30,16 @@ FINDING_AREAS = frozenset(
 )
 
 
+class CockpitExceptionClass(str, Enum):
+    BLOCKED_DRAFT = "blocked_draft"
+    SOURCE_GAP = "source_gap"
+    BINDING_AMBIGUITY = "binding_ambiguity"
+    KNOWLEDGE_CORRECTION = "knowledge_correction"
+    APPROVAL_EXPIRY = "approval_expiry"
+    UNCERTAIN_INTENT = "uncertain_intent"
+    RUNTIME_INCIDENT = "runtime_incident"
+
+
 class ValueConfidence(str, Enum):
     """Section 9.2. INV-ADF-11: a proxy value may never present as measured."""
 
@@ -88,6 +98,29 @@ class CockpitFinding:
             raise ValueError(f"CockpitFinding.area={self.area!r} not in {sorted(FINDING_AREAS)}")
         if self.status not in FINDING_STATUSES:
             raise ValueError(f"CockpitFinding.status={self.status!r} not in {sorted(FINDING_STATUSES)}")
+
+
+@dataclass(frozen=True, slots=True)
+class CockpitExceptionView:
+    exception_class: CockpitExceptionClass
+    finding_id: str
+    area: str
+    status: str
+    what_failed: str
+    consequence: str
+    owner: str | None
+    evidence_refs: tuple[str, ...]
+    snapshot_generated_at: datetime
+    snapshot_input_hash: str
+    confidence: str | None
+    safe_options: tuple[str, ...]
+    expected_effect: str
+    diff_preview: str | None
+    next_command: str | None
+    authority_required: str | None
+    expiry_or_escalation: str | None
+    revalidation_command: str | None
+    observed_at: datetime
 
 
 def select_cockpit_exceptions(findings: Iterable[CockpitFinding]) -> tuple[CockpitFinding, ...]:
@@ -225,6 +258,24 @@ def cockpit_snapshot_to_json_dict(snapshot: CockpitSnapshot) -> dict[str, Any]:
     return _to_jsonable(snapshot)
 
 
+def cockpit_exception_view_to_json_dict(view: CockpitExceptionView) -> dict[str, Any]:
+    payload = _to_jsonable(view)
+    for field_name in (
+        "owner",
+        "confidence",
+        "diff_preview",
+        "next_command",
+        "authority_required",
+        "expiry_or_escalation",
+        "revalidation_command",
+    ):
+        if payload[field_name] is None:
+            payload[field_name] = "not available"
+    if not payload["safe_options"]:
+        payload["safe_options"] = ["not available"]
+    return payload
+
+
 def _from_jsonable(value: Any, target_type: Any) -> Any:
     """Generic inverse of ``_to_jsonable``, driven by the target dataclass's
     own type hints -- ADF-W5.5's ``cockpit compare``/history reading needs
@@ -306,10 +357,12 @@ __all__ = [
     "COCKPIT_SCHEMA_VERSION",
     "FINDING_AREAS",
     "FINDING_STATUSES",
+    "CockpitExceptionClass",
     "ValueConfidence",
     "ValueMetric",
     "TimeSavingsCertification",
     "CockpitFinding",
+    "CockpitExceptionView",
     "select_cockpit_exceptions",
     "ProgramCockpitSummary",
     "SourceCockpitSummary",
@@ -319,6 +372,7 @@ __all__ = [
     "ReliabilityCockpitSummary",
     "CockpitSnapshot",
     "cockpit_snapshot_to_json_dict",
+    "cockpit_exception_view_to_json_dict",
     "cockpit_snapshot_to_json",
     "compute_cockpit_input_hash",
     "finalize_cockpit_snapshot",

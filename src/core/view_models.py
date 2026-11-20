@@ -271,6 +271,7 @@ class KustoSectionData:
     chart_cache_ttl_hours: int = 26
     section_placement: str = "standalone"
     cache_captured_at: datetime | None = None
+    result_kind: str = "table"
 
 
 @dataclass(frozen=True, slots=True)

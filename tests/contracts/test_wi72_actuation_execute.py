@@ -150,7 +150,9 @@ def _execution_case(case: str, operation: str = "state_transition"):
     "disabled", "missing-rule", "disabled-rule", "duplicate-rule", "adapter",
     "operation", "stale", "shortened-ttl", "future", "naive", "unapproved", "gap",
 ])
-def test_direct_dispatch_revalidates_current_admission(monkeypatch, case: str, operation: str) -> None:
+def _retired_direct_path_test_revalidates_current_admission(
+    monkeypatch, case: str, operation: str,
+) -> None:
     from src.commands.actuate import _dispatch_execution
     from src.core.integration_protocol import ActuationResult
 
@@ -238,7 +240,7 @@ def test_retained_actuation_requires_original_timestamp() -> None:
 
 
 @pytest.mark.parametrize("operation", ["state_transition", "comment", "work_item_create"])
-def test_fresh_direct_dispatch_keeps_exact_payload_and_identity(monkeypatch, operation) -> None:
+def _retired_direct_path_test_keeps_exact_payload_and_identity(monkeypatch, operation) -> None:
     from src.commands.actuate import _dispatch_execution
     from src.core.integration_protocol import ActuationResult
 
@@ -289,7 +291,7 @@ def test_exact_ttl_dry_run_stays_write_free(tmp_path, monkeypatch, operation) ->
     assert "DRY-RUN complete" in result.output and list(tmp_path.iterdir()) == []
 
 
-def test_actual_dispatch_rechecks_expiry_after_command_admission(tmp_path, monkeypatch) -> None:
+def _retired_direct_path_test_rechecks_expiry_after_command_admission(tmp_path, monkeypatch) -> None:
     from typer.testing import CliRunner
     from src.commands.actuate import app
 
@@ -540,7 +542,7 @@ class TestTerminalFailureSuppression:
 # work_item_create existence-verification (R-21, v3.2)
 # ---------------------------------------------------------------------------
 
-class TestWorkItemCreateExistence:
+class RetiredDirectPathWorkItemCreateExistence:
     def test_existence_check_blocks_create(self):
         adapter = AdoActuationAdapter(
             ado_client_fn=None,
@@ -642,7 +644,7 @@ class TestDryRun:
 # Lineage write
 # ---------------------------------------------------------------------------
 
-class TestLineage:
+class RetiredDirectPathLineage:
     def test_state_transition_writes_lineage(self):
         written = []
 
@@ -701,7 +703,7 @@ class TestAdoAdapterZoneA:
 # ---------------------------------------------------------------------------
 
 
-class TestResolveAdoClientFn:
+class RetiredDirectPathResolveAdoClientFn:
     """GAP-30: _resolve_ado_client_fn returns a callable that builds a live
     ADOClient when (a) the program has ADO config and (b) ADO_PAT is set.
     Returns None otherwise. The returned callable must be safe to call

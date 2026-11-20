@@ -417,6 +417,117 @@ def test_call_reservations_are_atomic_across_concurrent_clients_and_settle_once(
         guard.settle_call(reservation, 0.2)
 
 
+def test_uncertain_reservation_reconciles_from_another_guard(tmp_path: Path) -> None:
+    first = CostGuard(
+        edition=EDITION_NAME,
+        run_id="cross-process-reconcile",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+    uncertain = first.reserve_call(0.4)
+    second = CostGuard(
+        edition=EDITION_NAME,
+        run_id="cross-process-reconcile",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+
+    state = second.reconcile_reservation(
+        uncertain.reservation_id,
+        actual_cost_usd=0.12,
+    )
+
+    assert (state.spent_usd, state.reserved_usd, state.ai_calls) == pytest.approx(
+        (0.12, 0.0, 1)
+    )
+    with sqlite3.connect(first.ledger_path) as connection:
+        assert connection.execute(
+            "SELECT status, actual_usd FROM ai_cost_reservations "
+            "WHERE reservation_id = ?",
+            (uncertain.reservation_id,),
+        ).fetchone() == ("settled", 0.12)
+    with pytest.raises(StateError, match="reserved"):
+        first.reconcile_reservation(uncertain.reservation_id, actual_cost_usd=0.12)
+
+
+def test_cross_process_chain_reconciliation_retains_drawn_uncertain_attempt(
+    tmp_path: Path,
+) -> None:
+    first = CostGuard(
+        edition=EDITION_NAME,
+        run_id="cross-process-chain",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+    dispatched = first.reserve_call(0.3, chain_total_usd=0.9)
+    uncertain = first.reserve_call(0.3, chain=dispatched)
+    reconciler = CostGuard(
+        edition=EDITION_NAME,
+        run_id="cross-process-chain",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+
+    reconciler.reconcile_reservation(
+        dispatched.reservation_id,
+        actual_cost_usd=0.1,
+    )
+    state = reconciler.reconcile_chain_remainder(uncertain.reservation_id)
+
+    assert (state.spent_usd, state.reserved_usd, state.ai_calls) == pytest.approx(
+        (0.1, 0.3, 1)
+    )
+    with sqlite3.connect(first.ledger_path) as connection:
+        assert connection.execute(
+            "SELECT status, actual_usd FROM ai_cost_reservations "
+            "ORDER BY reservation_id",
+        ).fetchall() == [("settled", 0.1), ("reserved", None)]
+        assert connection.execute(
+            "SELECT status, ROUND(reserved_usd, 9) FROM ai_cost_chains"
+        ).fetchall() == [("released", 0.3)]
+
+    final = reconciler.reconcile_reservation(
+        uncertain.reservation_id,
+        actual_cost_usd=0.2,
+    )
+    assert (final.spent_usd, final.reserved_usd, final.ai_calls) == pytest.approx(
+        (0.3, 0.0, 2)
+    )
+
+
+def test_reservation_handle_refuses_same_path_ledger_replacement(tmp_path: Path) -> None:
+    guard = CostGuard(
+        edition=EDITION_NAME,
+        run_id="replaced-ledger",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+    stale = guard.reserve_call(0.3)
+    old_ledger = guard.ledger_path.with_suffix(".retained.sqlite3")
+    guard.ledger_path.rename(old_ledger)
+    guard.state_path.unlink()
+    replacement = CostGuard(
+        edition=EDITION_NAME,
+        run_id="replaced-ledger",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+    current = replacement.reserve_call(0.2)
+    assert current.reservation_id == stale.reservation_id
+
+    with pytest.raises(StateError, match="replaced"):
+        replacement.settle_call(stale, 0.1)
+
+    state = replacement.current_state()
+    assert (state.spent_usd, state.reserved_usd, state.ai_calls) == pytest.approx(
+        (0.0, 0.2, 0)
+    )
+    with sqlite3.connect(replacement.ledger_path) as connection:
+        assert connection.execute(
+            "SELECT status, actual_usd FROM ai_cost_reservations"
+        ).fetchall() == [("reserved", None)]
+
+
 @pytest.mark.parametrize("operation", ["settle", "release"])
 def test_call_reservation_rejects_matching_id_from_another_ledger(
     tmp_path: Path, operation: str, monkeypatch: pytest.MonkeyPatch,
@@ -587,6 +698,77 @@ def test_chain_reservation_draws_attempts_and_releases_only_unused_remainder(tmp
             "SELECT COUNT(*) FROM ai_cost_chain_draws WHERE chain_id = ?", (settled.chain_id,)
         ).fetchone() == (3,)
     assert uncertain.chain_id == settled.chain_id
+
+
+@pytest.mark.parametrize("operation", ["draw", "release"])
+def test_chain_handle_cannot_cross_cost_ledgers(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    owner = CostGuard(
+        edition=EDITION_NAME,
+        run_id="owned-chain",
+        budget_usd=1.0,
+        programs_root=tmp_path / "owner",
+    )
+    foreign = CostGuard(
+        edition=EDITION_NAME,
+        run_id="owned-chain",
+        budget_usd=1.0,
+        programs_root=tmp_path / "foreign",
+    )
+    chain = owner.reserve_call(0.3, chain_total_usd=0.9)
+
+    with pytest.raises(StateError, match="different ledger"):
+        if operation == "draw":
+            foreign.reserve_call(0.1, chain=chain)
+        else:
+            foreign.release_chain(chain)
+
+    assert not foreign.ledger_path.exists()
+    assert owner.current_state().reserved_usd == pytest.approx(0.9)
+
+
+@pytest.mark.parametrize(
+    ("corruption", "message"),
+    [
+        ("missing_run", "has no run state"),
+        ("insufficient_reserved", "exceeds the run's reserved balance"),
+    ],
+)
+def test_release_chain_refuses_tampered_run_state(
+    tmp_path: Path,
+    corruption: str,
+    message: str,
+) -> None:
+    guard = CostGuard(
+        edition=EDITION_NAME,
+        run_id="tampered-chain",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+    chain = guard.reserve_call(0.3, chain_total_usd=0.9)
+    with sqlite3.connect(guard.ledger_path) as connection:
+        if corruption == "missing_run":
+            connection.execute(
+                "DELETE FROM ai_cost_runs WHERE edition = ? AND run_id = ?",
+                (EDITION_NAME, "tampered-chain"),
+            )
+        else:
+            connection.execute(
+                "UPDATE ai_cost_runs SET reserved_usd = 0.1 "
+                "WHERE edition = ? AND run_id = ?",
+                (EDITION_NAME, "tampered-chain"),
+            )
+
+    with pytest.raises(StateError, match=message):
+        guard.release_chain(chain)
+
+    with sqlite3.connect(guard.ledger_path) as connection:
+        assert connection.execute(
+            "SELECT status, released_at FROM ai_cost_chains WHERE chain_id = ?",
+            (chain.chain_id,),
+        ).fetchone() == ("reserved", None)
 
 
 def test_non_dispatch_release_rolls_back_if_marker_insert_fails(tmp_path: Path) -> None:

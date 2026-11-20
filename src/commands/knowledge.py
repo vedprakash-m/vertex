@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import json
 import math
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -10,24 +10,71 @@ from typing import Any
 import typer
 
 from src.ai.discovery.kb_claim_extractor import extract_claim_candidates_from_markdown
-from src.ai.discovery.kb_event_extractor import KBEventExtractorError, extract_event_candidates_from_markdown
+from src.ai.discovery.kb_event_extractor import (
+    KBEventExtractorError,
+    extract_event_candidates_from_markdown,
+)
 from src.core.backup import find_backups_referencing_paths
+from src.core.config_loader import load_review_config
 from src.core.entity_registry import EntityRegistry
-from src.core.knowledge_candidate_store import active_candidates as active_knowledge_candidates
-from src.core.knowledge_candidate_store import append_candidate as append_knowledge_candidate
-from src.core.knowledge_candidate_store import SKIP_EXPIRY_DAYS, KnowledgeCandidate, KnowledgeCandidateDecisionRecord, KnowledgeCandidateEntityResolution, append_triage_decision, load_pending_candidates, load_triage_decisions
-from src.core.knowledge.predicate_registry import all_predicates, validate_predicate_value
-from src.core.knowledge.vault import delete_vault_entry, ingest_knowledge_source, load_all_vault_entries, load_scope_sources, load_vault_entry, source_registry_paths_for_vault_hash
-from src.core.knowledge_claim_store import append_claim_revision, claim_ids_referencing_vault_hash, find_claim_redaction_by_id, find_claim_revision_by_id, find_claim_revision_storage_path, load_program_knowledge_scopes, redact_claim_revision, summarize_knowledge_status
+from src.core.exceptions import ConfigError
+from src.core.knowledge.predicate_registry import (
+    all_predicates,
+    validate_predicate_value,
+)
+from src.core.knowledge.vault import (
+    delete_vault_entry,
+    ingest_knowledge_source,
+    load_all_vault_entries,
+    load_scope_sources,
+    load_vault_entry,
+    source_registry_paths_for_vault_hash,
+)
+from src.core.knowledge_candidate_store import (
+    RESOLUTION_VERIFIED_KIND,
+    REVIEW_EVENT_KINDS,
+    SKIP_EXPIRY_DAYS,
+    KnowledgeCandidate,
+    KnowledgeCandidateDecisionRecord,
+    KnowledgeCandidateEntityResolution,
+    KnowledgeCandidateLifecycleSummary,
+    KnowledgeCandidateReviewState,
+    append_triage_decision,
+    candidate_history,
+    candidate_knowledge_class,
+    candidate_lifecycle_summary,
+    candidate_payload_sha256,
+    latest_candidate_terminal_decision,
+    latest_verified_candidate_resolution,
+    load_pending_candidates,
+    load_triage_decisions,
+)
+from src.core.knowledge_candidate_store import (
+    active_candidates as active_knowledge_candidates,
+)
+from src.core.knowledge_candidate_store import (
+    append_candidate as append_knowledge_candidate,
+)
+from src.core.knowledge_claim_store import (
+    append_claim_revision,
+    claim_ids_referencing_vault_hash,
+    find_claim_redaction_by_id,
+    find_claim_revision_by_id,
+    find_claim_revision_storage_path,
+    load_program_knowledge_scopes,
+    redact_claim_revision,
+    summarize_knowledge_status,
+)
 from src.core.knowledge_index import ensure_knowledge_index, load_live_vault_hashes
 from src.core.knowledge_store import get_shared_knowledge_root
-from src.core.ledger.candidate_store import CandidateEvent, append_candidate as append_ledger_candidate
+from src.core.ledger.candidate_store import CandidateEvent
+from src.core.ledger.candidate_store import append_candidate as append_ledger_candidate
 from src.core.ledger.event_log import ConfidenceTier
 from src.core.ledger.source_refs import OperatorAssertionRef
 from src.core.ledger.ulid import new_ulid
+from src.core.operator_identity import OperatorIdentity, capture_operator_identity
 from src.core.program_reality import ProgramReality
 from src.core.workspace_paths import PROGRAMS_ROOT
-
 
 app = typer.Typer(help="Knowledge plane authoring and inspection commands.")
 triage_app = typer.Typer(help="Review staged knowledge claim candidates.")
@@ -344,6 +391,7 @@ def quarantine_batch(
     batch_id: str = typer.Option(..., "--batch-id", help="Batch ID to quarantine."),
     actor: str = typer.Option(..., "--actor", help="Operator quarantining the batch."),
     reason: str = typer.Option(..., "--reason", help="Reason for quarantining the batch."),
+    program: str | None = typer.Option(None, "--program", help="Program review authority for review-gated candidates."),
     programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
 ) -> None:
     pending_candidates = [candidate for candidate in load_pending_candidates(programs_root=programs_root) if candidate.batch_id == batch_id]
@@ -360,7 +408,22 @@ def quarantine_batch(
     if not active_batch_candidates:
         typer.echo(f"Batch {batch_id} already has no active candidates.")
         return
+    review_bindings = []
     for candidate in active_batch_candidates:
+        identity = _require_candidate_review_identity(
+            candidate,
+            actor=actor,
+            program_id=program,
+            programs_root=programs_root,
+        )
+        review = _require_current_candidate_review(
+            candidate,
+            identity=identity,
+            program_id=program,
+            programs_root=programs_root,
+        )
+        review_bindings.append((candidate, identity, review))
+    for candidate, identity, review in review_bindings:
         append_triage_decision(
             KnowledgeCandidateDecisionRecord(
                 candidate_id=candidate.candidate_id,
@@ -369,6 +432,16 @@ def quarantine_batch(
                 triage_actor=actor,
                 batch_id=batch_id,
                 reason=f"quarantined: {reason}",
+                actor_principal=None if identity is None else identity.principal,
+                actor_machine=None if identity is None else identity.machine,
+                actor_session=None if identity is None else identity.session,
+                candidate_sha256=(
+                    candidate_payload_sha256(candidate)
+                    if review is not None
+                    else None
+                ),
+                review_authority_program=review.review_authority_program if review is not None else None,
+                reviewed_subject=review.reviewed_subject if review is not None else None,
             ),
             programs_root=programs_root,
         )
@@ -413,6 +486,7 @@ def show_claims(
                     "recorded_at": claim.recorded_at.isoformat(),
                     "source_document_key": claim.source_document_key,
                     "overridden_claim_ids": list(claim.overridden_claim_ids),
+                    "knowledge_class": claim.knowledge_class,
                 }
                 for claim in entry.claims
             ],
@@ -434,6 +508,7 @@ def show_claims(
         tombstone_suffix = " tombstoned=true" if claim.tombstoned else ""
         typer.echo(
             f"- {claim.predicate}={value_label} scope={claim.scope} confidence={claim.confidence}"
+            f" knowledge_class={claim.knowledge_class}"
             f" source={claim.source_document_key}{tombstone_suffix}"
         )
 
@@ -443,12 +518,14 @@ def list_predicates(format: str = typer.Option("text", "--format", help="Output 
     definitions = all_predicates()
     normalized_format = format.strip().lower()
     if normalized_format == "json":
-        typer.echo(json.dumps([definition.__dict__ for definition in definitions], indent=2, sort_keys=True))
+        typer.echo(json.dumps([definition.to_dict() for definition in definitions], indent=2, sort_keys=True))
         return
     if normalized_format != "text":
         raise typer.BadParameter("--format must be 'text' or 'json'.")
     for definition in definitions:
-        typer.echo(f"- {definition.name} ({definition.value_kind})")
+        typer.echo(
+            f"- {definition.name} class={definition.knowledge_class.value} ({definition.value_kind})"
+        )
 
 
 @app.command("status")
@@ -462,12 +539,25 @@ def status(format: str = typer.Option("text", "--format", help="Output format: t
         raise typer.BadParameter("--format must be 'text' or 'json'.")
     typer.echo("KNOWLEDGE STATUS")
     pipeline_summary = ",".join(f"{pipeline}={count}" for pipeline, count in summary.pending_candidates_by_pipeline.items()) or "-"
+    class_summary = ",".join(
+        f"{knowledge_class}={count}"
+        for knowledge_class, count in summary.pending_candidates_by_knowledge_class.items()
+    ) or "-"
     typer.echo(
         f"pending_candidates={summary.pending_candidate_count}"
         f" pending_by_pipeline={pipeline_summary}"
+        f" pending_by_knowledge_class={class_summary}"
         f" oldest_pending_age_seconds={summary.oldest_pending_candidate_age_seconds}"
         f" pending_missing_created_at={summary.pending_candidates_missing_created_at_count}"
         f" triaged_candidates={summary.triaged_candidate_count}"
+    )
+    typer.echo(
+        f"review_required_candidates={summary.review_required_candidate_count}"
+        f" current_reviews={summary.current_review_candidate_count}"
+        f" unreviewed_candidates={summary.unreviewed_candidate_count}"
+        f" expired_reviews={summary.expired_review_candidate_count}"
+        f" invalid_reviews={summary.invalid_review_candidate_count}"
+        f" verified_resolutions={summary.verified_resolution_count}"
     )
     typer.echo(
         f"latest_triage_actor={summary.latest_triage_session_actor or '-'}"
@@ -482,7 +572,10 @@ def status(format: str = typer.Option("text", "--format", help="Output format: t
         f" batches_approved={summary.approved_batch_count}"
         f" batches_quarantined={summary.quarantined_batch_count}"
     )
-    typer.echo(f"registered_predicates={summary.registered_predicate_count}")
+    typer.echo(
+        f"registered_predicates={summary.registered_predicate_count}"
+        f" registered_knowledge_classes={summary.registered_knowledge_class_count}"
+    )
     typer.echo(
         f"expired_claims={summary.expired_claim_count}"
         f" expiring_soon_claims={summary.expiring_soon_claim_count}"
@@ -547,26 +640,91 @@ def triage_list(
         return
     for candidate in candidates:
         resolution_summary = _render_candidate_resolution_summary(candidate, programs_root=programs_root)
+        lifecycle = _candidate_read_lifecycle(candidate, programs_root=programs_root)
         typer.echo(
             f"- {candidate.candidate_id} scope={candidate.scope} subject={candidate.proposed_claim.subject}"
             f" predicate={candidate.proposed_claim.predicate} confidence={candidate.proposed_confidence}"
             f" extraction_confidence={candidate.extraction_confidence:.3f} source={candidate.source_document_key}"
             f" corroborating_refs={len(candidate.corroborating_refs)} effective_subject={_effective_candidate_subject(candidate, programs_root=programs_root)}"
-            f" entity_resolution={resolution_summary}"
+            f" knowledge_class={candidate_knowledge_class(candidate)}"
+            f" reviewed_subject={lifecycle.latest_review.reviewed_subject if lifecycle.latest_review is not None else '-'}"
+            f" review_state={lifecycle.review_state.value} entity_resolution={resolution_summary}"
         )
+
+
+@triage_app.command("review")
+def triage_review(
+    candidate_id: str = typer.Option(..., "--candidate", help="Candidate ID to review."),
+    actor: str = typer.Option(..., "--actor", help="Reviewer display name."),
+    program: str = typer.Option(..., "--program", help="Program whose review policy authorizes this review."),
+    valid_until: str = typer.Option(..., "--valid-until", help="Explicit review expiry (ISO date or datetime)."),
+    reason: str = typer.Option(..., "--reason", help="Review basis and verification performed."),
+    programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
+) -> None:
+    _record_candidate_review(
+        candidate_id,
+        actor=actor,
+        program_id=program,
+        valid_until=valid_until,
+        reason=reason,
+        renewal=False,
+        programs_root=programs_root,
+    )
+    typer.echo(f"Reviewed {candidate_id} through {valid_until}.")
+
+
+@triage_app.command("renew")
+def triage_renew(
+    candidate_id: str = typer.Option(..., "--candidate", help="Candidate ID whose review is renewed."),
+    actor: str = typer.Option(..., "--actor", help="Reviewer display name."),
+    program: str = typer.Option(..., "--program", help="Program whose review policy authorizes this review."),
+    valid_until: str = typer.Option(..., "--valid-until", help="Explicit renewed review expiry (ISO date or datetime)."),
+    reason: str = typer.Option(..., "--reason", help="Reason the prior review is being renewed."),
+    programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
+) -> None:
+    _record_candidate_review(
+        candidate_id,
+        actor=actor,
+        program_id=program,
+        valid_until=valid_until,
+        reason=reason,
+        renewal=True,
+        programs_root=programs_root,
+    )
+    typer.echo(f"Renewed review for {candidate_id} through {valid_until}.")
 
 
 @triage_app.command("approve")
 def triage_approve(
     candidate_id: str = typer.Option(..., "--candidate", help="Candidate ID to approve."),
     actor: str = typer.Option(..., "--actor", help="Operator approving the candidate."),
+    program: str | None = typer.Option(None, "--program", help="Program review authority for review-gated candidates."),
     programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
 ) -> None:
     candidate = _require_candidate(candidate_id, programs_root=programs_root)
     _ensure_candidate_triageable(candidate_id, programs_root=programs_root)
+    identity = _require_candidate_review_identity(
+        candidate,
+        actor=actor,
+        program_id=program,
+        programs_root=programs_root,
+    )
+    review = _require_current_candidate_review(
+        candidate,
+        identity=identity,
+        program_id=program,
+        programs_root=programs_root,
+    )
+    if review is None:
+        reviewed_subject = _effective_candidate_subject(
+            candidate, programs_root=programs_root
+        )
+    else:
+        assert review.reviewed_subject is not None
+        reviewed_subject = review.reviewed_subject
     revision = append_claim_revision(
         scope=candidate.scope,
-        subject=_effective_candidate_subject(candidate, programs_root=programs_root),
+        subject=reviewed_subject,
         predicate=candidate.proposed_claim.predicate,
         value=candidate.proposed_claim.value,
         valid_from=candidate.proposed_claim.valid_from,
@@ -584,6 +742,16 @@ def triage_approve(
             batch_id=candidate.batch_id,
             edited=False,
             resulting_claim_id=revision.claim_id,
+            actor_principal=None if identity is None else identity.principal,
+            actor_machine=None if identity is None else identity.machine,
+            actor_session=None if identity is None else identity.session,
+            candidate_sha256=(
+                candidate_payload_sha256(candidate)
+                if review is not None
+                else None
+            ),
+            review_authority_program=review.review_authority_program if review is not None else None,
+            reviewed_subject=reviewed_subject,
         ),
         programs_root=programs_root,
     )
@@ -601,10 +769,23 @@ def triage_edit(
     valid_from: str | None = typer.Option(None, "--valid-from", help="Replacement validity start (ISO date or datetime)."),
     valid_until: str | None = typer.Option(None, "--valid-until", help="Replacement validity end (ISO date or datetime)."),
     reason: str | None = typer.Option(None, "--reason", help="Optional edit rationale."),
+    program: str | None = typer.Option(None, "--program", help="Program review authority for review-gated candidates."),
     programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
 ) -> None:
     candidate = _require_candidate(candidate_id, programs_root=programs_root)
     _ensure_candidate_triageable(candidate_id, programs_root=programs_root)
+    identity = _require_candidate_review_identity(
+        candidate,
+        actor=actor,
+        program_id=program,
+        programs_root=programs_root,
+    )
+    review = _require_current_candidate_review(
+        candidate,
+        identity=identity,
+        program_id=program,
+        programs_root=programs_root,
+    )
     edited_subject = subject or _effective_candidate_subject(candidate, programs_root=programs_root)
     edited_predicate = predicate or candidate.proposed_claim.predicate
     edited_value = (
@@ -635,6 +816,16 @@ def triage_edit(
             reason=reason,
             edited=True,
             resulting_claim_id=revision.claim_id,
+            actor_principal=None if identity is None else identity.principal,
+            actor_machine=None if identity is None else identity.machine,
+            actor_session=None if identity is None else identity.session,
+            candidate_sha256=(
+                candidate_payload_sha256(candidate)
+                if review is not None
+                else None
+            ),
+            review_authority_program=review.review_authority_program if review is not None else None,
+            reviewed_subject=edited_subject,
         ),
         programs_root=programs_root,
     )
@@ -646,6 +837,7 @@ def triage_batch_approve(
     batch_id: str = typer.Option(..., "--batch-id", help="Batch ID to approve."),
     actor: str = typer.Option(..., "--actor", help="Operator approving the batch."),
     min_confidence: float = typer.Option(0.9, "--min-confidence", help="Minimum extraction confidence required for auto-approval."),
+    program: str | None = typer.Option(None, "--program", help="Program review authority for review-gated candidates."),
     programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
 ) -> None:
     candidates = active_knowledge_candidates(programs_root=programs_root, batch_id=batch_id)
@@ -671,14 +863,36 @@ def triage_batch_approve(
     if blocked_for_confidence:
         typer.echo(f"Batch '{batch_id}' failed confidence gate.")
         raise typer.Exit(code=3)
+    review_bindings = []
+    for candidate in candidates:
+        identity = _require_candidate_review_identity(
+            candidate,
+            actor=actor,
+            program_id=program,
+            programs_root=programs_root,
+        )
+        review = _require_current_candidate_review(
+            candidate,
+            identity=identity,
+            program_id=program,
+            programs_root=programs_root,
+        )
+        review_bindings.append((candidate, identity, review))
     approved = 0
     total = len(candidates)
     started_at = monotonic()
     last_report_at = started_at
-    for candidate in candidates:
+    for candidate, identity, review in review_bindings:
+        if review is None:
+            reviewed_subject = _effective_candidate_subject(
+                candidate, programs_root=programs_root
+            )
+        else:
+            assert review.reviewed_subject is not None
+            reviewed_subject = review.reviewed_subject
         revision = append_claim_revision(
             scope=candidate.scope,
-            subject=_effective_candidate_subject(candidate, programs_root=programs_root),
+            subject=reviewed_subject,
             predicate=candidate.proposed_claim.predicate,
             value=candidate.proposed_claim.value,
             valid_from=candidate.proposed_claim.valid_from,
@@ -696,6 +910,16 @@ def triage_batch_approve(
                 batch_id=batch_id,
                 edited=False,
                 resulting_claim_id=revision.claim_id,
+                actor_principal=None if identity is None else identity.principal,
+                actor_machine=None if identity is None else identity.machine,
+                actor_session=None if identity is None else identity.session,
+                candidate_sha256=(
+                    candidate_payload_sha256(candidate)
+                    if identity is not None
+                    else None
+                ),
+                review_authority_program=review.review_authority_program if review is not None else None,
+                reviewed_subject=reviewed_subject,
             ),
             programs_root=programs_root,
         )
@@ -770,6 +994,9 @@ def _merge_knowledge_candidate_group(group: list[KnowledgeCandidate]) -> Knowled
         source_document_key=primary.source_document_key,
         corroborating_refs=tuple(corroborating_refs),
         batch_id=primary.batch_id,
+        created_at=primary.created_at,
+        knowledge_class=primary.knowledge_class,
+        requires_authorized_review=primary.requires_authorized_review,
     )
 
 
@@ -836,10 +1063,23 @@ def triage_reject(
     candidate_id: str = typer.Option(..., "--candidate", help="Candidate ID to reject."),
     actor: str = typer.Option(..., "--actor", help="Operator rejecting the candidate."),
     reason: str | None = typer.Option(None, "--reason", help="Optional rejection reason."),
+    program: str | None = typer.Option(None, "--program", help="Program review authority for review-gated candidates."),
     programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
 ) -> None:
     candidate = _require_candidate(candidate_id, programs_root=programs_root)
     _ensure_candidate_triageable(candidate_id, programs_root=programs_root)
+    identity = _require_candidate_review_identity(
+        candidate,
+        actor=actor,
+        program_id=program,
+        programs_root=programs_root,
+    )
+    review = _require_current_candidate_review(
+        candidate,
+        identity=identity,
+        program_id=program,
+        programs_root=programs_root,
+    )
     append_triage_decision(
         KnowledgeCandidateDecisionRecord(
             candidate_id=candidate.candidate_id,
@@ -848,6 +1088,16 @@ def triage_reject(
             triage_actor=actor,
             batch_id=candidate.batch_id,
             reason=reason,
+            actor_principal=None if identity is None else identity.principal,
+            actor_machine=None if identity is None else identity.machine,
+            actor_session=None if identity is None else identity.session,
+            candidate_sha256=(
+                candidate_payload_sha256(candidate)
+                if review is not None
+                else None
+            ),
+            review_authority_program=review.review_authority_program if review is not None else None,
+            reviewed_subject=review.reviewed_subject if review is not None else None,
         ),
         programs_root=programs_root,
     )
@@ -859,10 +1109,23 @@ def triage_skip(
     candidate_id: str = typer.Option(..., "--candidate", help="Candidate ID to skip for now."),
     actor: str = typer.Option(..., "--actor", help="Operator skipping the candidate."),
     reason: str | None = typer.Option(None, "--reason", help="Optional skip reason."),
+    program: str | None = typer.Option(None, "--program", help="Program review authority for review-gated candidates."),
     programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
 ) -> None:
     candidate = _require_candidate(candidate_id, programs_root=programs_root)
     _ensure_candidate_triageable(candidate_id, programs_root=programs_root)
+    identity = _require_candidate_review_identity(
+        candidate,
+        actor=actor,
+        program_id=program,
+        programs_root=programs_root,
+    )
+    review = _require_current_candidate_review(
+        candidate,
+        identity=identity,
+        program_id=program,
+        programs_root=programs_root,
+    )
     append_triage_decision(
         KnowledgeCandidateDecisionRecord(
             candidate_id=candidate.candidate_id,
@@ -871,10 +1134,137 @@ def triage_skip(
             triage_actor=actor,
             batch_id=candidate.batch_id,
             reason=reason,
+            actor_principal=None if identity is None else identity.principal,
+            actor_machine=None if identity is None else identity.machine,
+            actor_session=None if identity is None else identity.session,
+            candidate_sha256=(
+                candidate_payload_sha256(candidate)
+                if review is not None
+                else None
+            ),
+            review_authority_program=review.review_authority_program if review is not None else None,
+            reviewed_subject=review.reviewed_subject if review is not None else None,
         ),
         programs_root=programs_root,
     )
     typer.echo(f"Skipped {candidate.candidate_id}")
+
+
+@triage_app.command("verify-resolution")
+def triage_verify_resolution(
+    candidate_id: str = typer.Option(..., "--candidate", help="Candidate ID whose terminal resolution is verified."),
+    actor: str = typer.Option(..., "--actor", help="Verifier display name."),
+    program: str = typer.Option(..., "--program", help="Program whose review policy authorizes verification."),
+    reason: str = typer.Option(..., "--reason", help="Evidence establishing the candidate resolution."),
+    programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
+) -> None:
+    candidate = _require_candidate(candidate_id, programs_root=programs_root)
+    identity = _require_authorized_candidate_reviewer(
+        candidate,
+        actor=actor,
+        program_id=program,
+        programs_root=programs_root,
+    )
+    review = _require_current_candidate_review(
+        candidate,
+        identity=identity,
+        program_id=program,
+        programs_root=programs_root,
+    )
+    terminal = latest_candidate_terminal_decision(candidate_id, programs_root=programs_root)
+    if terminal is None or terminal.kind == "skipped":
+        raise typer.BadParameter(
+            f"Candidate '{candidate_id}' has no approved or rejected terminal decision."
+        )
+    if latest_verified_candidate_resolution(candidate_id, programs_root=programs_root) is not None:
+        typer.echo(f"Resolution for {candidate_id} is already verified.")
+        return
+    if terminal.candidate_sha256 != candidate_payload_sha256(candidate):
+        raise typer.BadParameter(
+            f"Candidate '{candidate_id}' terminal decision is bound to different candidate bytes."
+        )
+    if terminal.reviewed_subject is None:
+        raise typer.BadParameter(
+            f"Candidate '{candidate_id}' terminal decision has no reviewed subject binding."
+        )
+    if review is None or review.decided_at > terminal.decided_at:
+        raise typer.BadParameter(
+            f"Candidate '{candidate_id}' has no review preceding its terminal decision."
+        )
+    resulting_claim_id = terminal.resulting_claim_id
+    if terminal.kind == "approved":
+        if resulting_claim_id is None:
+            raise typer.BadParameter(
+                f"Candidate '{candidate_id}' has no resulting claim to verify."
+            )
+        revision = find_claim_revision_by_id(
+            resulting_claim_id,
+            knowledge_root=get_shared_knowledge_root(programs_root),
+        )
+        if revision is None:
+            raise typer.BadParameter(
+                f"Candidate '{candidate_id}' resulting claim '{resulting_claim_id}' is missing or redacted."
+            )
+        if terminal.edited is not True and (
+            revision.scope != candidate.scope
+            or revision.subject != terminal.reviewed_subject
+            or revision.predicate != candidate.proposed_claim.predicate
+            or revision.value != candidate.proposed_claim.value
+        ):
+            raise typer.BadParameter(
+                f"Candidate '{candidate_id}' resulting claim does not match the approved candidate."
+            )
+    append_triage_decision(
+        KnowledgeCandidateDecisionRecord(
+            candidate_id=candidate.candidate_id,
+            kind=RESOLUTION_VERIFIED_KIND,
+            decided_at=datetime.now(timezone.utc),
+            triage_actor=actor,
+            batch_id=candidate.batch_id,
+            reason=reason,
+            resulting_claim_id=resulting_claim_id,
+            actor_principal=identity.principal,
+            actor_machine=identity.machine,
+            actor_session=identity.session,
+            candidate_sha256=candidate_payload_sha256(candidate),
+            review_authority_program=review.review_authority_program,
+            reviewed_subject=terminal.reviewed_subject,
+        ),
+        programs_root=programs_root,
+    )
+    typer.echo(f"Verified resolution for {candidate.candidate_id}.")
+
+
+@triage_app.command("history")
+def triage_history(
+    candidate_id: str = typer.Option(..., "--candidate", help="Candidate ID whose retained lifecycle history to inspect."),
+    format: str = typer.Option("text", "--format", help="Output format: text or json."),
+    programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
+) -> None:
+    candidate = _require_candidate(candidate_id, programs_root=programs_root)
+    history = candidate_history(candidate_id, programs_root=programs_root)
+    payload = {
+        "candidate_id": candidate.candidate_id,
+        "knowledge_class": candidate_knowledge_class(candidate),
+        "requires_authorized_review": candidate.requires_authorized_review,
+        "history": [_candidate_decision_payload(record) for record in history],
+    }
+    normalized_format = format.strip().lower()
+    if normalized_format == "json":
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    if normalized_format != "text":
+        raise typer.BadParameter("--format must be 'text' or 'json'.")
+    typer.echo(f"KNOWLEDGE CANDIDATE HISTORY {candidate_id}")
+    if not history:
+        typer.echo("No retained lifecycle events.")
+        return
+    for record in history:
+        typer.echo(
+            f"- {record.decided_at.isoformat()} kind={record.kind} actor={record.triage_actor}"
+            f" review_valid_until={record.review_valid_until.isoformat() if record.review_valid_until is not None else '-'}"
+            f" principal={record.actor_principal or '-'} resulting_claim_id={record.resulting_claim_id or '-'}"
+        )
 
 
 @triage_app.command("expire-skips")
@@ -973,6 +1363,203 @@ def _resolve_supersede_target(
     return target.scope, target.subject, target.predicate
 
 
+def _record_candidate_review(
+    candidate_id: str,
+    *,
+    actor: str,
+    program_id: str,
+    valid_until: str,
+    reason: str,
+    renewal: bool,
+    programs_root: Path,
+) -> KnowledgeCandidateDecisionRecord:
+    candidate = _require_candidate(candidate_id, programs_root=programs_root)
+    _ensure_candidate_triageable(candidate_id, programs_root=programs_root)
+    identity = _require_authorized_candidate_reviewer(
+        candidate,
+        actor=actor,
+        program_id=program_id,
+        programs_root=programs_root,
+    )
+    try:
+        reviewed_until = _parse_cli_datetime(valid_until)
+    except ValueError as error:
+        raise typer.BadParameter("--valid-until must be an ISO date or datetime.") from error
+    now = datetime.now(timezone.utc)
+    if reviewed_until is None or reviewed_until <= now:
+        raise typer.BadParameter("--valid-until must be a future ISO date or datetime.")
+    if not reason.strip():
+        raise typer.BadParameter("--reason must name the review evidence.")
+    prior_review = next(
+        (
+            record
+            for record in reversed(candidate_history(candidate_id, programs_root=programs_root))
+            if record.kind in REVIEW_EVENT_KINDS
+        ),
+        None,
+    )
+    if renewal and prior_review is None:
+        raise typer.BadParameter(f"Candidate '{candidate_id}' has no review to renew.")
+    if not renewal and prior_review is not None:
+        raise typer.BadParameter(
+            f"Candidate '{candidate_id}' is already reviewed; use the renew command."
+        )
+    record = KnowledgeCandidateDecisionRecord(
+        candidate_id=candidate.candidate_id,
+        kind="review_renewed" if renewal else "reviewed",
+        decided_at=now,
+        triage_actor=actor,
+        batch_id=candidate.batch_id,
+        reason=reason.strip(),
+        review_valid_until=reviewed_until,
+        actor_principal=identity.principal,
+        actor_machine=identity.machine,
+        actor_session=identity.session,
+        candidate_sha256=candidate_payload_sha256(candidate),
+        review_authority_program=program_id,
+        reviewed_subject=_effective_candidate_subject(
+            candidate, programs_root=programs_root
+        ),
+    )
+    append_triage_decision(record, programs_root=programs_root)
+    return record
+
+
+def _require_candidate_review_identity(
+    candidate: KnowledgeCandidate,
+    *,
+    actor: str,
+    program_id: str | None,
+    programs_root: Path,
+) -> OperatorIdentity | None:
+    if not candidate.requires_authorized_review:
+        return None
+    return _require_authorized_candidate_reviewer(
+        candidate,
+        actor=actor,
+        program_id=program_id,
+        programs_root=programs_root,
+    )
+
+
+def _require_authorized_candidate_reviewer(
+    candidate: KnowledgeCandidate,
+    *,
+    actor: str,
+    program_id: str | None,
+    programs_root: Path,
+) -> OperatorIdentity:
+    selected_program = program_id or _program_id_from_scope(candidate.scope)
+    if selected_program is None:
+        raise typer.BadParameter(
+            "--program is required for a shared knowledge candidate."
+        )
+    programs_path = programs_root.resolve()
+    program_path = (programs_root / selected_program).resolve()
+    if program_path.parent != programs_path:
+        raise typer.BadParameter("Program review authority leaves the selected programs root.")
+    try:
+        scope_chain = load_program_knowledge_scopes(
+            selected_program, programs_root=programs_root
+        )
+        settings = load_review_config(program_path / "review.yaml")
+    except (OSError, ConfigError) as error:
+        raise typer.BadParameter(
+            "Knowledge review authorization is unavailable; repair the selected review.yaml."
+        ) from error
+    if candidate.scope not in scope_chain:
+        raise typer.BadParameter(
+            f"Candidate scope '{candidate.scope}' is outside program '{selected_program}'."
+        )
+    try:
+        identity = capture_operator_identity(actor, require_os_principal=True)
+    except (OSError, ValueError) as error:
+        raise typer.BadParameter("A native OS principal is required for knowledge review.") from error
+    if (
+        identity.principal is None
+        or identity.machine is None
+        or identity.session is None
+        or identity.principal not in settings.knowledge_review_principals
+    ):
+        raise typer.BadParameter(
+            "OS principal is not authorized for knowledge review in review.yaml."
+        )
+    return identity
+
+
+def _require_current_candidate_review(
+    candidate: KnowledgeCandidate,
+    *,
+    identity: OperatorIdentity | None,
+    program_id: str | None,
+    programs_root: Path,
+) -> KnowledgeCandidateDecisionRecord | None:
+    if identity is None:
+        return None
+    selected_program = program_id or _program_id_from_scope(candidate.scope)
+    if selected_program is None:
+        raise typer.BadParameter("--program is required for the candidate review authority.")
+    try:
+        settings = load_review_config(programs_root / selected_program / "review.yaml")
+    except (OSError, ConfigError) as error:
+        raise typer.BadParameter(
+            "Knowledge review authorization is unavailable; repair the selected review.yaml."
+        ) from error
+    lifecycle = candidate_lifecycle_summary(
+        candidate,
+        programs_root=programs_root,
+        review_authority_valid=True,
+    )
+    review = lifecycle.latest_review
+    if lifecycle.review_state is not KnowledgeCandidateReviewState.CURRENT or review is None:
+        raise typer.BadParameter(
+            f"Candidate '{candidate.candidate_id}' has no current authorized review."
+        )
+    if (
+        review.actor_principal is None
+        or review.actor_principal not in settings.knowledge_review_principals
+        or review.review_authority_program != selected_program
+        or review.reviewed_subject is None
+    ):
+        raise typer.BadParameter(
+            f"Candidate '{candidate.candidate_id}' review authority is no longer authorized."
+        )
+    return review
+
+
+def _candidate_read_lifecycle(
+    candidate: KnowledgeCandidate,
+    *,
+    programs_root: Path,
+) -> KnowledgeCandidateLifecycleSummary:
+    lifecycle = candidate_lifecycle_summary(candidate, programs_root=programs_root)
+    review = lifecycle.latest_review
+    if review is None or not candidate.requires_authorized_review:
+        return lifecycle
+    try:
+        authority_program = review.review_authority_program
+        if authority_program is None:
+            authority_valid = False
+        else:
+            programs_path = programs_root.resolve()
+            program_path = (programs_root / authority_program).resolve()
+            if program_path.parent != programs_path:
+                authority_valid = False
+            else:
+                settings = load_review_config(program_path / "review.yaml")
+                authority_valid = (
+                    review.actor_principal in settings.knowledge_review_principals
+                    and review.reviewed_subject is not None
+                )
+    except (OSError, ConfigError, ValueError):
+        authority_valid = False
+    return candidate_lifecycle_summary(
+        candidate,
+        programs_root=programs_root,
+        review_authority_valid=authority_valid,
+    )
+
+
 def _require_candidate(candidate_id: str, *, programs_root: Path) -> KnowledgeCandidate:
     for candidate in load_pending_candidates(programs_root=programs_root):
         if candidate.candidate_id == candidate_id:
@@ -981,10 +1568,7 @@ def _require_candidate(candidate_id: str, *, programs_root: Path) -> KnowledgeCa
 
 
 def _ensure_candidate_triageable(candidate_id: str, *, programs_root: Path) -> None:
-    latest = None
-    for decision in load_triage_decisions(programs_root=programs_root):
-        if decision.candidate_id == candidate_id:
-            latest = decision
+    latest = latest_candidate_terminal_decision(candidate_id, programs_root=programs_root)
     if latest is None:
         return
     if latest.kind == "skipped":
@@ -996,6 +1580,7 @@ def _ensure_candidate_triageable(candidate_id: str, *, programs_root: Path) -> N
 
 def _candidate_payload(candidate: KnowledgeCandidate, *, programs_root: Path) -> dict[str, Any]:
     effective_resolution = _effective_candidate_entity_resolution(candidate, programs_root=programs_root)
+    lifecycle = _candidate_read_lifecycle(candidate, programs_root=programs_root)
     return {
         "candidate_id": candidate.candidate_id,
         "scope": candidate.scope,
@@ -1026,6 +1611,47 @@ def _candidate_payload(candidate: KnowledgeCandidate, *, programs_root: Path) ->
             for resolution in effective_resolution
         ],
         "batch_id": candidate.batch_id,
+        "knowledge_class": candidate_knowledge_class(candidate),
+        "requires_authorized_review": candidate.requires_authorized_review,
+        "review_state": lifecycle.review_state.value,
+        "review_valid_until": (
+            lifecycle.latest_review.review_valid_until.isoformat()
+            if lifecycle.latest_review is not None
+            and lifecycle.latest_review.review_valid_until is not None
+            else None
+        ),
+        "reviewed_subject": (
+            lifecycle.latest_review.reviewed_subject
+            if lifecycle.latest_review is not None
+            else None
+        ),
+        "resolution_verified": lifecycle.latest_verified_resolution is not None,
+    }
+
+
+def _candidate_decision_payload(
+    record: KnowledgeCandidateDecisionRecord,
+) -> dict[str, str | bool | None]:
+    return {
+        "candidate_id": record.candidate_id,
+        "kind": record.kind,
+        "decided_at": record.decided_at.isoformat(),
+        "triage_actor": record.triage_actor,
+        "batch_id": record.batch_id,
+        "reason": record.reason,
+        "edited": record.edited,
+        "resulting_claim_id": record.resulting_claim_id,
+        "review_valid_until": (
+            record.review_valid_until.isoformat()
+            if record.review_valid_until is not None
+            else None
+        ),
+        "actor_principal": record.actor_principal,
+        "actor_machine": record.actor_machine,
+        "actor_session": record.actor_session,
+        "candidate_sha256": record.candidate_sha256,
+        "review_authority_program": record.review_authority_program,
+        "reviewed_subject": record.reviewed_subject,
     }
 
 
@@ -1129,12 +1755,11 @@ def _candidate_is_active(candidate_id: str, *, programs_root: Path) -> bool:
 
 def _expired_skipped_candidates(*, programs_root: Path) -> tuple[KnowledgeCandidate, ...]:
     now = datetime.now(timezone.utc)
-    latest_decisions: dict[str, KnowledgeCandidateDecisionRecord] = {}
-    for decision in load_triage_decisions(programs_root=programs_root):
-        latest_decisions[decision.candidate_id] = decision
     expired: list[KnowledgeCandidate] = []
     for candidate in load_pending_candidates(programs_root=programs_root):
-        pending_decision = latest_decisions.get(candidate.candidate_id)
+        pending_decision = latest_candidate_terminal_decision(
+            candidate.candidate_id, programs_root=programs_root
+        )
         if pending_decision is None or pending_decision.kind != "skipped":
             continue
         if pending_decision.decided_at + timedelta(days=SKIP_EXPIRY_DAYS) > now:

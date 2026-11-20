@@ -1,7 +1,9 @@
 from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from itertools import product
+import json
 import math
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +18,40 @@ from src.core.truth_levels import TruthLevel
 
 NOW = datetime(2026, 11, 5, 20, tzinfo=timezone.utc)
 RISKS = (RiskLevel.DONE, RiskLevel.LOW, RiskLevel.UNKNOWN, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.BLOCKED)
+
+
+def _write_verdict_manifest(
+    programs_root: Path, *, issue: int, started_at: datetime, health: str = "high"
+) -> Path:
+    publication = programs_root / "synthetic" / "publications" / "weekly" / f"issue_{issue:03d}"
+    publication.mkdir(parents=True)
+    path = publication / f"issue_{issue:03d}.manifest.json"
+    path.write_text(
+        json.dumps({
+            "started_at": started_at.isoformat(),
+            "metadata": {
+                "program_verdict_observation": {
+                    "mode": "observe",
+                    "verdict": {
+                        "schema_version": "program-verdict.v1",
+                        "program_id": "synthetic",
+                        "snapshot_id": f"capture-{issue}",
+                        "as_of": started_at.isoformat(),
+                        "health": health,
+                        "schedule_risk": "medium",
+                        "confidence": "none",
+                        "completion_phase": "unknown",
+                        "reasons": [{"code": "risk_register_high_floor"}],
+                        "evidence_gaps": [{"code": "risk_register_coverage_unqualified"}],
+                        "leadership_asks": [],
+                        "source_refs": ["WI:1"],
+                    },
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    return path
 
 
 def _snapshot(*, risk=RiskLevel.LOW, state="Active", target=date(2026, 11, 10), dimensions=(RiskLevel.LOW,)):
@@ -53,11 +89,131 @@ def _forecast(probability=0.1, **changes):
     ), **changes)
 
 
+def test_load_latest_program_verdict_selects_newest_manifest_and_retains_reasons(
+    tmp_path: Path,
+) -> None:
+    from src.core.program_verdict import load_latest_program_verdict
+
+    _write_verdict_manifest(tmp_path, issue=11, started_at=NOW - timedelta(days=1), health="low")
+    newest = _write_verdict_manifest(tmp_path, issue=12, started_at=NOW, health="high")
+
+    verdict = load_latest_program_verdict("synthetic", programs_root=tmp_path)
+
+    assert verdict is not None
+    assert verdict.snapshot_id == "capture-12"
+    assert verdict.health is RiskLevel.HIGH
+    assert verdict.reason_codes == ("risk_register_high_floor",)
+    assert verdict.manifest_path == newest
+
+
+def test_load_latest_program_verdict_refuses_corrupt_retained_manifest(
+    tmp_path: Path,
+) -> None:
+    from src.core.program_verdict import load_latest_program_verdict
+
+    _write_verdict_manifest(tmp_path, issue=11, started_at=NOW - timedelta(days=1))
+    publication = tmp_path / "synthetic" / "publications" / "weekly" / "issue_012"
+    publication.mkdir(parents=True)
+    (publication / "issue_012.manifest.json").write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="manifest"):
+        load_latest_program_verdict("synthetic", programs_root=tmp_path)
+
+
+@pytest.mark.parametrize("program_id", ["", "..", "../outside", "nested/program"])
+def test_load_latest_program_verdict_refuses_uncontained_program_identity(
+    tmp_path: Path, program_id: str,
+) -> None:
+    from src.core.program_verdict import load_latest_program_verdict
+
+    with pytest.raises(ConfigError, match="identity|root"):
+        load_latest_program_verdict(program_id, programs_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", "program-verdict.v2"),
+        ("snapshot_id", 12),
+        ("health", "severe"),
+        ("reasons", [{"code": 12}]),
+        ("source_refs", [12]),
+    ],
+)
+def test_load_latest_program_verdict_refuses_invalid_payload_shape(
+    tmp_path: Path, field: str, value: object,
+) -> None:
+    from src.core.program_verdict import load_latest_program_verdict
+
+    path = _write_verdict_manifest(tmp_path, issue=12, started_at=NOW)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["metadata"]["program_verdict_observation"]["verdict"][field] = value
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="manifest payload"):
+        load_latest_program_verdict("synthetic", programs_root=tmp_path)
+
+
 def _observe(snapshot=None, forecasts=()):
     from src.core.program_verdict import observe_program_verdict
 
     snapshot = snapshot or _snapshot()
     return observe_program_verdict(_capture(snapshot), snapshot, forecasts)
+
+
+def test_retained_observation_validation_binds_inputs_verdict_and_capture():
+    from dataclasses import asdict
+
+    from src.core.program_verdict import validate_retained_program_verdict
+
+    observation = _observe()
+    payload = asdict(observation)
+
+    assert validate_retained_program_verdict(
+        payload,
+        capture=observation.inputs.capture,
+        report_snapshot_hash=observation.inputs.capture.report_snapshot_hash,
+    ) == observation.inputs_sha256
+
+
+@pytest.mark.parametrize("field", ["inputs_sha256", "verdict_sha256", "snapshot_id"])
+def test_retained_observation_validation_refuses_changed_binding(field):
+    from dataclasses import asdict
+
+    from src.core.program_verdict import validate_retained_program_verdict
+
+    observation = _observe()
+    payload = asdict(observation)
+    if field == "snapshot_id":
+        payload["verdict"]["snapshot_id"] = "sha256:foreign"
+    else:
+        payload[field] = "sha256:invalid"
+
+    with pytest.raises(ConfigError, match="program verdict observation"):
+        validate_retained_program_verdict(
+            payload,
+            capture=observation.inputs.capture,
+            report_snapshot_hash=observation.inputs.capture.report_snapshot_hash,
+        )
+
+
+def test_retained_comparison_validation_preserves_observed_mismatch():
+    from src.core.program_verdict import validate_retained_program_verdict_comparison
+
+    validate_retained_program_verdict_comparison(
+        {
+            "schema_version": "report-verdict-comparison.v1",
+            "mode": "observe",
+            "capture_sha256": "sha256:capture",
+            "observation_inputs_sha256": "sha256:inputs",
+            "report_risk": "low",
+            "report_health_state": "healthy",
+            "verdict_risk": "high",
+            "risk_values_equal": False,
+        },
+        capture_sha256="sha256:capture",
+        observation_inputs_sha256="sha256:inputs",
+    )
 
 
 @pytest.mark.parametrize(("item_risk", "dimension_risk"), list(product(RISKS, RISKS)))

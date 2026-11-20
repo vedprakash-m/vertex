@@ -6,7 +6,8 @@ from typing import Any, Callable
 from src.core.eml_writer import build_eml_bytes
 from src.core.jinja_filters import risk_label
 from src.core.view_models import HealthSummary, Top3Item
-from src.m365.graph_send_client import GraphMailMessage, GraphSendClient
+from src.m365.graph_send_client import GraphMailMessage
+from src.m365.outbound_dispatch import dispatch_email_via_outbox
 
 
 def _build_email_subject(
@@ -109,7 +110,7 @@ def _build_preview_eml_bytes(
 
 
 def _send_draft_email(message: GraphMailMessage) -> None:
-    GraphSendClient().send_mail(message)
+    dispatch_email_via_outbox(message)
 
 
 def _build_draft_email_sender() -> Callable[[GraphMailMessage], None]:

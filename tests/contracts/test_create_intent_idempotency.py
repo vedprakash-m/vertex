@@ -34,7 +34,7 @@ from src.core.exceptions import AuthError, ConfigError, QueryError, StateError
 from src.core.integration_types import PaginationOutcome
 from src.core.ledger.event_log import read_events
 from src.core.ledger.durable_outbox_store import load_entry, load_success_receipt
-from src.m365.ado_writer import ADOWriter
+from src.m365.ado_writer import ADOWriter, _build_create_task_patch
 
 
 class _FakeADOBackend:
@@ -51,9 +51,10 @@ class _FakeADOBackend:
         for op in patch:
             field_name = op["path"].split("/fields/")[1]
             fields[field_name] = op["value"]
+        fields["System.CreatedBy"] = {"uniqueName": "operator:fixture"}
         work_item_id = self._next_id
         self._next_id += 1
-        self.work_items[work_item_id] = {"id": work_item_id, "fields": fields}
+        self.work_items[work_item_id] = {"id": work_item_id, "rev": 1, "fields": fields}
         return work_item_id
 
     def query_wiql(self, wiql: str) -> list[int]:
@@ -71,7 +72,11 @@ class _FakeADOBackend:
             stored = self.work_items.get(work_item_id)
             if stored is None:
                 continue
-            rows.append({"id": work_item_id, "fields": {f: stored["fields"].get(f) for f in fields}})
+            rows.append({
+                "id": work_item_id,
+                "rev": stored.get("rev"),
+                "fields": {f: stored["fields"].get(f) for f in fields},
+            })
         return rows
 
 
@@ -121,11 +126,40 @@ class _LossyMutationSession:
             # Server committed the write; the client never sees the response
             # (network partition / process crash before the read completes).
             raise ConnectionError("simulated lost response after server commit")
-        return _FakeJsonResponse({"id": work_item_id})
+        fields = dict(self.backend.work_items[work_item_id]["fields"])
+        fields["System.CreatedBy"] = {"uniqueName": "operator:fixture"}
+        marker = next(
+            (
+                tag.strip().removeprefix("vertex-intent-")
+                for tag in str(fields.get("System.Tags", "")).split(";")
+                if tag.strip().startswith("vertex-intent-")
+            ),
+            "fixed-intent-abc123",
+        )
+        return _FakeJsonResponse({
+            "id": work_item_id,
+            "rev": 1,
+            "intent_id": marker,
+            "approval_id": "approval-1",
+            "provider": "ado",
+            "provider_tenant_id": "contoso",
+            "provider_project": "One",
+            "operation": "create_task.v1",
+            "provider_target_identity": "One:new",
+            "preflight_revision": 1,
+            "fields": fields,
+            "provider_request_id": f"provider-request-{work_item_id}",
+            "provider_correlation_id": marker,
+            "evidence_version": "synthetic-evidence-v1",
+            "policy_version": "synthetic-policy-v1",
+            "dispatched_at": "2026-07-02T00:00:00+00:00",
+            "observed_at": "2026-07-02T00:00:01+00:00",
+        })
 
 
 def _fake_client(backend: _FakeADOBackend, *, lose_first_response: bool) -> ADOClient:
     client = object.__new__(ADOClient)
+    client._vertex_synthetic_provider = True
     client.organization = "contoso"
     client.project = "One"
     client.timeout = 30
@@ -139,7 +173,40 @@ def _fake_client(backend: _FakeADOBackend, *, lose_first_response: bool) -> ADOC
 
 
 def _proposal(programs_root: Path) -> tuple[ADOUpdateProposal, Path]:
-    task_data = '{"title": "Follow up on rollout risk", "area_path": "One\\\\Contoso\\\\Team", "assigned_to": "alice@example.com"}'
+    task = {
+        "title": "Follow up on rollout risk",
+        "area_path": "One\\Contoso\\Team",
+        "assigned_to": "alice@example.com",
+    }
+    task["authorized_effect"] = {
+        "program_id": "fixture_prog",
+        "intent_id": "fixed-intent-abc123",
+        "approval_id": "approval-1",
+        "provider": "ado",
+        "tenant_id": "contoso",
+        "project": "One",
+        "operation": "create_task.v1",
+        "target_identity": "One:new",
+        "desired_value": {
+            "System.Title": task["title"],
+            "System.AreaPath": task["area_path"],
+            "System.AssignedTo": task["assigned_to"],
+            "System.Tags": "vertex-intent-fixed-intent-abc123",
+        },
+        "execution_principal": "operator:fixture",
+        "audience_manifest": {
+            "generated_at": "2026-07-01T00:00:00+00:00",
+            "program_id": "fixture_prog",
+            "entries": [],
+        },
+        "intended_recipients": [],
+        "preflight_revision": 1,
+        "precondition_observed_at": "2026-07-01T00:00:00+00:00",
+        "evidence_version": "synthetic-evidence-v1",
+        "policy_version": "synthetic-policy-v1",
+        "rollback_mechanism": "none",
+    }
+    task_data = json.dumps(task)
     entry = ADOUpdateEntry(
         work_item_id=0,
         action="create_task",
@@ -163,6 +230,30 @@ def _proposal(programs_root: Path) -> tuple[ADOUpdateProposal, Path]:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text("", encoding="utf-8")
     return proposal, manifest_path
+
+
+def _rebind_task_authorization(task: dict, intent_id: str) -> dict:
+    rebound = dict(task)
+    effect = dict(rebound["authorized_effect"])
+    marker = f"vertex-intent-{intent_id}"
+    desired = {
+        item["path"].removeprefix("/fields/"): item["value"]
+        for item in _build_create_task_patch({**rebound, "tags": marker})
+    }
+    effect["intent_id"] = intent_id
+    effect["desired_value"] = desired
+    rebound["authorized_effect"] = effect
+    return rebound
+
+
+def _rebound_create_entry(entry: ADOUpdateEntry, *, intent_id: str, reason: str) -> ADOUpdateEntry:
+    task = _rebind_task_authorization(json.loads(entry.proposed_value), intent_id)
+    return replace(
+        entry,
+        proposed_value=json.dumps(task),
+        operation_intent_id=intent_id,
+        reason=reason,
+    )
 
 
 def test_lost_response_then_rerun_creates_zero_new_items(tmp_path: Path) -> None:
@@ -212,6 +303,15 @@ def test_lost_response_then_rerun_creates_zero_new_items(tmp_path: Path) -> None
 
     # No mutation POST was issued on the second run.
     assert len(second_client._mutation_session.calls) == 0
+    key = create_task_idempotency_key(
+        program_id=proposal.program_id,
+        org=second_client.organization,
+        project=second_client.project,
+        operation_intent_id=proposal.entries[0].operation_intent_id,
+    )
+    db = outbox_db_path(proposal.program_id, programs_root=programs_root)
+    assert load_entry(db, key).status == "completed"
+    assert json.loads(load_success_receipt(db, key))["reconciliation"]["completed"] is True
 
     events = read_events("fixture_prog", programs_root=programs_root)
     duplicate_events = [event for event in events if event.event_type == "actuation.duplicate_prevented.v1"]
@@ -281,6 +381,9 @@ def test_never_attempted_entry_skips_search_and_creates_normally(tmp_path: Path)
     assert receipt["operation_intent_id"] == proposal.entries[0].operation_intent_id
     assert receipt["org"] == client.organization and receipt["project"] == client.project
     assert receipt["remote_response_hash"]
+    assert receipt["reconciliation"]["completed"] is True
+    assert receipt["reconciliation"]["receipts"][0]["terminal_status"] == "completed"
+    assert receipt["reconciliation"]["receipts"][0]["execution_principal"] == "operator:fixture"
 
 
 _ASSOCIATION_WARNING = (
@@ -468,7 +571,9 @@ def test_unexpected_association_error_persists_applied_entry_before_propagating_
 ) -> None:
     programs_root = tmp_path / "programs"
     proposal, manifest_path = _proposal(programs_root)
-    second = replace(proposal.entries[0], reason="action-43", operation_intent_id="fixed-intent-def456")
+    second = _rebound_create_entry(
+        proposal.entries[0], intent_id="fixed-intent-def456", reason="action-43",
+    )
     proposal = replace(proposal, entries=(proposal.entries[0], second))
     write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
     backend = _FakeADOBackend()
@@ -537,7 +642,9 @@ def test_adopted_create_keeps_recovery_reason_when_association_fails(tmp_path, m
 def test_expected_association_error_does_not_stop_later_entries(tmp_path, monkeypatch, caplog) -> None:
     programs_root = tmp_path / "programs"
     proposal, manifest_path = _proposal(programs_root)
-    second = replace(proposal.entries[0], reason="action-43", operation_intent_id="fixed-intent-def456")
+    second = _rebound_create_entry(
+        proposal.entries[0], intent_id="fixed-intent-def456", reason="action-43",
+    )
     proposal = replace(proposal, entries=(proposal.entries[0], second))
     write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
     backend = _FakeADOBackend()
@@ -916,6 +1023,7 @@ def test_created_task_audits_use_resolved_targets_and_preserve_distinct_effects(
     if count == 2:
         task = json.loads(proposal.entries[0].proposed_value)
         task["title"] = "Second distinct task"
+        task = _rebind_task_authorization(task, "second-intent")
         proposal = replace(proposal, entries=proposal.entries + (replace(
             proposal.entries[0], proposed_value=json.dumps(task),
             operation_intent_id="second-intent", reason="action-43",
@@ -982,6 +1090,7 @@ def test_verified_adoption_audits_resolved_targets_without_new_effects(
     if count == 2:
         task = json.loads(proposal.entries[0].proposed_value)
         task["title"] = "Second recovered task"
+        task = _rebind_task_authorization(task, "second-intent")
         proposal = replace(proposal, entries=proposal.entries + (replace(
             proposal.entries[0], proposed_value=json.dumps(task),
             operation_intent_id="second-intent", reason="action-43",
@@ -1039,8 +1148,11 @@ def test_verified_adoption_audits_resolved_targets_without_new_effects(
             operation_intent_id=applied.operation_intent_id,
         )
         db = outbox_db_path(proposal.program_id, programs_root=programs_root)
-        assert load_entry(db, key) == retained[applied.operation_intent_id]
-        assert load_success_receipt(db, key) is None
+        closed = load_entry(db, key)
+        assert closed is not None and closed.status == "completed"
+        receipt = json.loads(load_success_receipt(db, key))
+        assert receipt["reconciliation"]["completed"] is True
+        assert retained[applied.operation_intent_id].status == "uncertain_remote_state"
     assert all(signal in signals for signal in prior_signals)
     recovery.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, 0, 10, tzinfo=timezone.utc))
     assert store.read(proposal.program_id) == signals and store.read_reviews(proposal.program_id) == reviews
@@ -1090,7 +1202,9 @@ def test_commit_before_ambiguous_http_response_is_uncertain_then_adopted(tmp_pat
     )
     assert adopted.applied_count == 1
     assert backend.create_call_count == 1 and recovery_client._mutation_session.calls == []
-    assert load_entry(db, key) == retained
+    closed = load_entry(db, key)
+    assert closed is not None and closed.status == "completed"
+    assert json.loads(load_success_receipt(db, key))["reconciliation"]["completed"] is True
 
 
 @pytest.mark.parametrize("storage_backend", ["file", "sqlite"])
@@ -1209,7 +1323,9 @@ def test_actual_create_revision_is_observed_not_fabricated(tmp_path, monkeypatch
 
     def respond(*args, **kwargs):
         response = request(*args, **kwargs).json()
-        if revision != "absent":
+        if revision == "absent":
+            response.pop("rev", None)
+        else:
             response["rev"] = revision
         return _FakeJsonResponse(response)
 
@@ -1222,7 +1338,7 @@ def test_actual_create_revision_is_observed_not_fabricated(tmp_path, monkeypatch
         operation_intent_id=proposal.entries[0].operation_intent_id,
     )
     db = outbox_db_path(proposal.program_id, programs_root=programs_root)
-    valid = revision in ("absent", None) or (type(revision) is int and revision > 0)
+    valid = type(revision) is int and revision > 0
     assert backend.create_call_count == 1
     with manifest_path.open(encoding="utf-8") as handle:
         retained, _ = read_proposal_manifest_from_handle(handle)
@@ -1367,6 +1483,12 @@ def test_unproven_create_recovery_cannot_adopt_or_dispatch(
         manifest_path, applied_at=datetime(2026, 7, 2, 0, 5, tzinfo=timezone.utc),
     )
 
+    if retained_uncertainty and failure in {"empty", "title_only"}:
+        assert artifacts.applied_count == 1 and artifacts.failed_count == 0
+        assert backend.create_call_count == before_calls + 1
+        assert load_entry(db, key).status == "completed"
+        return
+
     assert artifacts.applied_count == 0
     assert artifacts.failed_count == 1
     store = build_signal_store_for_program_id(proposal.program_id, programs_root=programs_root)
@@ -1396,17 +1518,22 @@ def test_create_recovery_requires_exact_tag_but_preserves_normalized_title(
         task.pop("area_path", None)
     else:
         task["area_path"] = area_path
+    task = _rebind_task_authorization(task, "fixed-intent-abc123")
     proposal = replace(proposal, entries=(
-        replace(proposal.entries[0], proposed_value=json.dumps(task), attempted_at=datetime(2026, 7, 2, tzinfo=timezone.utc)),
+        replace(proposal.entries[0], proposed_value=json.dumps(task)),
     ))
     write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
     backend = _FakeADOBackend()
-    backend.work_items[7001] = {"id": 7001, "fields": {
+    first = ADOWriter(
+        _fake_client(backend, lose_first_response=True),
+        programs_root=programs_root,
+    ).apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc))
+    assert first.failed_count == 1
+    remote_id = next(iter(backend.work_items))
+    backend.work_items[remote_id]["fields"].update({
         "System.Title": "  FOLLOW UP  on rollout risk  ",
         "System.Tags": "other; vertex-intent-fixed-intent-abc123; another",
-        "System.AssignedTo": task["assigned_to"],
-        **({"System.AreaPath": area_path} if area_path is not None else {}),
-    }}
+    })
     client = _fake_client(backend, lose_first_response=False)
 
     artifacts = ADOWriter(client, programs_root=programs_root).apply_manifest(
@@ -1414,8 +1541,8 @@ def test_create_recovery_requires_exact_tag_but_preserves_normalized_title(
     )
 
     assert artifacts.applied_count == 1
-    assert artifacts.proposal.entries[0].work_item_id == 7001
-    assert backend.create_call_count == 0
+    assert artifacts.proposal.entries[0].work_item_id == remote_id
+    assert backend.create_call_count == 1
     assert client._mutation_session.calls == []
 
 
@@ -1445,6 +1572,7 @@ def test_recovery_refuses_unproven_desired_fields(tmp_path, storage_backend, fie
     task = json.loads(proposal.entries[0].proposed_value)
     task.update(description="<p>Retained task</p>", iteration_path="One\\Sprint",
                 priority=2, target_date="2026-07-04T00:00:00Z")
+    task = _rebind_task_authorization(task, "fixed-intent-abc123")
     proposal = replace(proposal, entries=(replace(
         proposal.entries[0], proposed_value=json.dumps(task),
     ),))
@@ -1481,6 +1609,7 @@ def test_recovery_refuses_invalid_requested_assignee_identity(tmp_path, assignee
     proposal, manifest_path = _proposal(programs_root)
     task = json.loads(proposal.entries[0].proposed_value)
     task["assigned_to"] = assignee
+    task = _rebind_task_authorization(task, "fixed-intent-abc123")
     proposal = replace(proposal, entries=(replace(
         proposal.entries[0], proposed_value=json.dumps(task),
     ),))
@@ -1507,6 +1636,7 @@ def test_recovery_checks_sent_fields_and_explicit_assignee_identity(tmp_path, as
     if optional_fields:
         task.update(description="<p>Retained task</p>", iteration_path="One\\Sprint",
                     priority=2, target_date="2026-07-04T00:00:00Z")
+    task = _rebind_task_authorization(task, "fixed-intent-abc123")
     proposal = replace(proposal, entries=(replace(
         proposal.entries[0], proposed_value=json.dumps(task),
     ),))
@@ -1519,7 +1649,13 @@ def test_recovery_checks_sent_fields_and_explicit_assignee_identity(tmp_path, as
     result = writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, 0, 5, tzinfo=timezone.utc))
     assert result.applied_count == 1 and backend.create_call_count == 1
     batch = next(call for call in client._session.calls if "workitemsbatch" in call["url"])
-    expected_fields = {"System.Title", "System.Tags", "System.AssignedTo", "System.AreaPath"}
+    expected_fields = {
+        "System.Title",
+        "System.Tags",
+        "System.AssignedTo",
+        "System.AreaPath",
+        "System.CreatedBy",
+    }
     if optional_fields:
         expected_fields.update({"System.Description", "System.IterationPath",
                                 "Microsoft.VSTS.Common.Priority", "Microsoft.VSTS.Scheduling.TargetDate"})
@@ -1540,7 +1676,9 @@ def test_recovery_adoption_retains_observed_revision(tmp_path, monkeypatch, revi
 
     def readback(*args, **kwargs):
         rows = batch(*args, **kwargs)
-        if revision != "absent":
+        if revision == "absent":
+            rows[0].pop("rev", None)
+        else:
             rows[0]["rev"] = revision
         return rows
 
@@ -1557,8 +1695,9 @@ def test_recovery_adoption_retains_observed_revision(tmp_path, monkeypatch, revi
     )
     with manifest_path.open(encoding="utf-8") as handle:
         persisted, _ = read_proposal_manifest_from_handle(handle)
-    if revision in ("absent", None) or (type(revision) is int and revision > 0):
-        expected = None if revision in ("absent", None) else revision
+    valid = type(revision) is int and revision > 0
+    if valid:
+        expected = revision
         assert result.applied_count == 1
         assert result.proposal.entries[0].remote_rev == expected
         assert persisted.entries[0].remote_rev == expected
@@ -1568,8 +1707,12 @@ def test_recovery_adoption_retains_observed_revision(tmp_path, monkeypatch, revi
         assert "reconcil" in persisted.entries[0].status_reason.lower()
         assert tuple(read_events(proposal.program_id, programs_root=programs_root)) == events
     assert backend.create_call_count == 1 and client._mutation_session.calls == []
-    assert load_entry(db, key) == before
-    assert load_success_receipt(db, key) is None
+    if valid:
+        assert load_entry(db, key).status == "completed"
+        assert json.loads(load_success_receipt(db, key))["reconciliation"]["completed"] is True
+    else:
+        assert load_entry(db, key) == before
+        assert load_success_receipt(db, key) is None
 
 
 @pytest.mark.parametrize(("hit", "row"), [
@@ -1644,7 +1787,10 @@ def test_create_backlog_cannot_use_another_client_destination(tmp_path: Path, in
     retained = load_entry(outbox_db_path(proposal.program_id, programs_root=programs_root), key)
     assert retained is not None
     assert retained.status == "failed_terminal"
-    assert "destination" in (retained.failure_reason or "")
+    assert (
+        "operation" in (retained.failure_reason or "").lower()
+        or "payload" in (retained.failure_reason or "").lower()
+    )
 
 
 def write_proposal_manifest_to_handle_at_path(path: Path, proposal: ADOUpdateProposal) -> None:

@@ -107,7 +107,9 @@ def check_false_done_lanes(
         evidence_date = evidence.synthesized_at.date()
         new_enrichments = [
             e for e in enrichments
-            if e.timestamp.date() >= evidence_date and e.body_text
+            if e.timestamp is not None
+            and e.timestamp.date() >= evidence_date
+            and e.body_text
         ]
         for enrichment in new_enrichments:
             words = set(enrichment.body_text.lower().split())

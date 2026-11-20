@@ -14,10 +14,14 @@ when ``--program-config`` and ``--telemetry`` are supplied.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import re
+import sys
 from dataclasses import asdict, dataclass
+from datetime import date, datetime, timezone
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Callable
@@ -31,8 +35,46 @@ _VERSION_RE = re.compile(r"^\*\*Version:\*\*\s+([\d.]+)", re.MULTILINE)
 _CHANGELOG_VERSION_RE = re.compile(r"^- \*\*v([\d.]+)\s+—", re.MULTILINE)
 _HEADING_ID_RE = re.compile(r"^#{3,6}\s+(RELO-[A-Z]\d+(?:\.\d+)?)\b", re.MULTILINE)
 _CARD_ID_RE = re.compile(r"^id:\s+(RELO-W\d+\.\d+[a-z])\s*$", re.MULTILINE)
+_PARENT_CARD_ID_RE = re.compile(r"^RELO-W\d+\.\d+$")
+_CHILD_CARD_ID_RE = re.compile(r"^RELO-W\d+\.\d+[a-z]$")
 _PHASE_TABLE_ERROR = "phase work-item definition table is missing or malformed"
 _WORK_PACKAGE_STATUSES = frozenset({"planned", "partial", "blocked", "completed", "deferred"})
+_W0_STARTABILITY = frozenset({
+    "code_now", "completed_local", "blocked_evidence", "blocked_judgment",
+})
+_EVIDENCE_DECISIONS = ("RELO-D6d", "RELO-D7", "RELO-D13", "RELO-D14")
+_EVIDENCE_NUMERIC_CLAIMS: dict[str, dict[str, tuple[float, bool]]] = {
+    "RELO-D6d": {
+        "shadow_run_count": (4, True),
+        "cost_per_certified_artifact_usd": (0, False),
+        "cost_per_completed_cycle_usd": (0, False),
+        "cost_per_active_program_month_usd": (0, False),
+        "unattributed_cost_usd": (0, False),
+    },
+    "RELO-D7": {
+        "baseline_count": (5, True),
+        "matched_cycle_count": (8, True),
+        "matched_cycle_span_days": (49, True),
+        "workflow_class_count": (1, True),
+        "confidence_95_lower_bound": (0.8, False),
+    },
+    "RELO-D14": {
+        "cost_per_certified_artifact_ceiling_usd": (0, False),
+        "cost_per_completed_cycle_ceiling_usd": (0, False),
+        "cost_per_active_program_month_ceiling_usd": (0, False),
+    },
+}
+_EVIDENCE_PROFILE_KEYS = frozenset({
+    "program_count",
+    "entity_count",
+    "relation_count",
+    "document_count",
+    "history",
+    "compiler",
+    "storage",
+    "queue",
+    "latency",
+})
 _OPEN_ACCEPTANCE_RE = re.compile(
     r"\b(?:not\s+completion\b|(?:the\s+)?acceptance\s+remains?\s+open\b|"
     r"reconcile\b.{0,100}\bacceptance\b.{0,100}\b(?:before|prior to)\b.{0,60}\b(?:closure|completion)\b|"
@@ -53,6 +95,7 @@ class CheckResult:
 def verify(
     repo_root: Path, *, spec_path: Path, program_config: Path | None = None,
     telemetry_paths: tuple[Path, ...] = (), budgets_path: Path | None = None,
+    evidence_packet_paths: tuple[Path, ...] = (), as_of: str | None = None,
 ) -> tuple[CheckResult, ...]:
     """Evaluate explicit evidence; program and telemetry checks are opt-in."""
     pyproject = repo_root / "pyproject.toml"
@@ -69,6 +112,10 @@ def verify(
         lint_work_packages(repo_root, spec_path=spec_path),
         _check_spec_size_budget(spec_path, repo_root=repo_root, budgets_path=budgets_path),
     ))
+    if evidence_packet_paths:
+        results.extend(_check_evidence_packets(
+            repo_root, evidence_packet_paths, as_of=as_of, budgets_path=budgets_path,
+        ))
     return tuple(results)
 
 
@@ -103,10 +150,12 @@ def lint_specification(path: Path) -> CheckResult:
         findings.append(f"duplicate defined RELO ID(s): {', '.join(duplicates)}")
     visible_content = _markdown_visible_content(content)
     work_definitions, malformed_phase = _phase_work_item_definitions(visible_content)
+    compacted_work_ids = _compacted_work_item_ids(_spec_repo_root(path), set(work_definitions))
     if malformed_phase:
         findings.append(_PHASE_TABLE_ERROR)
     work_ids = set(work_definitions)
-    if len(work_definitions) != len(work_ids):
+    work_ids.update(compacted_work_ids)
+    if len(work_definitions) != len(set(work_definitions)):
         findings.append("duplicate work-item definition(s)")
     traceability = re.search(
         r"^### 19\.2\s[^\n]*\n(.*?)(?=^#{1,3}\s|\Z)", visible_content,
@@ -126,6 +175,7 @@ def lint_specification(path: Path) -> CheckResult:
             visible_content[:traceability.start()] + visible_content[traceability.end():],
             flags=re.MULTILINE,
         ))
+        definitions.update(compacted_work_ids)
         declared_requirements: set[str] = set()
         for line in rows:
             if not re.match(r"^\|\s*RELO-(?:FR|NFR)-\d+\s*\|", line):
@@ -157,6 +207,9 @@ def lint_specification(path: Path) -> CheckResult:
         if missing_requirements:
             findings.append(f"missing requirement traceability row(s): {', '.join(missing_requirements)}")
     findings.extend(_goal_traceability_findings(content, work_ids))
+    findings.extend(_problem_registry_findings(path, visible_content))
+    findings.extend(_compaction_archive_findings(path, visible_content))
+    findings.extend(_semantic_traceability_findings(path, visible_content))
     return CheckResult(
         "RELO-SPEC-LINT",
         not findings,
@@ -383,11 +436,20 @@ def _goal_traceability_findings(content: str, work_ids: set[str]) -> list[str]:
         if len(identifiers) != len(set(identifiers)):
             findings.append(f"duplicate {label} definition(s)")
 
-    requirement_ids = set()
+    requirement_ids: set[str] = set()
+    requirement_definition_counts: list[str] = []
     for section, pattern in (("5.5", r"RELO-FR-\d+"), ("5.6", r"RELO-NFR-\d+")):
-        requirement_ids.update(_traceability_definition_ids(
+        section_ids = _traceability_definition_ids(
             _markdown_table_rows(_traceability_section(visible, section), ("ID", "Requirement")), pattern,
-        ))
+        )
+        requirement_ids.update(section_ids)
+        requirement_definition_counts.extend(section_ids)
+    duplicate_requirements = _duplicates(requirement_definition_counts)
+    if duplicate_requirements:
+        findings.append(
+            "duplicate requirement definition(s): "
+            + ", ".join(duplicate_requirements)
+        )
     features = _traceability_section(visible, "8")
     feature_ids = set(re.findall(
         r"^###\s+8\.\d+\s+(RELO-F\d+)\b", features or "", re.MULTILINE,
@@ -395,6 +457,8 @@ def _goal_traceability_findings(content: str, work_ids: set[str]) -> list[str]:
     definitions = set(objectives) | requirement_ids | work_ids | feature_ids
     declared_goals: set[str] = set()
     referenced_objectives: set[str] = set()
+    referenced_requirements: set[str] = set()
+    goal_row_counts: dict[str, int] = {}
     token = r"(?:W\d+\.\d+[a-z]?|(?:FR|NFR)-\d+|O\d+|F\d+)(?![\w])"
     for row in rows:
         columns = _markdown_table_cells(row)
@@ -406,6 +470,7 @@ def _goal_traceability_findings(content: str, work_ids: set[str]) -> list[str]:
             findings.append("goal traceability row has an invalid goal ID")
             continue
         goal = match.group(1) or match.group(2)
+        goal_row_counts[goal] = goal_row_counts.get(goal, 0) + 1
         if goal not in goals:
             findings.append(f"{goal}: unresolved goal traceability reference")
         else:
@@ -434,13 +499,30 @@ def _goal_traceability_findings(content: str, work_ids: set[str]) -> list[str]:
                 findings.append(f"{goal}: requirement mapping requires a requirement reference")
             elif any(ref.startswith("RELO-O") for ref in references):
                 findings.append(f"{goal}: requirement mapping contains an objective reference")
+            if index == 2:
+                referenced_requirements.update(
+                    references & requirement_ids
+                )
 
+    duplicate_goal_rows = sorted(
+        goal for goal, count in goal_row_counts.items() if count > 1
+    )
+    if duplicate_goal_rows:
+        findings.append(
+            f"duplicate goal traceability row(s): {', '.join(duplicate_goal_rows)}"
+        )
     missing_goals = sorted(set(goals) - declared_goals)
     if missing_goals:
         findings.append(f"missing goal traceability row(s): {', '.join(missing_goals)}")
     missing_objectives = sorted(set(objectives) - referenced_objectives)
     if missing_objectives:
         findings.append(f"unreferenced objective(s): {', '.join(missing_objectives)}")
+    missing_requirements = sorted(requirement_ids - referenced_requirements)
+    if missing_requirements:
+        findings.append(
+            "missing goal requirement traceability row(s): "
+            + ", ".join(missing_requirements)
+        )
     return findings
 
 
@@ -466,6 +548,168 @@ def _decision_table_ids(specification: str) -> set[str]:
             table.group(1), re.MULTILINE,
         )
     }
+
+
+def _spec_repo_root(spec_path: Path) -> Path:
+    return spec_path.parent.parent if spec_path.parent.name == "specs" else spec_path.parent
+
+
+def _validated_compacted_definition(
+    card: dict, *, parent_ids: set[str],
+) -> bool:
+    identifier = card.get("id")
+    definition = card.get("definition")
+    if not isinstance(identifier, str) or not _CHILD_CARD_ID_RE.fullmatch(identifier):
+        return False
+    if not isinstance(definition, dict):
+        return False
+    parent_id = definition.get("parent_id")
+    row = definition.get("row")
+    row_hash = definition.get("row_sha256")
+    if (
+        not isinstance(parent_id, str)
+        or parent_id != identifier[:-1]
+        or (
+            parent_id not in parent_ids
+            and definition.get("parent_status") != "rootless"
+        )
+        or not isinstance(row, str)
+        or not isinstance(row_hash, str)
+    ):
+        return False
+    cells = _markdown_table_cells(row)
+    return (
+        cells is not None
+        and 2 <= len(cells) <= 4
+        and all(cells)
+        and cells[0] == identifier
+        and hashlib.sha256(row.encode("utf-8")).hexdigest() == row_hash
+    )
+
+
+def _compacted_work_item_ids(repo_root: Path, parent_ids: set[str]) -> set[str]:
+    try:
+        document = yaml.safe_load(
+            (repo_root / "governance" / "relo-work-packages.yaml").read_text(encoding="utf-8"),
+        )
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return set()
+    cards = document.get("work_items") if isinstance(document, dict) else None
+    if not isinstance(cards, list):
+        return set()
+    return {
+        card["id"] for card in cards
+        if isinstance(card, dict) and _validated_compacted_definition(card, parent_ids=parent_ids)
+    }
+
+
+def _problem_registry_findings(spec_path: Path, visible_content: str) -> list[str]:
+    marker = "Canonical text: `governance/relo-problem-statements.yaml`."
+    if marker not in visible_content:
+        return []
+    registry_path = _spec_repo_root(spec_path) / "governance" / "relo-problem-statements.yaml"
+    try:
+        document = yaml.safe_load(registry_path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError:
+        return ["problem registry is not valid UTF-8"]
+    except OSError:
+        return ["problem registry is unavailable"]
+    except yaml.YAMLError:
+        return ["problem registry is not valid YAML"]
+    if not isinstance(document, dict) or document.get("schema_version") != "1":
+        return ["problem registry schema_version must be '1'"]
+    expected_count = document.get("expected_count")
+    problems = document.get("problems")
+    if not isinstance(expected_count, int) or expected_count < 1:
+        return ["problem registry expected_count must be a positive integer"]
+    if not isinstance(problems, list):
+        return ["problem registry problems must be a list"]
+    findings: list[str] = []
+    identifiers: list[str] = []
+    for position, problem in enumerate(problems, start=1):
+        if not isinstance(problem, dict):
+            findings.append(f"problem registry entry {position} must be a mapping")
+            continue
+        identifier = problem.get("id")
+        markdown = problem.get("markdown")
+        markdown_hash = problem.get("markdown_sha256")
+        if not isinstance(identifier, str) or re.fullmatch(r"RELO-P\d+", identifier) is None:
+            findings.append(f"problem registry entry {position} has invalid id")
+            continue
+        identifiers.append(identifier)
+        if (
+            not isinstance(markdown, str)
+            or not isinstance(markdown_hash, str)
+            or not markdown.startswith(f"#### {identifier} ")
+        ):
+            findings.append(f"{identifier}: problem registry definition is malformed")
+            continue
+        if hashlib.sha256(markdown.encode("utf-8")).hexdigest() != markdown_hash:
+            findings.append(f"{identifier}: problem registry definition hash mismatch")
+    duplicates = _duplicates(identifiers)
+    if duplicates:
+        findings.append(f"duplicate problem registry ID(s): {', '.join(duplicates)}")
+    if len(problems) != expected_count or len(set(identifiers)) != expected_count:
+        findings.append("problem registry expected_count does not match unique definitions")
+    defined = set(identifiers)
+    if sorted(int(identifier.removeprefix("RELO-P")) for identifier in identifiers) != list(
+        range(1, expected_count + 1),
+    ):
+        findings.append("problem registry IDs must be contiguous from RELO-P1")
+    referenced = set(re.findall(r"\bRELO-P\d+\b", visible_content))
+    unresolved = sorted(referenced - defined)
+    if unresolved:
+        findings.append(f"unresolved problem registry reference(s): {', '.join(unresolved)}")
+    return findings
+
+
+def _compaction_archive_findings(spec_path: Path, visible_content: str) -> list[str]:
+    marker = "`.archive/specs/relo-history-through-v3.247.md`"
+    if marker not in visible_content:
+        return []
+    archive_path = _spec_repo_root(spec_path) / ".archive" / "specs" / "relo-history-through-v3.247.md"
+    try:
+        content = archive_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ["compaction archive is not valid UTF-8"]
+    except OSError:
+        return ["compaction archive is unavailable"]
+    lines = content.splitlines()
+    metadata = {
+        key: (int(match.group(1)) if key.endswith("_lines") else match.group(1))
+        for key, pattern in {
+            "history_lines": r"^\*\*History lines:\*\* (\d+)$",
+            "history_sha256": r"^\*\*History SHA-256:\*\* ([0-9a-f]{64})$",
+            "toc_lines": r"^\*\*TOC lines:\*\* (\d+)$",
+            "toc_sha256": r"^\*\*TOC SHA-256:\*\* ([0-9a-f]{64})$",
+        }.items()
+        if (match := re.search(pattern, content, re.MULTILINE)) is not None
+    }
+    if set(metadata) != {"history_lines", "history_sha256", "toc_lines", "toc_sha256"}:
+        return ["compaction archive metadata is missing or malformed"]
+    try:
+        history_heading = lines.index("## Changelog through v3.247")
+        toc_heading = lines.index("## Previous table of contents")
+    except ValueError:
+        return ["compaction archive section headings are missing"]
+    history = lines[history_heading + 1:toc_heading]
+    toc = lines[toc_heading + 1:]
+    if history and history[0] == "":
+        history = history[1:]
+    if history and history[-1] == "":
+        history = history[:-1]
+    if toc and toc[0] == "":
+        toc = toc[1:]
+    findings: list[str] = []
+    if len(history) != metadata["history_lines"]:
+        findings.append("archived history line count mismatch")
+    elif hashlib.sha256(("\n".join(history) + "\n").encode("utf-8")).hexdigest() != metadata["history_sha256"]:
+        findings.append("archived history hash mismatch")
+    if len(toc) != metadata["toc_lines"]:
+        findings.append("archived table-of-contents line count mismatch")
+    elif hashlib.sha256(("\n".join(toc) + "\n").encode("utf-8")).hexdigest() != metadata["toc_sha256"]:
+        findings.append("archived table-of-contents hash mismatch")
+    return findings
 
 
 def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
@@ -494,9 +738,19 @@ def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
     work_definitions, malformed_phase = _phase_work_item_definitions(_markdown_visible_content(specification))
     if malformed_phase:
         return CheckResult("RELO-WORK-PACKAGES", False, _PHASE_TABLE_ERROR)
-    expected = set(work_definitions)
+    parent_ids = set(work_definitions)
+    expected = set(parent_ids)
     ids = [card.get("id") for card in cards if isinstance(card, dict)]
     findings: list[str] = []
+    for position, card in enumerate(cards, start=1):
+        if not isinstance(card, dict):
+            continue
+        identifier = card.get("id")
+        if isinstance(identifier, str) and _CHILD_CARD_ID_RE.fullmatch(identifier):
+            if _validated_compacted_definition(card, parent_ids=parent_ids):
+                expected.add(identifier)
+            else:
+                findings.append(f"{identifier}: invalid compacted definition at entry {position}")
     duplicates = set(_duplicates([identifier for identifier in ids if isinstance(identifier, str)]))
     if duplicates:
         positions = [
@@ -545,11 +799,44 @@ def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
             )
             if _OPEN_ACCEPTANCE_RE.search(completion_text):
                 findings.append(f"{identifier}: completed status contradicts open acceptance evidence")
+        if card.get("current_parent") is True and not (
+            isinstance(identifier, str)
+            and re.fullmatch(r"RELO-W0\.\d+", identifier)
+        ):
+            findings.append(f"{identifier}: current_parent must identify an unsuffixed RELO-0 parent")
+        if card.get("current_slice") is True:
+            startability = card.get("startability")
+            if not isinstance(startability, str) or startability not in _W0_STARTABILITY:
+                findings.append(f"{identifier}: current_slice requires valid startability")
+            definition = card.get("definition")
+            if (
+                not isinstance(definition, dict)
+                or definition.get("parent_id") not in {
+                    "RELO-W0.12", "RELO-W0.13", "RELO-W0.14",
+                }
+            ):
+                findings.append(f"{identifier}: current_slice requires an assigned W0 parent")
         card_class = card.get("class")
         if not isinstance(card_class, str) or card_class not in allowed_classes:
             detail = "(not an allowed class)" if isinstance(card_class, str) else "(must be a string)"
             findings.append(f"{identifier}: invalid class {detail}")
             continue
+        if card.get("current_slice") is True:
+            startability = card.get("startability")
+            compatible = isinstance(startability, str) and {
+                "code_now": card_class == "AGENT_READY" and status == "planned",
+                "completed_local": card_class == "AGENT_READY" and status == "completed",
+                "blocked_evidence": (
+                    card_class == "NEEDS_DECISION"
+                    and status in {"partial", "blocked"}
+                ),
+                "blocked_judgment": (
+                    card_class == "NEEDS_JUDGMENT"
+                    and status in {"planned", "partial", "blocked", "deferred"}
+                ),
+            }.get(startability, False)
+            if not compatible:
+                findings.append(f"{identifier}: startability is incompatible with class/status")
         if not isinstance(dependencies, list) or any(
             not isinstance(dependency, str) or dependency not in actual for dependency in dependencies
         ):
@@ -677,8 +964,6 @@ def _check_spec_size_budget(spec_path: Path, *, repo_root: Path, budgets_path: P
     except OSError:
         return CheckResult(identifier, False, "Unable to read specification: file read failed.")
 
-    import sys
-
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     try:
@@ -700,7 +985,7 @@ def _check_spec_size_budget(spec_path: Path, *, repo_root: Path, budgets_path: P
     except Exception:  # noqa: BLE001 - surface any registry load failure as a finding
         return CheckResult(identifier, False, "Unable to load NFR budget registry: check failed.")
 
-    line_count = content.count("\n") + 1
+    line_count = len(content.splitlines())
     obligation_count = _spec_obligation_count(content)
 
     findings: list[str] = []
@@ -717,6 +1002,429 @@ def _check_spec_size_budget(spec_path: Path, *, repo_root: Path, budgets_path: P
 
     detail = f"Selected specification is {line_count} lines with {obligation_count} obligation IDs, within the selected ratified ceilings."
     return CheckResult(identifier, not findings, detail if not findings else "; ".join(findings))
+
+
+def _parse_utc_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _load_evidence_packet(path: Path) -> object:
+    verifier_repo = Path(__file__).resolve().parents[1]
+    if str(verifier_repo) not in sys.path:
+        sys.path.insert(0, str(verifier_repo))
+    from src.core.yaml_utils import UniqueKeySafeLoader
+
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeySafeLoader)
+
+
+def _load_evidence_cards(repo_root: Path) -> dict[str, set[str]] | None:
+    try:
+        document = yaml.safe_load(
+            (repo_root / "governance" / "relo-work-packages.yaml").read_text(encoding="utf-8"),
+        )
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+    cards = document.get("work_items") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != "1"
+        or not isinstance(cards, list)
+    ):
+        return None
+    linked: dict[str, set[str]] = {
+        decision: set() for decision in _EVIDENCE_DECISIONS
+    }
+    for card in cards:
+        if not isinstance(card, dict):
+            return None
+        identifier = card.get("id")
+        blocking = card.get("blocking_decisions", [])
+        if (
+            not isinstance(identifier, str)
+            or not identifier
+            or not isinstance(blocking, list)
+            or any(not isinstance(decision, str) for decision in blocking)
+        ):
+            return None
+        for decision in blocking:
+            if decision in linked:
+                linked[decision].add(identifier)
+    return linked
+
+
+def _load_ratified_budget_ids(
+    repo_root: Path, *, budgets_path: Path | None,
+) -> set[str] | None:
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    try:
+        from src.core.exceptions import ConfigError
+        from src.core.nfr_budgets import load_nfr_budgets
+    except ImportError:
+        return None
+    try:
+        selected = budgets_path or repo_root / "governance" / "nfr-budgets.yaml"
+        return {
+            budget.id for budget in load_nfr_budgets(selected) if budget.is_ratified
+        }
+    except (ConfigError, OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+
+
+def _claim_value_findings(decision: str, claims: dict[str, object]) -> list[str]:
+    findings: list[str] = []
+    for claim, (minimum, integer_only) in _EVIDENCE_NUMERIC_CLAIMS.get(decision, {}).items():
+        value = claims.get(claim)
+        if integer_only:
+            valid = isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+        else:
+            valid = (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and value >= minimum
+            )
+        if claim == "confidence_95_lower_bound" and valid:
+            valid = (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and value > minimum
+                and value <= 1.0
+            )
+        if not valid:
+            findings.append(f"claim {claim} is missing or invalid")
+    if decision == "RELO-D13":
+        for claim in ("two_program_profile", "maximum_profile"):
+            profile = claims.get(claim)
+            if not isinstance(profile, dict) or not _EVIDENCE_PROFILE_KEYS.issubset(profile):
+                findings.append(f"claim {claim} is missing required scale dimensions")
+                continue
+            if isinstance(profile, dict):
+                count_keys = ("program_count", "entity_count", "relation_count", "document_count")
+                valid_counts = all(
+                    isinstance(profile.get(key), int)
+                    and not isinstance(profile.get(key), bool)
+                    and profile[key] >= 0
+                    for key in count_keys
+                )
+                valid_complex = all(
+                    isinstance(profile.get(key), dict) and bool(profile[key])
+                    for key in ("history", "compiler", "storage", "queue", "latency")
+                )
+                expected_programs = profile.get("program_count") == 2 if claim == "two_program_profile" else (
+                    isinstance(profile.get("program_count"), int)
+                    and profile.get("program_count", 0) >= 2
+                )
+            if not valid_counts or not valid_complex:
+                findings.append(f"claim {claim} is missing required scale dimensions")
+            elif not expected_programs:
+                findings.append("claim two_program_profile must describe exactly two programs")
+        for claim in ("next_program_admission_tripwire", "separate_architecture_tripwire"):
+            tripwire = claims.get(claim)
+            if (
+                not isinstance(tripwire, dict)
+                or not tripwire
+                or any(value is None for value in tripwire.values())
+            ):
+                findings.append(f"claim {claim} is missing or invalid")
+    return findings
+
+
+def _validate_evidence_packet(
+    repo_root: Path,
+    document: object,
+    *,
+    expected_cards: set[str],
+    as_of: datetime,
+) -> tuple[str | None, str | None, list[str]]:
+    if not isinstance(document, dict) or document.get("schema_version") != "1":
+        return None, None, ["packet schema_version must be '1'"]
+    packet_id = document.get("packet_id")
+    decision = document.get("decision_id")
+    if not isinstance(packet_id, str) or not packet_id.strip():
+        return None, decision if isinstance(decision, str) else None, ["packet_id is missing"]
+    if decision not in _EVIDENCE_DECISIONS:
+        return packet_id, None, ["decision_id is unsupported"]
+    findings: list[str] = []
+    card_ids = document.get("card_ids")
+    if (
+        not isinstance(card_ids, list)
+        or any(not isinstance(identifier, str) for identifier in card_ids)
+        or len(card_ids) != len(set(card_ids))
+    ):
+        findings.append("card_ids must be a unique string list")
+    elif set(card_ids) != expected_cards:
+        findings.append("card_ids do not match current ledger blockers")
+    captured_at = _parse_utc_timestamp(document.get("captured_at"))
+    valid_until = _parse_utc_timestamp(document.get("valid_until"))
+    observed_from = _parse_utc_timestamp(document.get("observed_from"))
+    observed_through = _parse_utc_timestamp(document.get("observed_through"))
+    if (
+        captured_at is None
+        or valid_until is None
+        or observed_from is None
+        or observed_through is None
+    ):
+        findings.append("packet timestamps must be explicit UTC values")
+    elif (
+        observed_from > observed_through
+        or observed_through > captured_at
+        or captured_at >= valid_until
+        or as_of < captured_at
+        or as_of >= valid_until
+    ):
+        findings.append("packet timestamps are inconsistent or stale")
+
+    artifacts = document.get("artifacts")
+    artifact_ids: set[str] = set()
+    if not isinstance(artifacts, list) or not artifacts:
+        findings.append("artifacts must be a non-empty list")
+        artifacts = []
+    root = Path(os.path.realpath(repo_root))
+    for position, artifact in enumerate(artifacts, start=1):
+        if not isinstance(artifact, dict):
+            findings.append(f"artifact entry {position} is malformed")
+            continue
+        artifact_id = artifact.get("id")
+        relative = artifact.get("path")
+        expected_hash = artifact.get("sha256")
+        if (
+            not isinstance(artifact_id, str)
+            or not artifact_id
+            or artifact_id in artifact_ids
+            or not isinstance(relative, str)
+            or not relative
+            or Path(relative).is_absolute()
+            or not isinstance(expected_hash, str)
+        ):
+            findings.append(f"artifact entry {position} is malformed or duplicated")
+            continue
+        artifact_ids.add(artifact_id)
+        try:
+            resolved = Path(os.path.realpath(root / relative, strict=True))
+            if not resolved.is_relative_to(root) or not resolved.is_file():
+                findings.append(f"artifact entry {position} is outside or unavailable")
+                continue
+            actual_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            findings.append(f"artifact entry {position} is unavailable")
+            continue
+        if actual_hash != expected_hash:
+            findings.append(f"artifact entry {position} hash mismatch")
+
+    claims = document.get("claims")
+    claim_values: dict[str, object] = {}
+    claim_ids: set[str] = set()
+    if not isinstance(claims, list) or not claims:
+        findings.append("claims must be a non-empty list")
+        claims = []
+    for position, claim in enumerate(claims, start=1):
+        if not isinstance(claim, dict):
+            findings.append(f"claim entry {position} is malformed")
+            continue
+        claim_id = claim.get("id")
+        sources = claim.get("source_artifact_ids")
+        if (
+            not isinstance(claim_id, str)
+            or not claim_id
+            or claim_id in claim_ids
+            or not isinstance(sources, list)
+            or not sources
+            or any(not isinstance(source, str) for source in sources)
+            or not set(sources).issubset(artifact_ids)
+            or "value" not in claim
+        ):
+            findings.append(f"claim entry {position} is malformed, duplicated or unlinked")
+            continue
+        claim_ids.add(claim_id)
+        claim_values[claim_id] = claim["value"]
+    findings.extend(_claim_value_findings(decision, claim_values))
+
+    decision_record = document.get("decision")
+    if not isinstance(decision_record, dict) or decision_record.get("state") not in {
+        "pending", "submitted", "ratified",
+    }:
+        findings.append("decision state is missing or invalid")
+    elif decision_record["state"] == "ratified":
+        if (
+            _parse_utc_timestamp(decision_record.get("ratified_at")) is None
+            or not isinstance(decision_record.get("ratified_by"), str)
+            or not decision_record["ratified_by"].strip()
+        ):
+            findings.append("ratified decision lacks UTC time or named approver")
+    return packet_id, decision, findings
+
+
+def _budget_reconciliation_findings(
+    document: dict, *, expected_ids: set[str],
+) -> list[str]:
+    reconciliations = document.get("budget_reconciliations")
+    if not isinstance(reconciliations, list):
+        return ["budget reconciliation matrix is missing or malformed"]
+    artifact_ids = {
+        artifact.get("id")
+        for artifact in document.get("artifacts", [])
+        if isinstance(artifact, dict) and isinstance(artifact.get("id"), str)
+    }
+    reconciled_ids: list[str] = []
+    findings: list[str] = []
+    for position, row in enumerate(reconciliations, start=1):
+        if not isinstance(row, dict):
+            findings.append(f"budget reconciliation row {position} is malformed")
+            continue
+        budget_id = row.get("budget_id")
+        disposition = row.get("disposition")
+        evidence_refs = row.get("evidence_refs")
+        if not isinstance(budget_id, str) or not budget_id:
+            findings.append(f"budget reconciliation row {position} has invalid id")
+            continue
+        reconciled_ids.append(budget_id)
+        if "proposed_value" in row:
+            findings.append(f"budget reconciliation row {position} cannot invent a value")
+        if disposition not in {"pending", "retain", "tighten", "supersede_by_adr", "retire"}:
+            findings.append(f"budget reconciliation row {position} has invalid disposition")
+        if (
+            not isinstance(evidence_refs, list)
+            or not evidence_refs
+            or any(not isinstance(reference, str) for reference in evidence_refs)
+            or not set(evidence_refs).issubset(artifact_ids)
+        ):
+            findings.append(f"budget reconciliation row {position} lacks linked evidence")
+    if len(reconciled_ids) != len(set(reconciled_ids)):
+        findings.append("budget reconciliation contains duplicate budget ids")
+    if set(reconciled_ids) != expected_ids:
+        findings.append("budget reconciliation ids do not match selected ratified budgets")
+    return findings
+
+
+def _check_evidence_packets(
+    repo_root: Path,
+    packet_paths: tuple[Path, ...],
+    *,
+    as_of: str | None,
+    budgets_path: Path | None = None,
+) -> tuple[CheckResult, ...]:
+    as_of_value = _parse_utc_timestamp(as_of)
+    if as_of_value is None:
+        return tuple(
+            CheckResult(
+                f"RELO-EVIDENCE-{decision.removeprefix('RELO-')}",
+                False,
+                "An explicit UTC --as-of is required.",
+            )
+            for decision in _EVIDENCE_DECISIONS
+        )
+    linked_cards = _load_evidence_cards(repo_root)
+    if linked_cards is None or any(not linked_cards[decision] for decision in _EVIDENCE_DECISIONS):
+        return tuple(
+            CheckResult(
+                f"RELO-EVIDENCE-{decision.removeprefix('RELO-')}",
+                False,
+                "Current ledger decision/card linkage is unavailable.",
+            )
+            for decision in _EVIDENCE_DECISIONS
+        )
+
+    findings_by_decision: dict[str, list[str]] = {
+        decision: [] for decision in _EVIDENCE_DECISIONS
+    }
+    packet_ids: dict[str, str] = {}
+    packet_documents: dict[str, dict] = {}
+    packet_id_owners: dict[str, str] = {}
+    general_findings: list[str] = []
+    for position, path in enumerate(packet_paths, start=1):
+        try:
+            document = _load_evidence_packet(path)
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            general_findings.append(f"packet entry {position} cannot be read or parsed")
+            continue
+        if not isinstance(document, dict):
+            general_findings.append(f"packet entry {position} is not a mapping")
+            continue
+        decision_hint = document.get("decision_id")
+        if not isinstance(decision_hint, str) or decision_hint not in findings_by_decision:
+            general_findings.append(f"packet entry {position} has an unsupported decision")
+            continue
+        packet_id, decision, findings = _validate_evidence_packet(
+            repo_root,
+            document,
+            expected_cards=linked_cards[decision_hint],
+            as_of=as_of_value,
+        )
+        if decision is None or decision != decision_hint or packet_id is None:
+            findings_by_decision[decision_hint].extend(findings)
+            continue
+        prior_decision = packet_id_owners.get(packet_id)
+        if prior_decision is not None:
+            findings_by_decision[prior_decision].append(
+                "packet_id is duplicated across decisions",
+            )
+            findings_by_decision[decision].append("packet_id is duplicated across decisions")
+        else:
+            packet_id_owners[packet_id] = decision
+        if decision in packet_documents:
+            findings_by_decision[decision].append("multiple packets supplied for one decision")
+        else:
+            packet_ids[decision] = packet_id
+            packet_documents[decision] = document
+            findings_by_decision[decision].extend(findings)
+    for decision in _EVIDENCE_DECISIONS:
+        if decision not in packet_documents:
+            findings_by_decision[decision].append("required packet is missing")
+
+    d14 = packet_documents.get("RELO-D14")
+    if d14 is not None:
+        dependencies = d14.get("depends_on_packets")
+        if (
+            not isinstance(dependencies, dict)
+            or dependencies.get("RELO-D6d") != packet_ids.get("RELO-D6d")
+        ):
+            findings_by_decision["RELO-D14"].append(
+                "D14 packet does not resolve the supplied D6d packet",
+            )
+        if findings_by_decision["RELO-D6d"]:
+            findings_by_decision["RELO-D14"].append(
+                "D14 cannot depend on an inadmissible D6d packet",
+            )
+        ratified_ids = _load_ratified_budget_ids(
+            repo_root, budgets_path=budgets_path,
+        )
+        if ratified_ids is None:
+            findings_by_decision["RELO-D14"].append(
+                "budget reconciliation registry is unavailable",
+            )
+        else:
+            findings_by_decision["RELO-D14"].extend(
+                _budget_reconciliation_findings(d14, expected_ids=ratified_ids),
+            )
+    results = [
+        CheckResult(
+            f"RELO-EVIDENCE-{decision.removeprefix('RELO-')}",
+            not findings_by_decision[decision],
+            (
+                "Evidence packet is mechanically admissible; decision and card completion remain unassessed."
+                if not findings_by_decision[decision]
+                else "; ".join(findings_by_decision[decision])
+            ),
+        )
+        for decision in _EVIDENCE_DECISIONS
+    ]
+    if general_findings:
+        results.insert(0, CheckResult(
+            "RELO-EVIDENCE-PREFLIGHT",
+            False,
+            "; ".join(general_findings),
+        ))
+    return tuple(results)
 
 
 def _synthetic_count(path: Path) -> int:
@@ -748,6 +1456,385 @@ _TERMINAL_LIMITATIONS = (
     "Implementation authorization is separate from terminal certification; no state is inferred from document status or version.",
     "No RELO terminal state is product-vision completion (INV-RELO-29).",
 )
+_CLOSEOUT_WORK_ITEM_SCOPE = ("RELO-W0.12", "RELO-W0.13", "RELO-W0.14")
+_CLOSEOUT_LIMITATIONS = (
+    "Generated traceability is a mechanical inverse of the selected specification; it does not prove acceptance or execution evidence.",
+    "Staffing, economics and NFR packets report selected evidence shape only; they do not certify currentness, truth or owner authority.",
+    "The public NFR registry is a candidate template, not deployment approval or measured evidence.",
+)
+
+
+def _in_closeout_scope(identifier: str) -> bool:
+    return any(identifier == prefix or identifier.startswith(prefix) for prefix in _CLOSEOUT_WORK_ITEM_SCOPE)
+
+
+def _closeout_traceability(spec_path: Path) -> dict:
+    try:
+        content = spec_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        return _unavailable(spec_path.name, f"read failed ({type(error).__name__})")
+    visible = _markdown_visible_content(content)
+    work_definitions, malformed_phase = _phase_work_item_definitions(visible)
+    if malformed_phase:
+        return _unavailable(spec_path.name, _PHASE_TABLE_ERROR)
+    scope_work = sorted({identifier for identifier in work_definitions if _in_closeout_scope(identifier)})
+    missing_scope = [
+        prefix
+        for prefix in _CLOSEOUT_WORK_ITEM_SCOPE
+        if not any(identifier == prefix or identifier.startswith(prefix) for identifier in scope_work)
+    ]
+
+    trace = re.search(
+        r"^### 19\.2\s[^\n]*\n(.*?)(?=^#{1,3}\s|\Z)",
+        visible,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if trace is None:
+        return _unavailable(spec_path.name, "no '### 19.2' traceability section")
+    rows = _markdown_table_rows(
+        trace.group(1),
+        ("Requirement", "Work items", "Gate", "Primary test/evidence", "Phase"),
+        exact=True,
+    )
+    if rows is None:
+        return _unavailable(spec_path.name, "requirement traceability table is missing or malformed")
+
+    outside_trace = visible[:trace.start()] + visible[trace.end():]
+    definitions = set(re.findall(
+        r"^\|\s*(?:\*\*)?(RELO-(?:FR-\d+|NFR-\d+|W\d+\.\d+[a-z]?|QG-\d+))(?=\s|\*\*|\|)",
+        outside_trace,
+        flags=re.MULTILINE,
+    ))
+    requirement_to_work_items: dict[str, set[str]] = {}
+    work_item_to_requirements: dict[str, set[str]] = {}
+    for row in rows:
+        cells = _markdown_table_cells(row)
+        if cells is None or len(cells) != 5 or not all(cells):
+            return _unavailable(spec_path.name, "requirement traceability row is missing or malformed")
+        requirement = cells[0]
+        if not re.fullmatch(r"RELO-(?:FR|NFR)-\d+", requirement):
+            continue
+        try:
+            references = _traceability_references(cells[1], definitions)
+        except ValueError:
+            return _unavailable(spec_path.name, "requirement traceability work references are invalid")
+        scoped_references = sorted(
+            reference
+            for reference in references
+            if _in_closeout_scope(reference) and reference in set(scope_work)
+        )
+        if not scoped_references:
+            continue
+        requirement_to_work_items.setdefault(requirement, set()).update(scoped_references)
+        for work_item in scoped_references:
+            work_item_to_requirements.setdefault(work_item, set()).add(requirement)
+
+    missing_backlinks = sorted(work for work in scope_work if work not in work_item_to_requirements)
+    return {
+        "scope": list(_CLOSEOUT_WORK_ITEM_SCOPE),
+        "defined_work_items": scope_work,
+        "requirement_to_work_items": {
+            key: sorted(value) for key, value in sorted(requirement_to_work_items.items())
+        },
+        "work_item_to_requirements": {
+            key: sorted(value) for key, value in sorted(work_item_to_requirements.items())
+        },
+        "missing_work_item_definitions": missing_scope,
+        "work_items_without_requirement_backlinks": missing_backlinks,
+        "complete": not missing_scope and not missing_backlinks,
+    }
+
+
+def _load_closeout_budgets(repo_root: Path, budgets_path: Path | None) -> tuple[tuple, dict | None]:
+    relative = "governance/nfr-budgets.yaml"
+    import sys
+
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    try:
+        from src.core.exceptions import ConfigError
+        from src.core.nfr_budgets import load_nfr_budgets
+    except ImportError as error:
+        return (), _unavailable(relative, f"loader import failed ({type(error).__name__})")
+    try:
+        return load_nfr_budgets(budgets_path if budgets_path is not None else repo_root / relative), None
+    except (ConfigError, OSError, UnicodeDecodeError, yaml.YAMLError) as error:
+        return (), _unavailable(relative, f"load failed ({type(error).__name__})")
+
+
+def _closeout_evidence_requirements(budgets: tuple) -> list[dict]:
+    requirements = [
+        {
+            "id": "RELO-W0.13.staffing-current",
+            "work_item": "RELO-W0.13",
+            "category": "staffing",
+            "required_fields": ["as_of", "evidence_refs", "approval"],
+            "requires_real_data": True,
+            "requires_owner_approval": True,
+        },
+        {
+            "id": "RELO-W0.13.economics-current",
+            "work_item": "RELO-W0.13",
+            "category": "economics",
+            "required_fields": [
+                "as_of",
+                "window_start",
+                "window_end",
+                "workload_profile",
+                "evidence_refs",
+                "approval",
+            ],
+            "requires_real_data": True,
+            "requires_owner_approval": True,
+        },
+    ]
+    for budget in budgets:
+        result_fields = (
+            ["observed_value", "unit"]
+            if budget.direction in {"ceiling", "floor"}
+            else ["policy_result"]
+        )
+        requirements.append({
+            "id": f"RELO-W0.14.nfr.{budget.id}",
+            "work_item": "RELO-W0.14",
+            "category": "nfr-measurement",
+            "budget_id": budget.id,
+            "required_fields": [
+                "as_of",
+                "workload_profile",
+                "verification_method",
+                *result_fields,
+                "evidence_refs",
+                "approval",
+            ],
+            "requires_real_data": True,
+            "requires_owner_approval": True,
+        })
+    return requirements
+
+
+def _valid_date(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _approval_missing(value: object) -> bool:
+    if not isinstance(value, dict):
+        return True
+    return (
+        value.get("status") != "approved"
+        or not isinstance(value.get("approved_by"), str)
+        or not value["approved_by"].strip()
+        or not _valid_date(value.get("approved_at"))
+    )
+
+
+def _evidence_refs_missing(value: object) -> bool:
+    return (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(item, str) or not item.strip() for item in value)
+    )
+
+
+def _staffing_missing(section: object) -> list[str]:
+    if not isinstance(section, dict):
+        return ["as_of", "evidence_refs", "approval"]
+    missing = []
+    if not _valid_date(section.get("as_of")):
+        missing.append("as_of")
+    if _evidence_refs_missing(section.get("evidence_refs")):
+        missing.append("evidence_refs")
+    if _approval_missing(section.get("approval")):
+        missing.append("approval")
+    return missing
+
+
+def _economics_missing(section: object) -> list[str]:
+    if not isinstance(section, dict):
+        return [
+            "as_of",
+            "window_start",
+            "window_end",
+            "workload_profile",
+            "evidence_refs",
+            "approval",
+        ]
+    missing = []
+    for field in ("as_of", "window_start", "window_end"):
+        if not _valid_date(section.get(field)):
+            missing.append(field)
+    if missing == [] and section["window_start"] > section["window_end"]:
+        missing.append("window_end")
+    workload_profile = section.get("workload_profile")
+    if not isinstance(workload_profile, str) or not workload_profile.strip():
+        missing.append("workload_profile")
+    if _evidence_refs_missing(section.get("evidence_refs")):
+        missing.append("evidence_refs")
+    if _approval_missing(section.get("approval")):
+        missing.append("approval")
+    return missing
+
+
+def _nfr_measurement_missing(entry: object, budget: object) -> list[str]:
+    if not isinstance(entry, dict):
+        return ["measurement record"]
+    missing = []
+    if not _valid_date(entry.get("as_of")):
+        missing.append("as_of")
+    for field in ("workload_profile", "verification_method"):
+        value = entry.get(field)
+        if not isinstance(value, str) or not value.strip():
+            missing.append(field)
+    direction = getattr(budget, "direction", None)
+    if direction in {"ceiling", "floor"}:
+        observed = entry.get("observed_value")
+        if isinstance(observed, bool) or not isinstance(observed, (int, float)) or not math.isfinite(observed):
+            missing.append("observed_value")
+        unit = entry.get("unit")
+        if (
+            not isinstance(unit, str)
+            or not unit.strip()
+            or unit != getattr(budget, "unit", None)
+        ):
+            missing.append("unit")
+    else:
+        result = entry.get("policy_result")
+        if not isinstance(result, str) or not result.strip():
+            missing.append("policy_result")
+    if _evidence_refs_missing(entry.get("evidence_refs")):
+        missing.append("evidence_refs")
+    if _approval_missing(entry.get("approval")):
+        missing.append("approval")
+    return missing
+
+
+def _remaining_evidence(requirement: dict, missing: list[str]) -> dict:
+    return {
+        "id": requirement["id"],
+        "work_item": requirement["work_item"],
+        "category": requirement["category"],
+        "requires_real_data": requirement["requires_real_data"],
+        "requires_owner_approval": requirement["requires_owner_approval"],
+        "missing": missing,
+    }
+
+
+def _closeout_evidence_packet(
+    repo_root: Path,
+    *,
+    budgets_path: Path | None,
+    evidence_packet_path: Path | None,
+) -> dict:
+    budgets, failure = _load_closeout_budgets(repo_root, budgets_path)
+    if failure is not None:
+        return {**failure, "selected": evidence_packet_path is not None, "complete": False}
+    requirements = _closeout_evidence_requirements(budgets)
+    if evidence_packet_path is None:
+        return {
+            "selected": False,
+            "complete": False,
+            "requirements": requirements,
+            "remaining": [
+                _remaining_evidence(requirement, ["evidence packet not selected"])
+                for requirement in requirements
+            ],
+            "findings": [],
+        }
+    try:
+        document = yaml.safe_load(evidence_packet_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as error:
+        return {
+            **_unavailable(evidence_packet_path.name, f"read failed ({type(error).__name__})"),
+            "selected": True,
+            "complete": False,
+        }
+    except yaml.YAMLError:
+        return {
+            **_unavailable(evidence_packet_path.name, "YAML parse failed"),
+            "selected": True,
+            "complete": False,
+        }
+
+    findings: list[str] = []
+    if not isinstance(document, dict):
+        document = {}
+        findings.append("evidence packet must be a mapping")
+    if document.get("schema_version") != "1":
+        findings.append("schema_version must be '1'")
+
+    staffing = document.get("staffing")
+    economics = document.get("economics")
+    staffing_missing = _staffing_missing(staffing)
+    economics_missing = _economics_missing(economics)
+    if not isinstance(staffing, dict) or staffing.get("status") not in {"pending", "supplied"} or (
+        staffing.get("status") == "supplied" and staffing_missing
+    ):
+        findings.append("staffing evidence is incomplete")
+    if not isinstance(economics, dict) or economics.get("status") not in {"pending", "supplied"} or (
+        economics.get("status") == "supplied" and economics_missing
+    ):
+        findings.append("economics evidence is incomplete")
+
+    measurements = document.get("nfr_measurements")
+    measurement_by_budget: dict[str, dict] = {}
+    if not isinstance(measurements, list):
+        measurements = []
+        findings.append("nfr_measurements must be a list")
+    else:
+        for position, entry in enumerate(measurements, start=1):
+            if not isinstance(entry, dict) or entry.get("status") not in {"pending", "supplied"}:
+                findings.append(f"NFR evidence entry {position} is incomplete")
+                continue
+            budget_id = entry.get("budget_id")
+            if not isinstance(budget_id, str) or not budget_id:
+                findings.append(f"NFR evidence entry {position} is incomplete")
+                continue
+            if budget_id in measurement_by_budget:
+                findings.append("NFR evidence contains a duplicate budget_id")
+                continue
+            measurement_by_budget[budget_id] = entry
+
+    budgets_by_id = {budget.id: budget for budget in budgets}
+    unknown_measurements = sorted(set(measurement_by_budget) - set(budgets_by_id))
+    if unknown_measurements:
+        findings.append("NFR evidence contains unknown budget_id entries")
+
+    remaining: list[dict] = []
+    if staffing is None or not isinstance(staffing, dict) or staffing.get("status") != "supplied":
+        remaining.append(_remaining_evidence(requirements[0], staffing_missing or ["supplied status"]))
+    elif staffing_missing:
+        remaining.append(_remaining_evidence(requirements[0], staffing_missing))
+    if economics is None or not isinstance(economics, dict) or economics.get("status") != "supplied":
+        remaining.append(_remaining_evidence(requirements[1], economics_missing or ["supplied status"]))
+    elif economics_missing:
+        remaining.append(_remaining_evidence(requirements[1], economics_missing))
+
+    for requirement in requirements[2:]:
+        budget_id = requirement["budget_id"]
+        entry = measurement_by_budget.get(budget_id)
+        budget = budgets_by_id[budget_id]
+        missing = _nfr_measurement_missing(entry, budget)
+        if entry is None or entry.get("status") != "supplied" or missing:
+            remaining.append(_remaining_evidence(
+                requirement,
+                missing if missing else ["supplied status"],
+            ))
+            if entry is not None and entry.get("status") == "supplied" and missing:
+                findings.append("NFR evidence contains an incomplete supplied measurement")
+
+    return {
+        "selected": True,
+        "complete": not findings and not remaining and len(measurement_by_budget) == len(budgets),
+        "requirements": requirements,
+        "remaining": remaining,
+        "findings": sorted(set(findings)),
+    }
 
 
 def assess_terminal_state(repo_root: Path, *, spec_path: Path, budgets_path: Path | None = None) -> dict:
@@ -760,8 +1847,34 @@ def assess_terminal_state(repo_root: Path, *, spec_path: Path, budgets_path: Pat
         "source_authority": _source_authority_projection(repo_root),
         "budgets": _budget_projection(repo_root, budgets_path=budgets_path),
         "decisions": _decision_projection(spec_path),
+        "w6_readiness": _w6_readiness_projection(repo_root, spec_path=spec_path),
         "missing_inputs": [{"input": item, "spec": spec} for item, spec in _TERMINAL_MISSING_INPUTS],
         "limitations": list(_TERMINAL_LIMITATIONS),
+    }
+
+
+def assess_closeout(
+    repo_root: Path,
+    *,
+    spec_path: Path,
+    budgets_path: Path | None = None,
+    evidence_packet_path: Path | None = None,
+) -> dict:
+    """RELO-W0.12/13/14 mechanical evidence-gap assessment."""
+    return {
+        "terminal_state": None,
+        "assessment": "not_assessed",
+        "reason": (
+            "RELO-W0.12/W0.13/W0.14 mechanical completeness does not establish "
+            "operational qualification."
+        ),
+        "traceability": _closeout_traceability(spec_path),
+        "evidence_packet": _closeout_evidence_packet(
+            repo_root,
+            budgets_path=budgets_path,
+            evidence_packet_path=evidence_packet_path,
+        ),
+        "limitations": list(_CLOSEOUT_LIMITATIONS),
     }
 
 
@@ -793,6 +1906,7 @@ def _ledger_projection(repo_root: Path) -> dict:
     by_status: dict[str, int] = {}
     by_phase: dict[str, dict[str, int]] = {}
     by_class: dict[str, int] = {}
+    parent_by_status: dict[str, int] = {}
     relo6: list[dict[str, str]] = []
     ids: list[str] = []
     for position, card in enumerate(cards, start=1):
@@ -804,6 +1918,8 @@ def _ledger_projection(repo_root: Path) -> dict:
         ids.append(card["id"])
         status = card["status"]
         by_status[status] = by_status.get(status, 0) + 1
+        if _PARENT_CARD_ID_RE.fullmatch(card["id"]):
+            parent_by_status[status] = parent_by_status.get(status, 0) + 1
         phase = by_phase.setdefault(card["phase"], {})
         phase[status] = phase.get(status, 0) + 1
         by_class[card["class"]] = by_class.get(card["class"], 0) + 1
@@ -817,8 +1933,62 @@ def _ledger_projection(repo_root: Path) -> dict:
         "by_phase": by_phase,
         "by_class": by_class,
         "code_complete": by_status.get("completed", 0),
+        "parent_by_status": parent_by_status,
+        "parent_total": sum(parent_by_status.values()),
+        "parent_code_complete": parent_by_status.get("completed", 0),
+        "w0_readiness": _w0_readiness_projection(cards),
         "is_certification": False,
         "relo6": relo6,
+    }
+
+
+def _w0_readiness_projection(cards: list[dict]) -> dict:
+    parents = sorted(
+        (
+            card for card in cards
+            if card.get("current_parent") is True
+        ),
+        key=lambda card: card["id"],
+    )
+    slices = sorted(
+        (
+            card for card in cards
+            if card.get("current_slice") is True
+        ),
+        key=lambda card: card["id"],
+    )
+    by_parent: dict[str, dict] = {}
+    for parent in parents:
+        parent_id = parent["id"]
+        child_slices = [
+            {
+                "id": card["id"],
+                "status": card.get("status"),
+                "class": card.get("class"),
+                "startability": card.get("startability"),
+                "depends_on": card.get("depends_on", []),
+                "blocking_decisions": card.get("blocking_decisions", []),
+            }
+            for card in slices
+            if isinstance(card.get("definition"), dict)
+            and card["definition"].get("parent_id") == parent_id
+        ]
+        by_parent[parent_id] = {
+            "status": parent["status"],
+            "class": parent["class"],
+            "blocking_decisions": parent.get("blocking_decisions", []),
+            "slices": child_slices,
+        }
+    buckets = {
+        startability: [
+            card["id"] for card in slices if card.get("startability") == startability
+        ]
+        for startability in sorted(_W0_STARTABILITY)
+    }
+    return {
+        "open_parents": [parent["id"] for parent in parents if parent["status"] != "completed"],
+        "by_parent": by_parent,
+        **buckets,
     }
 
 
@@ -853,8 +2023,6 @@ def _source_authority_projection(repo_root: Path) -> dict:
 
 def _budget_projection(repo_root: Path, *, budgets_path: Path | None = None) -> dict:
     relative = "governance/nfr-budgets.yaml"
-    import sys
-
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     try:
@@ -901,6 +2069,16 @@ def _print_terminal_state(report: dict) -> None:
         print(f"LIMITATION {limitation}")
 
 
+def _print_closeout(report: dict) -> None:
+    print(f"NOT ASSESSED RELO-W0 closeout: {report['reason']}")
+    print(f"traceability: {json.dumps(report['traceability'], sort_keys=True)}")
+    print(f"evidence_packet: {json.dumps(report['evidence_packet'], sort_keys=True)}")
+    for item in report["evidence_packet"].get("remaining", []):
+        print(f"MISSING {item['id']}: {', '.join(item['missing'])}")
+    for limitation in report["limitations"]:
+        print(f"LIMITATION {limitation}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, required=True, help="Explicit evidence repository root.")
@@ -908,9 +2086,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--budgets", type=Path, help="Optional explicit operator budget registry instead of the selected root's governance registry.")
     parser.add_argument("--program-config", type=Path, help="Optional program configuration to check for deployment variables.")
     parser.add_argument("--telemetry", type=Path, action="append", default=[], help="Optional telemetry sidecar to check; repeatable.")
+    parser.add_argument("--evidence-packet", type=Path, action="append", default=[], help="Optional RELO evidence packet; repeat to supply D6d, D7, D13 and D14.")
+    parser.add_argument("--as-of", help="Explicit UTC timestamp used for reproducible evidence-packet freshness checks.")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable results.")
     parser.add_argument("--terminal-state", action="store_true", help="Report the read-only terminal-state evidence gap (never certifies).")
+    parser.add_argument("--closeout", action="store_true", help="Assess RELO-W0.12/W0.13/W0.14 mechanical closeout (never certifies).")
+    parser.add_argument("--packet", type=Path, help="Optional evidence packet for --closeout.")
     args = parser.parse_args(argv)
+    if args.closeout and args.terminal_state:
+        parser.error("--closeout and --terminal-state are mutually exclusive")
+    if args.packet is not None and not args.closeout:
+        parser.error("--packet requires --closeout")
+    if args.closeout:
+        report = assess_closeout(
+            args.repo_root,
+            spec_path=args.spec,
+            budgets_path=args.budgets,
+            evidence_packet_path=args.packet,
+        )
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            _print_closeout(report)
+        return 1 if any(
+            "unavailable" in report[key]
+            for key in ("traceability", "evidence_packet")
+        ) else 6
     if args.terminal_state:
         report = assess_terminal_state(args.repo_root, spec_path=args.spec, budgets_path=args.budgets)
         if args.json:
@@ -918,13 +2119,400 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _print_terminal_state(report)
         return 1 if any("unavailable" in report[key] for key in _TERMINAL_SECTIONS) else 6
-    results = verify(args.repo_root, spec_path=args.spec, program_config=args.program_config, telemetry_paths=tuple(args.telemetry), budgets_path=args.budgets)
+    results = verify(
+        args.repo_root,
+        spec_path=args.spec,
+        program_config=args.program_config,
+        telemetry_paths=tuple(args.telemetry),
+        budgets_path=args.budgets,
+        evidence_packet_paths=tuple(args.evidence_packet),
+        as_of=args.as_of,
+    )
     if args.json:
         print(json.dumps([asdict(result) for result in results], indent=2))
     else:
         for result in results:
             print(f"{'PASS' if result.passed else 'FAIL'} {result.id}: {result.detail}")
     return 0 if all(result.passed for result in results) else 6
+
+
+def _semantic_traceability_findings(spec_path: Path, visible_content: str) -> list[str]:
+    requirement_rows = _markdown_table_rows(
+        _traceability_section(visible_content, "19.2"),
+        ("Requirement", "Work items", "Gate", "Primary test/evidence", "Phase"),
+        exact=True,
+    )
+    if requirement_rows is None:
+        return []
+    repo_root = _spec_repo_root(spec_path)
+    try:
+        ledger = yaml.safe_load(
+            (repo_root / "governance" / "relo-work-packages.yaml").read_text(encoding="utf-8"),
+        )
+        problems = yaml.safe_load(
+            (repo_root / "governance" / "relo-problem-statements.yaml").read_text(encoding="utf-8"),
+        )
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return []
+    cards = ledger.get("work_items") if isinstance(ledger, dict) else None
+    problem_rows = problems.get("problems") if isinstance(problems, dict) else None
+    if not isinstance(cards, list) or not isinstance(problem_rows, list):
+        return []
+
+    work_definitions, malformed_phase = _phase_work_item_definitions(visible_content)
+    if malformed_phase:
+        return []
+    parent_ids = set(work_definitions)
+    card_by_id = {
+        card["id"]: card for card in cards
+        if isinstance(card, dict) and isinstance(card.get("id"), str)
+    }
+    compacted = {
+        card["id"]: card for card in cards
+        if isinstance(card, dict) and _validated_compacted_definition(card, parent_ids=parent_ids)
+    }
+    all_work_ids = parent_ids | set(compacted)
+    requirements = set()
+    for section in ("5.5", "5.6"):
+        requirement_pattern = r"RELO-FR-\d+" if section == "5.5" else r"RELO-NFR-\d+"
+        requirements.update(_traceability_definition_ids(
+            _markdown_table_rows(
+                _traceability_section(visible_content, section),
+                ("ID", "Requirement"),
+            ),
+            requirement_pattern,
+        ))
+
+    findings: list[str] = []
+    parsed_rows: dict[str, list[tuple[str, set[str]]]] = {}
+    for line in requirement_rows:
+        cells = _markdown_table_cells(line)
+        if cells is None or len(cells) != 5 or not all(cells):
+            continue
+        try:
+            references = _traceability_references(cells[1], all_work_ids)
+        except ValueError:
+            continue
+        parsed_rows.setdefault(cells[0], []).append((cells[3], references))
+
+    for requirement, rows in parsed_rows.items():
+        if len(rows) > 1:
+            child_cards = [
+                card_by_id[reference]
+                for _, references in rows
+                for reference in references
+                if reference in card_by_id and requirement in _relo_card_requirements(card_by_id[reference])
+            ]
+            if child_cards:
+                findings.append(
+                    f"{requirement}: duplicate semantic traceability requirement row",
+                )
+        for reference in {
+            identifier
+            for _, references in rows
+            for identifier in references
+            if identifier in compacted
+        }:
+            card = card_by_id.get(reference)
+            if card is None or requirement not in _relo_card_requirements(card):
+                findings.append(
+                    f"{reference}: orphan semantic traceability work reference for {requirement}",
+                )
+
+    scoped_cards: list[tuple[dict, list[str]]] = []
+    for card in card_by_id.values():
+        explicit_requirements = _relo_card_requirements(card)
+        if explicit_requirements:
+            scoped_cards.append((card, explicit_requirements))
+    scoped_problems: dict[str, set[str]] = {}
+    for card, _ in scoped_cards:
+        owners = {
+            card["id"],
+            card.get("definition", {}).get("parent_id", card["id"]),
+        }
+        for problem_id in _relo_card_problems(card):
+            scoped_problems.setdefault(problem_id, set()).update(owners)
+
+    for card, explicit_requirements in scoped_cards:
+        identifier = card["id"]
+        visible_owners = work_definitions.count(identifier)
+        compacted_owners = int(identifier in compacted)
+        if visible_owners + compacted_owners == 0:
+            findings.append(f"{identifier}: semantic traceability definition owner is missing")
+        elif visible_owners > 1 or visible_owners + compacted_owners > 1:
+            findings.append(f"{identifier}: duplicate semantic traceability definition owner")
+        authority_ref = card.get("authority_ref")
+        if not isinstance(authority_ref, str):
+            findings.append(f"{identifier}: unresolved semantic traceability citation")
+        else:
+            source = authority_ref.partition("#")[0]
+            try:
+                citation_path = (repo_root / source).resolve(strict=True)
+                if not citation_path.is_relative_to(repo_root.resolve()) or not citation_path.is_file():
+                    raise ValueError
+            except (OSError, ValueError):
+                findings.append(f"{identifier}: unresolved semantic traceability citation")
+        for requirement in explicit_requirements:
+            if requirement not in requirements:
+                findings.append(
+                    f"{identifier}: unresolved semantic traceability requirement {requirement}",
+                )
+                continue
+            rows = parsed_rows.get(requirement, [])
+            if len(rows) > 1:
+                continue
+            if not rows:
+                findings.append(
+                    f"{identifier}: semantic traceability missing work-item coverage for {requirement}",
+                )
+                continue
+            evidence, references = rows[0]
+            parent_id = card.get("definition", {}).get("parent_id", identifier)
+            if identifier not in references and parent_id not in references:
+                findings.append(
+                    f"{identifier}: semantic traceability missing work-item coverage for {requirement}",
+                )
+            acceptance = card.get("acceptance")
+            if not isinstance(acceptance, list) or not any(
+                test in evidence
+                for entry in acceptance
+                for test in (
+                    (entry.get("test"),)
+                    if isinstance(entry, dict)
+                    else (entry,)
+                )
+                if isinstance(test, str) and test
+            ):
+                findings.append(
+                    f"{identifier}: semantic traceability evidence reference is unresolved for {requirement}",
+                )
+
+    audit_rows = _markdown_table_rows(
+        _traceability_section(visible_content, "19.3"),
+        ("Audit finding", "Requirement/workstream", "Acceptance evidence"),
+        exact=True,
+    )
+    if audit_rows is not None:
+        problem_ids = {
+            problem["id"] for problem in problem_rows
+            if isinstance(problem, dict) and isinstance(problem.get("id"), str)
+        }
+        scoped_problem_references: set[str] = set()
+        scoped_problem_owners = {
+            owner for owners in scoped_problems.values() for owner in owners
+        }
+        for line in audit_rows:
+            cells = _markdown_table_cells(line)
+            if cells is None or len(cells) != 3:
+                continue
+            try:
+                references = _traceability_references(cells[1], all_work_ids)
+            except ValueError:
+                continue
+            if not references.intersection(scoped_problem_owners):
+                continue
+            for problem_id in set(re.findall(r"\bRELO-P\d+\b", cells[1])):
+                scoped_problem_references.add(problem_id)
+                if problem_id not in problem_ids:
+                    findings.append(
+                        f"{problem_id}: unresolved semantic traceability problem definition",
+                    )
+        for problem_id in scoped_problem_references - set(scoped_problems):
+            findings.append(f"{problem_id}: orphan semantic traceability problem row")
+        for problem_id, owners in scoped_problems.items():
+            matching_references = 0
+            for line in audit_rows:
+                cells = _markdown_table_cells(line)
+                if cells is None or len(cells) != 3 or problem_id not in cells[1]:
+                    continue
+                try:
+                    references = _traceability_references(cells[1], all_work_ids)
+                except ValueError:
+                    continue
+                if references.intersection(owners):
+                    matching_references += 1
+            if matching_references == 0:
+                findings.append(
+                    f"{problem_id}: semantic traceability missing problem row",
+                )
+            elif matching_references > 1:
+                findings.append(f"{problem_id}: duplicate semantic traceability problem row")
+            if problem_id not in problem_ids:
+                findings.append(
+                    f"{problem_id}: unresolved semantic traceability problem definition",
+                )
+            visible_owners = len(re.findall(
+                rf"^####[ \t]+{re.escape(problem_id)}\b", visible_content, re.MULTILINE,
+            ))
+            registry_owners = sum(
+                problem.get("id") == problem_id
+                for problem in problem_rows if isinstance(problem, dict)
+            )
+            if visible_owners + registry_owners > 1:
+                findings.append(f"{problem_id}: duplicate semantic traceability definition owner")
+    return findings
+
+
+def _relo_card_requirements(card: dict) -> list[str]:
+    requirements = card.get("requirements")
+    if not isinstance(requirements, list):
+        return []
+    return [
+        requirement for requirement in requirements
+        if isinstance(requirement, str)
+        and re.fullmatch(r"RELO-(?:FR|NFR)-\d+", requirement)
+    ]
+
+
+def _relo_card_problems(card: dict) -> list[str]:
+    problems = card.get("problems")
+    if not isinstance(problems, list):
+        return []
+    return [
+        problem for problem in problems
+        if isinstance(problem, str) and re.fullmatch(r"RELO-P\d+", problem)
+    ]
+
+
+def _w6_readiness_projection(repo_root: Path, *, spec_path: Path) -> dict:
+    relative = "governance/relo-work-packages.yaml"
+    document, failure = _load_governance_yaml(repo_root, relative)
+    if failure:
+        return failure
+    cards = document.get("work_items") if isinstance(document, dict) else None
+    if not isinstance(cards, list):
+        return _unavailable(relative, "work_items must be a list")
+
+    by_id: dict[str, dict] = {}
+    for position, card in enumerate(cards, start=1):
+        if not isinstance(card, dict) or not isinstance(card.get("id"), str):
+            return _unavailable(
+                relative,
+                f"work item {position} needs a string id",
+            )
+        identifier = card["id"]
+        if identifier in by_id:
+            return _unavailable(
+                relative,
+                f"duplicate work item ID(s): {identifier}",
+            )
+        by_id[identifier] = card
+
+    decisions = _decision_projection(spec_path)
+    if "open" not in decisions or not isinstance(decisions["open"], list):
+        return _unavailable(spec_path.name, "decision projection unavailable")
+    open_decisions = set(decisions["open"])
+
+    rows: list[dict] = []
+    w6_cards = sorted(
+        (
+            card
+            for card in cards
+            if isinstance(card, dict)
+            and re.fullmatch(
+                r"RELO-W6\.\d+",
+                str(card.get("id", "")),
+            )
+        ),
+        key=lambda card: int(card["id"].split(".")[-1]),
+    )
+    for card in w6_cards:
+        identifier = card["id"]
+        required = ("phase", "class", "status")
+        if any(not isinstance(card.get(field), str) for field in required):
+            return _unavailable(
+                relative,
+                f"{identifier} needs string phase, class and status",
+            )
+
+        declared_decisions = card.get("blocking_decisions", [])
+        if not isinstance(declared_decisions, list) or any(
+            not isinstance(decision, str)
+            for decision in declared_decisions
+        ):
+            return _unavailable(
+                relative,
+                f"{identifier} blocking_decisions must be strings",
+            )
+        unresolved_decisions = [
+            decision
+            for decision in declared_decisions
+            if decision in open_decisions
+        ]
+
+        dependencies = card.get("depends_on", [])
+        if not isinstance(dependencies, list) or any(
+            not isinstance(dependency, str)
+            for dependency in dependencies
+        ):
+            return _unavailable(
+                relative,
+                f"{identifier} depends_on must be strings",
+            )
+        unresolved_dependencies = []
+        for dependency in dependencies:
+            dependent = by_id.get(dependency)
+            if dependent is None:
+                return _unavailable(
+                    relative,
+                    f"{identifier} unresolved dependency {dependency}",
+                )
+            status = dependent.get("status")
+            if status != "completed":
+                unresolved_dependencies.append(
+                    {
+                        "id": dependency,
+                        "class": dependent.get("class"),
+                        "status": status,
+                    }
+                )
+
+        card_class = card["class"]
+        status = card["status"]
+        if status == "completed":
+            readiness = "completed"
+        elif (
+            card_class == "AGENT_READY"
+            and not unresolved_decisions
+            and not unresolved_dependencies
+        ):
+            readiness = "agent_ready"
+        elif unresolved_decisions:
+            readiness = "decision_blocked"
+        elif card_class == "NEEDS_DECISION":
+            readiness = "decision_blocked"
+        elif card_class == "AGENT_READY":
+            readiness = "dependency_blocked"
+        else:
+            readiness = "bounded_slice_required"
+
+        rows.append(
+            {
+                "id": identifier,
+                "class": card_class,
+                "status": status,
+                "readiness": readiness,
+                "blocking_decisions": declared_decisions,
+                "unresolved_decisions": unresolved_decisions,
+                "dependencies": dependencies,
+                "unresolved_dependencies": unresolved_dependencies,
+            }
+        )
+
+    counts: dict[str, int] = {}
+    for row in rows:
+        readiness = row["readiness"]
+        counts[readiness] = counts.get(readiness, 0) + 1
+    return {
+        "assessment": "not_qualified",
+        "summary": counts,
+        "agent_startable": [
+            row["id"]
+            for row in rows
+            if row["readiness"] == "agent_ready"
+        ],
+        "items": rows,
+    }
 
 
 if __name__ == "__main__":

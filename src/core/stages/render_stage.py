@@ -410,11 +410,9 @@ class RenderStage:
             chart_rows_scrubber=support.chart_rows_scrubber,
             charts_enabled=charts_enabled,
         )
-        chart_gate_failures = tuple(
-            section for section in kusto_sections if section.is_degraded and section.chart_blocks_publish
-        )
         if ctx.offline:
             kusto_sections = (*kusto_sections, *build_offline_kpi_chart_sections(ctx.bundle.config.kusto))
+        pre_fallback_chart_sections = kusto_sections
         kusto_sections, telemetry_observations, kusto_warnings = _apply_kusto_fallbacks(
             ctx=ctx,
             kusto_sections=kusto_sections,
@@ -442,7 +440,46 @@ class RenderStage:
                 or not getattr(s, "chart_png_base64", None)
             )
 
-        chart_gate_sections = kusto_sections
+        # Phase 3: Chart placement routing — spec §5.3
+        removed_sections = {
+            str(section).replace("-", "_")
+            for section in ctx.overrides_document.removed_sections
+        }
+        kusto_sections, exec_summary_chart, workstream_data = _route_chart_placements(
+            kusto_sections,
+            workstream_data,
+            exec_summary_visible=(
+                bool((ctx.render_exec_summary_text or "").strip())
+                and "exec_summary" not in removed_sections
+            ),
+            hidden_sections=frozenset(removed_sections),
+        )
+        kusto_sections = tuple(section for section in kusto_sections if section.query_id != "icm-mttr")
+        routed_chart_sections = (
+            kusto_sections
+            + ((exec_summary_chart,) if exec_summary_chart is not None else ())
+            + tuple(chart for workstream in workstream_data for chart in workstream.attached_charts)
+        )
+        routed_chart_keys = {
+            (section.query_id, section.section_id) for section in routed_chart_sections
+        }
+        chart_gate_sections = routed_chart_sections + tuple(
+            section
+            for section in pre_fallback_chart_sections
+            if (
+                (section.query_id, section.section_id) not in routed_chart_keys
+                or (
+                    section.is_degraded
+                    and section.chart_blocks_publish
+                    and section not in routed_chart_sections
+                )
+            )
+        )
+        chart_gate_failures = tuple(
+            section
+            for section in chart_gate_sections
+            if section.is_degraded and section.chart_blocks_publish
+        )
         chart_gates_enabled = charts_enabled and (
             chart_settings is not None
             or bool(chart_gate_failures)
@@ -453,9 +490,6 @@ class RenderStage:
                 and any(query.render_as == "chart_image" for query in ctx.bundle.config.kusto.queries)
             )
         )
-        # Phase 3: Chart placement routing — spec §5.3
-        kusto_sections, exec_summary_chart, workstream_data = _route_chart_placements(kusto_sections, workstream_data)
-        kusto_sections = tuple(section for section in kusto_sections if section.query_id != "icm-mttr")
 
         quality_matrix = build_quality_matrix(
             bundle=ctx.bundle,
@@ -950,6 +984,9 @@ def _detail_section_id(scorecard_name: str, dimension_name: str) -> str:
 def _route_chart_placements(
     kusto_sections: tuple[Any, ...],
     workstream_data: tuple[Any, ...],
+    *,
+    exec_summary_visible: bool = True,
+    hidden_sections: frozenset[str] = frozenset(),
 ) -> tuple[tuple[Any, ...], Any, tuple[Any, ...]]:
     """
     Route chart sections to their designated placements.
@@ -964,29 +1001,58 @@ def _route_chart_placements(
     exec_summary_chart: Any = None
     remaining: list[Any] = []
     workstream_map: dict[str, Any] = {ws.section_id: ws for ws in workstream_data}
+    hidden_targets = {str(section).replace("-", "_") for section in hidden_sections}
 
     for section in kusto_sections:
         placement = getattr(section, "section_placement", "standalone") or "standalone"
         if placement == "exec_summary":
+            if not exec_summary_visible:
+                remaining.append(
+                    _chart_placement_failure(
+                        section,
+                        "Chart placement target exec_summary is hidden or empty; "
+                        "the selected target was not bypassed.",
+                    )
+                )
+                continue
             # First exec_summary chart wins; route to RenderContext.exec_summary_chart
             if exec_summary_chart is None:
                 exec_summary_chart = section
             else:
-                remaining.append(section)
+                remaining.append(
+                    _chart_placement_failure(
+                        section,
+                        "Multiple charts target exec_summary; only the first reviewed target can render.",
+                    )
+                )
         elif placement.startswith("workstream:"):
             ws_target = placement[len("workstream:") :]
             if ws_target in workstream_map and (
-                workstream_map[ws_target].blurb.strip() or workstream_map[ws_target].items
+                ws_target not in hidden_targets
+                and (
+                    workstream_map[ws_target].blurb.strip()
+                    or workstream_map[ws_target].items
+                )
             ):
                 ws = workstream_map[ws_target]
                 workstream_map[ws_target] = _with_attached_chart(ws, section)
             else:
-                remaining.append(section)
+                remaining.append(
+                    _chart_placement_failure(
+                        section,
+                        f"Chart placement target {ws_target!r} is hidden, missing or empty; "
+                        "the selected target was not bypassed.",
+                    )
+                )
         elif placement == "standalone":
             remaining.append(section)
         else:
-            # Unknown placement — treat as standalone
-            remaining.append(section)
+            remaining.append(
+                _chart_placement_failure(
+                    section,
+                    f"Unknown chart placement target {placement!r}.",
+                )
+            )
 
     # Rebuild workstream_data with updated attached_charts
     updated_workstreams = tuple(workstream_map.values())
@@ -995,6 +1061,23 @@ def _route_chart_placements(
     updated_kusto = tuple(remaining)
 
     return updated_kusto, exec_summary_chart, updated_workstreams
+
+
+def _chart_placement_failure(section: Any, message: str) -> Any:
+    from dataclasses import replace
+
+    return replace(
+        section,
+        section_placement="standalone",
+        message=message,
+        is_degraded=True,
+        chart_blocks_publish=True,
+        image_data_url=None,
+        chart_png_base64=None,
+        chart_png_size_bytes=0,
+        captured_at=None,
+        cache_captured_at=None,
+    )
 
 
 def _with_attached_chart(ws: Any, section: Any) -> Any:

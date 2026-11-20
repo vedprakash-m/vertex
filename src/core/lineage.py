@@ -379,7 +379,11 @@ def _latest_evidence_timestamp(evidence: EvidencePacket | None) -> datetime | No
         return None
     timestamps = [revision.changed_date for revision in evidence.revisions]
     timestamps.extend(comment.created_date for comment in evidence.comments)
-    timestamps.extend(enrichment.timestamp for enrichment in evidence.enrichments)
+    timestamps.extend(
+        enrichment.timestamp
+        for enrichment in evidence.enrichments
+        if enrichment.timestamp is not None
+    )
     if not timestamps:
         return None
     return max(timestamps)

@@ -3,7 +3,8 @@
 Zone A, deterministic and in-memory. Classifies how a unit of work executes
 and validates which models may be used for which purpose. This is distinct
 from ``src.core.model_registry``, which persists per-feature deployment pins.
-No existing AI caller consults this module yet (additive, default-off).
+The opt-in dependency blast-radius runner caller adapts its active pin into
+this registry and carries the resulting classification into tier telemetry.
 """
 from __future__ import annotations
 
@@ -11,6 +12,8 @@ from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
 from typing import Iterable
+
+from src.core.model_registry import ModelPin
 
 
 class ExecutionClass(str, Enum):
@@ -42,6 +45,28 @@ class RegistryFinding:
     code: RegistryFindingCode
     model_id: str
     detail: str
+
+
+def model_pin_to_registry_entry(
+    pin: ModelPin,
+    *,
+    provider: str,
+    purpose: str,
+    execution_class: ExecutionClass | str,
+    enabled: bool,
+) -> ModelRegistryEntry:
+    """Adapt a persisted pin using caller-supplied declarative policy.
+
+    The adapter projects only the pinned model identity; deployment lifecycle
+    remains owned by ``ModelPin`` and is never derived from this metadata.
+    """
+    return ModelRegistryEntry(
+        model_id=pin.model_id,
+        provider=provider,
+        purpose=purpose,
+        execution_class=execution_class,
+        enabled=enabled,
+    )
 
 
 def parse_execution_class(value: object) -> ExecutionClass | None:

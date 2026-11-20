@@ -513,7 +513,11 @@ def test_real_program_scope_controls_execution_signals_and_history(
     assert set(state) == set(expected_ids)
     assert result.api_call_count == len(expected_ids)
     assert all(signal.program_id == "demo" for signal in signals)
-    assert signals[-1].text == "Kusto query diagnostic: 1 row(s) observed."
+    assert signals[-1].text == (
+        "Kusto query diagnostic [kind=table, interpretation=unqualified]: "
+        'admitted_rows=1; columns=[Message]; facts=[{"Message":"ok"}]; '
+        "no qualified trend or SLO verdict."
+    )
     assert len(signals) == len(expected_ids)
     if applicable:
         assert result.errors == ()
@@ -709,7 +713,11 @@ def test_real_loader_comparison_admission_and_boundaries(
         elif not rows:
             assert "query or data gap" in signals[0].text
         else:
-            assert signals[0].text == "Kusto query rate: 1 row(s) observed."
+            assert signals[0].text == (
+                "Kusto query rate [kind=table, interpretation=unqualified]: "
+                'admitted_rows=1; columns=[Rate]; facts=[{"Rate":0}]; '
+                "no qualified trend or SLO verdict."
+            )
     assert PREVIOUS["value_last_4"] == [7.0, 8.0]
 
 
@@ -958,11 +966,15 @@ def test_uncontracted_known_metric_must_not_publish_arbitrary_first_row(tmp_path
     assert signals.signals == ()
 
 
-def test_diagnostic_only_multirow_query_keeps_row_count_signal(tmp_path: Path) -> None:
+def test_diagnostic_only_multirow_query_keeps_exact_table_facts(tmp_path: Path) -> None:
     result, signals = _hydrate([{"Count": 1}, {"Count": 999}], tmp_path, diagnostic=True)
     assert result.errors == ()
     assert result.resources.result_sets[0].observed_value is None
-    assert signals.signals[0].text == "Kusto query count-query: 2 row(s) observed."
+    assert signals.signals[0].text == (
+        "Kusto query count-query [kind=table, interpretation=unqualified]: "
+        'admitted_rows=2; columns=[Count]; facts=[{"Count":1},{"Count":999}]; '
+        "no qualified trend or SLO verdict."
+    )
 
 
 def test_known_metric_zero_rows_keeps_explicit_data_gap(tmp_path: Path) -> None:
@@ -1041,13 +1053,16 @@ def test_shared_guard_preserves_old_api_diagnostics_empty_and_scalar_priority() 
     )
 
 
-def test_diagnostic_multirow_helpers_keep_existing_behavior() -> None:
+def test_diagnostic_multirow_helpers_keep_table_signal_without_scalar_fabrication() -> None:
     query = replace(_query(), metric_id=None)
     rows = [{"Count": 1}, {"Count": 999}]
     state: dict[str, dict[str, Any]] = {}
-    assert gather._build_kusto_kpi_signal(query=query, rows=rows, program_id="demo", as_of=NOW) is not None
+    signal = gather._build_kusto_kpi_signal(query=query, rows=rows, program_id="demo", as_of=NOW)
+    assert signal is not None
+    assert signal.metadata["result_value"] is None
+    assert signal.metadata["result_json"] is None
     assert kusto_query_helpers.build_kusto_signal(query=query, rows=rows, program_id="demo", as_of=NOW) is not None
-    assert kusto_query_helpers.extract_kusto_query_numeric_value(query, rows) == 1
+    assert kusto_query_helpers.extract_kusto_query_numeric_value(query, rows) is None
     kusto_query_helpers.record_kusto_query_state(state, query, rows=rows, as_of=NOW, duration_ms=0)
     assert state[query.id]["last_cycle_succeeded"] is True
 

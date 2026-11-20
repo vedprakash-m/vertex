@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 import yaml
@@ -15,6 +16,7 @@ from src.core.ado_status import ADOStatusReport, AreaCoverageRow, GatherStatus, 
 from src.core.analytics_store import load_autonomy_audit_records
 from src.core.archive_store import write_confirmed_issue
 from src.core.coverage_gap import CoverageGap
+from src.core.governed_feedback_lifecycle import FeedbackValue, ProposalKind
 from src.core.journal import append_review_decision, append_signal
 from src.core.models import Confidence, ConfirmedDimension, EditionType, RiskLevel, RunManifest, Snapshot, SnapshotItem, WorkItem
 from src.core.models_v2 import ADOConfig, Program, Signal, SignalReviewDecision, TrajectoryPoint, VitalityAggregate, VitalityScore, Workstream
@@ -930,6 +932,16 @@ def test_ado_apply_cli_uses_promoted_batch_approval_rule_without_prompt(tmp_path
     )
     write_proposal_manifest(proposal, programs_root=programs_root)
     _seed_signal_approval_rules(programs_root, action_type="comment", rule_id="approval:comment")
+    monkeypatch.setattr(
+        "src.core.feedback.signal_approval_learner.load_active_feedback_proposals",
+        lambda *args, **kwargs: (
+            SimpleNamespace(
+                subject="signal_approval:approval:comment",
+                kind=ProposalKind.THRESHOLD,
+                proposed_value=FeedbackValue.enum("batch_approval"),
+            ),
+        ),
+    )
     fake_client = _ProposalADOClient()
     fake_writer = _RecordingWriter()
 

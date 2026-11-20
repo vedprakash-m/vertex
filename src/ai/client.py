@@ -6,6 +6,8 @@ import json
 import logging
 import math
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,7 +19,11 @@ from src.ai.context_tokenizers import resolve_token_estimator
 from src.ai.llm_trace import AITraceContext, get_current_trace_context, llm_trace
 from src.ai.request_router import AIRequestRouter
 from src.core.exceptions import ConfigError, StateError
-from src.core.policy_loader import _load_ai_policy_document, load_ai_model_cost_policy
+from src.core.policy_loader import (
+    _load_ai_policy_document,
+    load_ai_model_cost_policy,
+    load_ai_model_cost_policy_exact,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -69,18 +75,64 @@ class _FeatureBudgetState:
         self.lock = Lock()
         self.spent_usd = 0.0
         self.reservations: dict[tuple[object, int], float] = {}
+        self.settlement_uncertain = False
+
+
+class _AttemptSequence:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._current = 0
+
+    def next_index(self) -> int:
+        with self._lock:
+            self._current += 1
+            return self._current
+
+
+_ACTIVE_ATTEMPT_SEQUENCE: ContextVar[_AttemptSequence | None] = ContextVar(
+    "vertex_ai_attempt_sequence",
+    default=None,
+)
+
+
+@contextmanager
+def use_attempt_sequence(sequence: _AttemptSequence) -> Iterator[None]:
+    token = _ACTIVE_ATTEMPT_SEQUENCE.set(sequence)
+    try:
+        yield
+    finally:
+        _ACTIVE_ATTEMPT_SEQUENCE.reset(token)
 
 
 class _CostChain:
     """Priced retry/fallback chain; its worst case is held with the first attempt's reservation."""
 
-    __slots__ = ("guard", "prices", "attempts", "reservation")
+    __slots__ = (
+        "guard",
+        "prices",
+        "deployments",
+        "attempts",
+        "reservation",
+        "feature_state",
+        "feature_hold_key",
+        "feature_hold_usd",
+    )
 
-    def __init__(self, guard: Any, prices: dict[str, tuple[float, float]], attempts: int) -> None:
+    def __init__(
+        self,
+        guard: Any,
+        prices: dict[str, tuple[float, float]],
+        deployments: Sequence[str],
+        attempts: int,
+    ) -> None:
         self.guard = guard
         self.prices = prices
+        self.deployments = tuple(deployments)
         self.attempts = attempts
         self.reservation: Any = None
+        self.feature_state: _FeatureBudgetState | None = None
+        self.feature_hold_key: tuple[object, int] | None = None
+        self.feature_hold_usd = 0.0
 
     def covers(self, client: AIClient) -> bool:
         guard = client._run_cost_guard
@@ -95,13 +147,56 @@ class _CostChain:
         try:
             total_usd = self.attempts * math.fsum(
                 (prompt_tokens / 1000) * input_per_1k + (max_tokens / 1000) * output_per_1k
-                for input_per_1k, output_per_1k in self.prices.values()
+                for input_per_1k, output_per_1k in (
+                    self.prices[deployment] for deployment in self.deployments
+                )
             )
         except OverflowError:
             total_usd = math.inf
         if not math.isfinite(total_usd) or total_usd < 0:
             raise BudgetConfigurationError("AI token reservation cost must be finite and nonnegative.")
         return total_usd
+
+    def admit_feature_hold(
+        self,
+        state: _FeatureBudgetState,
+        *,
+        total_usd: float,
+        first_attempt_usd: float,
+    ) -> None:
+        if self.feature_state is not None:
+            raise BudgetStateError("AI cost chain feature reservation already initialized.")
+        if first_attempt_usd > total_usd + 1e-12:
+            raise BudgetConfigurationError("AI fallback attempt exceeds the reserved chain bound.")
+        self.feature_state = state
+        self.feature_hold_key = (self, 0)
+        self.feature_hold_usd = max(0.0, total_usd - first_attempt_usd)
+        state.reservations[self.feature_hold_key] = self.feature_hold_usd
+
+    def draw_feature_hold(self, state: _FeatureBudgetState, attempt_usd: float) -> None:
+        if self.feature_state is not state or self.feature_hold_key is None:
+            raise BudgetStateError("AI fallback feature reservation is not bound to this feature.")
+        if attempt_usd > self.feature_hold_usd + 1e-12:
+            raise BudgetStateError("AI fallback attempt exceeds the retained feature reservation.")
+        self.feature_hold_usd = max(0.0, self.feature_hold_usd - attempt_usd)
+        if self.feature_hold_usd > 0.0:
+            state.reservations[self.feature_hold_key] = self.feature_hold_usd
+        else:
+            state.reservations.pop(self.feature_hold_key, None)
+
+    def require_feature_hold(self, state: _FeatureBudgetState, attempt_usd: float) -> None:
+        if self.feature_state is not state or self.feature_hold_key is None:
+            raise BudgetStateError("AI fallback feature reservation is not bound to this feature.")
+        if attempt_usd > self.feature_hold_usd + 1e-12:
+            raise BudgetStateError("AI fallback attempt exceeds the retained feature reservation.")
+
+    def release_feature_hold(self) -> None:
+        if self.feature_state is not None and self.feature_hold_key is not None:
+            with self.feature_state.lock:
+                self.feature_state.reservations.pop(self.feature_hold_key, None)
+        self.feature_hold_usd = 0.0
+        self.feature_hold_key = None
+        self.feature_state = None
 
 
 _ACTIVE_COST_CHAIN: ContextVar[_CostChain | None] = ContextVar("vertex_ai_cost_chain", default=None)
@@ -124,36 +219,42 @@ def open_cost_chain(primary: Any, deployments: Sequence[str]) -> _CostChain | No
         return None
     assert primary._trace_context is not None
     feature = primary._trace_context.metadata.get("ai_feature")
-    if feature is not None:
-        try:
-            known_features = _load_ai_policy_document().get("ai_features") or {}
-        except ConfigError:
-            raise BudgetConfigurationError("AI feature policy configuration is invalid.") from None
-        if str(feature).strip() not in known_features:
-            raise BudgetConfigurationError(f"Unknown AI feature {feature!r}; provider call refused.")
+    if not isinstance(feature, str) or not feature.strip():
+        raise BudgetConfigurationError("AI feature metadata is required for fallback-chain admission.")
+    try:
+        known_features = _load_ai_policy_document().get("ai_features") or {}
+    except ConfigError:
+        raise BudgetConfigurationError("AI feature policy configuration is invalid.") from None
+    if feature.strip() not in known_features:
+        raise BudgetConfigurationError(f"Unknown AI feature {feature!r}; provider call refused.")
     prices: dict[str, tuple[float, float]] = {}
     for deployment in dict.fromkeys(deployments):
-        if deployment == primary.deployment:
-            prices[deployment] = (primary._input_cost_per_1k_tokens, primary._output_cost_per_1k_tokens)
-            continue
         try:
-            pricing = load_ai_model_cost_policy(deployment)
+            pricing = load_ai_model_cost_policy_exact(deployment)
         except ConfigError:
             raise BudgetConfigurationError("AI model pricing configuration is invalid.") from None
         prices[deployment] = (pricing.input_cost_per_1k_tokens, pricing.output_cost_per_1k_tokens)
-    return _CostChain(primary._run_cost_guard, prices, primary.MAX_RETRIES + 1)
+    return _CostChain(
+        primary._run_cost_guard,
+        prices,
+        deployments,
+        primary.MAX_RETRIES + 1,
+    )
 
 
 def close_cost_chain(chain: _CostChain | None, *, refresh_projection: bool = True) -> None:
     """Release the undrawn remainder; drawn attempt rows keep their own settle/retain outcome."""
-    if chain is None or chain.reservation is None:
+    if chain is None:
         return
     try:
-        chain.guard.release_chain(chain.reservation, refresh_projection=refresh_projection)
+        if chain.reservation is not None:
+            chain.guard.release_chain(chain.reservation, refresh_projection=refresh_projection)
     except Exception as error:
         raise BudgetStateError(
             f"Unable to release AI cost chain remainder ({type(error).__name__}); reconcile before retrying."
         ) from None
+    finally:
+        chain.release_feature_hold()
 
 
 def run_in_cost_chain(chain: _CostChain | None, call: Callable[[], ResultT]) -> ResultT:
@@ -195,6 +296,7 @@ class AIClient:
         time_func: Callable[[], float] = time.monotonic,
         trace_context: AITraceContext | None = None,
         _feature_budget_state: _FeatureBudgetState | None = None,
+        _attempt_sequence: _AttemptSequence | None = None,
     ) -> None:
         if not deployment.strip():
             raise RuntimeError("Azure OpenAI deployment name is required.")
@@ -211,6 +313,11 @@ class AIClient:
         self._output_cost_per_1k_tokens = pricing.output_cost_per_1k_tokens
         self._spent_usd = 0.0
         self._feature_budget_state = _feature_budget_state or _FeatureBudgetState()
+        self._attempt_sequence = (
+            _attempt_sequence
+            or _ACTIVE_ATTEMPT_SEQUENCE.get()
+            or _AttemptSequence()
+        )
         self._reservation_namespace = object()
         self._usage_stats = AIUsageStats()
         self._sleep = sleep_func
@@ -281,6 +388,10 @@ class AIClient:
 
     def _reserve_budget(self, *, system: str, user: str, max_tokens: int) -> Any:
         with self._feature_budget_state.lock:
+            if self._feature_budget_state.settlement_uncertain:
+                raise BudgetStateError(
+                    "AI cost settlement remains uncertain; reconcile retained reservations before retrying."
+                )
             if self._spent_usd >= self._budget_usd:
                 raise BudgetExceeded(f"Spent ${self._spent_usd:.3f} of ${self._budget_usd:.2f}")
             if self._feature_budget_state.spent_usd >= self._budget_usd:
@@ -303,21 +414,39 @@ class AIClient:
                 committed_usd = self._feature_budget_state.spent_usd + sum(
                     self._feature_budget_state.reservations.values()
                 )
-                if committed_usd + estimated_cost_usd > self._budget_usd:
+                chain = _ACTIVE_COST_CHAIN.get()
+                chain_total_usd: float | None = None
+                opening_chain = chain is not None and chain.covers(self) and chain.reservation is None
+                if opening_chain:
+                    assert chain is not None
+                    chain_total_usd = chain.worst_case_usd(estimated_prompt_tokens, max_tokens)
+                    admission_usd = chain_total_usd
+                elif chain is not None and chain.covers(self):
+                    admission_usd = 0.0
+                else:
+                    admission_usd = estimated_cost_usd
+                if committed_usd + admission_usd > self._budget_usd + 1e-12:
                     raise BudgetExceeded(
                         f"Spent/reserved ${committed_usd:.3f} of ${self._budget_usd:.2f}; "
-                        f"next AI spend ${estimated_cost_usd:.3f} would exceed the feature ceiling."
+                        f"next AI chain spend ${admission_usd:.3f} would exceed the feature ceiling."
                     )
-                chain = _ACTIVE_COST_CHAIN.get()
                 try:
                     if chain is not None and chain.covers(self) and chain.reservation is not None:
+                        chain.require_feature_hold(self._feature_budget_state, estimated_cost_usd)
                         reservation = self._run_cost_guard.reserve_call(estimated_cost_usd, chain=chain.reservation)
+                        chain.draw_feature_hold(self._feature_budget_state, estimated_cost_usd)
                     elif chain is not None and chain.covers(self):
+                        assert chain_total_usd is not None
                         reservation = self._run_cost_guard.reserve_call(
                             estimated_cost_usd,
-                            chain_total_usd=chain.worst_case_usd(estimated_prompt_tokens, max_tokens),
+                            chain_total_usd=chain_total_usd,
                         )
                         chain.reservation = reservation
+                        chain.admit_feature_hold(
+                            self._feature_budget_state,
+                            total_usd=chain_total_usd,
+                            first_attempt_usd=estimated_cost_usd,
+                        )
                     else:
                         reservation = self._run_cost_guard.reserve_call(estimated_cost_usd)
                 except (StateError, OSError, UnicodeError) as error:
@@ -343,6 +472,7 @@ class AIClient:
                 try:
                     run_state = self._run_cost_guard.settle_call(reservation, cost_usd)
                 except (StateError, OSError, UnicodeError) as error:
+                    self._feature_budget_state.settlement_uncertain = True
                     message = str(error) if isinstance(error, StateError) else "Unable to access AI cost state."
                     raise BudgetStateError(message) from None
                 # Only successful settlement removes the local estimate.
@@ -400,6 +530,7 @@ class AIClient:
                 prompt_version=prompt_version,
                 latency_ms=0.0,
                 error=message,
+                outcome="blocked",
             )
             raise AIClientError(message)
         def reserve_attempt() -> tuple[Any, int | None]:
@@ -416,12 +547,19 @@ class AIClient:
                 ) from None
 
         reservation, cost_reservation_id = reserve_attempt()
+        attempt_index = self._attempt_sequence.next_index()
+        estimated_cost_usd = (
+            reservation.estimated_cost_usd
+            if reservation is not None
+            else None
+        )
         started = time.perf_counter()
         response: Any = None
         preflight_failure = False
 
         def reserve_retry() -> None:
-            nonlocal reservation, cost_reservation_id, preflight_failure
+            nonlocal reservation, cost_reservation_id, attempt_index
+            nonlocal estimated_cost_usd, preflight_failure
             preflight_failure = True
             try:
                 try:
@@ -429,6 +567,9 @@ class AIClient:
                         prompt_version=prompt_version,
                         latency_ms=None,
                         error="AI provider attempt failed before retry.",
+                        outcome="retry",
+                        attempt_index=attempt_index,
+                        estimated_cost_usd=estimated_cost_usd,
                         cost_reservation_id=cost_reservation_id,
                     )
                 except (OSError, StateError, UnicodeError):
@@ -441,6 +582,12 @@ class AIClient:
                     f"AI retry preflight failed ({type(error).__name__}); "
                     "reconcile retained reservations before retrying."
                 ) from None
+            attempt_index = self._attempt_sequence.next_index()
+            estimated_cost_usd = (
+                reservation.estimated_cost_usd
+                if reservation is not None
+                else None
+            )
             preflight_failure = False
 
         def reject_before_dispatch(error: Exception) -> None:
@@ -458,6 +605,17 @@ class AIClient:
                             f"Unable to release undispatched AI cost reservation ({type(release_error).__name__}); "
                             "reconcile before retrying."
                         ) from None
+            self._write_trace(
+                prompt_version=prompt_version,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error=(
+                    f"AI local request preflight failed ({type(error).__name__})."
+                ),
+                outcome="released",
+                attempt_index=attempt_index,
+                estimated_cost_usd=estimated_cost_usd,
+                cost_reservation_id=cost_reservation_id,
+            )
             raise AIPreflightError(
                 f"AI local request preflight failed ({type(error).__name__}); the current attempt was not dispatched."
             ) from None
@@ -486,6 +644,13 @@ class AIClient:
                     cost_usd=cost_usd,
                     error=str(budget_error) if budget_error is not None else None,
                     budget_exceeded=budget_error is not None,
+                    outcome=(
+                        "budget_exceeded"
+                        if budget_error is not None
+                        else "succeeded"
+                    ),
+                    attempt_index=attempt_index,
+                    estimated_cost_usd=estimated_cost_usd,
                     cost_reservation_id=cost_reservation_id,
                 )
             except (OSError, StateError, UnicodeError):
@@ -524,6 +689,9 @@ class AIClient:
                     latency_ms=(time.perf_counter() - started) * 1000,
                     cost_usd=trace_cost_usd,
                     error="Unable to settle AI cost state; reconcile before retrying.",
+                    outcome="retained",
+                    attempt_index=attempt_index,
+                    estimated_cost_usd=estimated_cost_usd,
                     cost_reservation_id=cost_reservation_id,
                 )
             except (OSError, StateError, UnicodeError):
@@ -539,6 +707,9 @@ class AIClient:
                 prompt_version=prompt_version,
                 latency_ms=(time.perf_counter() - started) * 1000,
                 error=str(wrapped_error),
+                outcome="failed",
+                attempt_index=attempt_index,
+                estimated_cost_usd=estimated_cost_usd,
                 cost_reservation_id=cost_reservation_id,
             )
             raise wrapped_error from error
@@ -553,6 +724,9 @@ class AIClient:
         cost_usd: float | None = None,
         error: str | None = None,
         budget_exceeded: bool = False,
+        outcome: str | None = None,
+        attempt_index: int | None = None,
+        estimated_cost_usd: float | None = None,
         cost_reservation_id: int | None = None,
     ) -> None:
         if self._trace_context is None:
@@ -570,6 +744,10 @@ class AIClient:
             latency_ms=latency_ms,
             cost_usd=cost_usd,
             error=error,
+            resolved_deployment=self._deployment,
+            attempt_index=attempt_index,
+            outcome=outcome,
+            estimated_cost_usd=estimated_cost_usd,
             cost_reservation_id=cost_reservation_id,
             metadata=self._trace_context.metadata,
             trace_file=self._trace_context.trace_file,
@@ -586,6 +764,10 @@ class AIClient:
             cost_usd=cost_usd,
             error=error,
             budget_exceeded=budget_exceeded,
+            outcome=outcome,
+            attempt_index=attempt_index,
+            estimated_cost_usd=estimated_cost_usd,
+            cost_reservation_id=cost_reservation_id,
         )
 
     def _emit_ai_telemetry(
@@ -598,6 +780,10 @@ class AIClient:
         cost_usd: float | None,
         error: str | None,
         budget_exceeded: bool,
+        outcome: str | None,
+        attempt_index: int | None,
+        estimated_cost_usd: float | None,
+        cost_reservation_id: int | None,
     ) -> None:
         """Write one canonical :mod:`src.core.ai_telemetry` row per provider call.
 
@@ -628,6 +814,26 @@ class AIClient:
             tokens_out=completion_tokens,
             cost_usd=round(cost_usd, 6) if cost_usd is not None else None,
             error_detail=error,
+            run_id=(
+                self._trace_context.run_id
+                if self._trace_context is not None
+                else None
+            ),
+            resolved_deployment=self._deployment,
+            attempt_index=attempt_index,
+            outcome=outcome,
+            estimated_cost_usd=(
+                round(estimated_cost_usd, 6)
+                if estimated_cost_usd is not None
+                else None
+            ),
+            cost_reservation_id=cost_reservation_id,
+            caller=(
+                self._trace_context.caller
+                if self._trace_context is not None
+                else None
+            ),
+            prompt_version=prompt_version,
         )
         try:
             append_ai_telemetry(record)

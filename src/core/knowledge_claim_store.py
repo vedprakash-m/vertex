@@ -1,27 +1,56 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import json
 import os
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence, cast
 
+from src.core.config_loader import load_review_config
 from src.core.exceptions import ConfigError
 from src.core.jsonl_utils import append_jsonl_line, parse_jsonl_line
-from src.core.knowledge_candidate_store import active_candidates as active_knowledge_candidates, summarize_batch_progress, summarize_triage_activity
-from src.core.knowledge.vault import load_shared_vault_verify_status, vault_content_matches_metadata
-from src.core.knowledge.predicate_registry import count as registered_predicate_count, validate_predicate_value
+from src.core.knowledge.predicate_registry import (
+    all_knowledge_classes,
+    knowledge_class_for_predicate,
+    validate_predicate_value,
+)
+from src.core.knowledge.predicate_registry import count as registered_predicate_count
+from src.core.knowledge.vault import (
+    load_shared_vault_verify_status,
+    vault_content_matches_metadata,
+)
+from src.core.knowledge_candidate_store import (
+    RESOLUTION_VERIFIED_KIND,
+    TERMINAL_DECISION_KINDS,
+    KnowledgeCandidate,
+    KnowledgeCandidateLifecycleSummary,
+    KnowledgeCandidateReviewState,
+    candidate_knowledge_class,
+    candidate_lifecycle_summary,
+    load_triage_decisions,
+    summarize_batch_progress,
+    summarize_triage_activity,
+)
+from src.core.knowledge_candidate_store import (
+    active_candidates as active_knowledge_candidates,
+)
 from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.ledger.event_log import DEFAULT_MAX_BYTES, ConfidenceTier, canonical_json
-from src.core.ledger.source_refs import OperatorAssertionRef, SourceRef, source_document_key, source_ref_from_dict, source_ref_priority, source_ref_to_dict, validate_typed_source_ref
+from src.core.ledger.source_refs import (
+    OperatorAssertionRef,
+    SourceRef,
+    source_document_key,
+    source_ref_from_dict,
+    source_ref_priority,
+    source_ref_to_dict,
+    validate_typed_source_ref,
+)
 from src.core.ledger.ulid import new_ulid
-from src.core.yaml_utils import load_yaml_mapping
-from src.core.workspace_paths import PROGRAMS_ROOT
 from src.core.workspace_lease import cooperative_capture_fence
-
-
+from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.yaml_utils import load_yaml_mapping
 
 _CONFIDENCE_RANK = {
     ConfidenceTier.INFERRED: 1,
@@ -84,6 +113,7 @@ class ResolvedKnowledgeClaim:
     recorded_at: datetime
     source_document_key: str
     overridden_claim_ids: tuple[str, ...] = ()
+    knowledge_class: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +159,7 @@ class KnowledgeContext:
                             "recorded_at": claim.recorded_at.isoformat(),
                             "source_document_key": claim.source_document_key,
                             "overridden_claim_ids": list(claim.overridden_claim_ids),
+                            "knowledge_class": claim.knowledge_class,
                         }
                         for claim in entry.claims
                     ],
@@ -195,6 +226,7 @@ class KnowledgeScopeStatus:
     predicate_count: int
     latest_recorded_at: datetime | None
     active_claims_by_confidence: dict[str, int]
+    active_claims_by_knowledge_class: dict[str, int]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -206,6 +238,7 @@ class KnowledgeScopeStatus:
             "predicate_count": self.predicate_count,
             "latest_recorded_at": self.latest_recorded_at.isoformat() if self.latest_recorded_at is not None else None,
             "active_claims_by_confidence": dict(self.active_claims_by_confidence),
+            "active_claims_by_knowledge_class": dict(self.active_claims_by_knowledge_class),
         }
 
 
@@ -242,10 +275,17 @@ class KnowledgeStatusSummary:
     scopes: tuple[KnowledgeScopeStatus, ...]
     pending_candidate_count: int
     pending_candidates_by_pipeline: dict[str, int]
+    pending_candidates_by_knowledge_class: dict[str, int]
+    review_required_candidate_count: int
+    current_review_candidate_count: int
+    unreviewed_candidate_count: int
+    expired_review_candidate_count: int
+    invalid_review_candidate_count: int
     oldest_pending_candidate_created_at: datetime | None
     oldest_pending_candidate_age_seconds: int | None
     pending_candidates_missing_created_at_count: int
     triaged_candidate_count: int
+    verified_resolution_count: int
     latest_triage_decision_at: datetime | None
     latest_triage_session_actor: str | None
     latest_triage_session_started_at: datetime | None
@@ -255,6 +295,7 @@ class KnowledgeStatusSummary:
     latest_triage_session_throughput_per_minute: float | None
     triage_session_gap_minutes: int
     registered_predicate_count: int
+    registered_knowledge_class_count: int
     batch_count: int
     staged_batch_count: int
     approved_batch_count: int
@@ -272,10 +313,17 @@ class KnowledgeStatusSummary:
             "scopes": [scope.to_dict() for scope in self.scopes],
             "pending_candidate_count": self.pending_candidate_count,
             "pending_candidates_by_pipeline": dict(self.pending_candidates_by_pipeline),
+            "pending_candidates_by_knowledge_class": dict(self.pending_candidates_by_knowledge_class),
+            "review_required_candidate_count": self.review_required_candidate_count,
+            "current_review_candidate_count": self.current_review_candidate_count,
+            "unreviewed_candidate_count": self.unreviewed_candidate_count,
+            "expired_review_candidate_count": self.expired_review_candidate_count,
+            "invalid_review_candidate_count": self.invalid_review_candidate_count,
             "oldest_pending_candidate_created_at": self.oldest_pending_candidate_created_at.isoformat() if self.oldest_pending_candidate_created_at is not None else None,
             "oldest_pending_candidate_age_seconds": self.oldest_pending_candidate_age_seconds,
             "pending_candidates_missing_created_at_count": self.pending_candidates_missing_created_at_count,
             "triaged_candidate_count": self.triaged_candidate_count,
+            "verified_resolution_count": self.verified_resolution_count,
             "latest_triage_decision_at": self.latest_triage_decision_at.isoformat() if self.latest_triage_decision_at is not None else None,
             "latest_triage_session_actor": self.latest_triage_session_actor,
             "latest_triage_session_started_at": self.latest_triage_session_started_at.isoformat() if self.latest_triage_session_started_at is not None else None,
@@ -285,6 +333,7 @@ class KnowledgeStatusSummary:
             "latest_triage_session_throughput_per_minute": self.latest_triage_session_throughput_per_minute,
             "triage_session_gap_minutes": self.triage_session_gap_minutes,
             "registered_predicate_count": self.registered_predicate_count,
+            "registered_knowledge_class_count": self.registered_knowledge_class_count,
             "batch_count": self.batch_count,
             "staged_batch_count": self.staged_batch_count,
             "approved_batch_count": self.approved_batch_count,
@@ -491,6 +540,37 @@ def redact_claim_revision(
         return record
 
 
+def _candidate_lifecycle_for_status(
+    candidate: KnowledgeCandidate,
+    *,
+    programs_root: Path,
+) -> KnowledgeCandidateLifecycleSummary:
+    lifecycle = candidate_lifecycle_summary(candidate, programs_root=programs_root)
+    review = lifecycle.latest_review
+    if review is None or not candidate.requires_authorized_review:
+        return lifecycle
+    authority_valid = False
+    authority_program = review.review_authority_program
+    if authority_program is not None:
+        programs_path = programs_root.resolve()
+        program_path = (programs_root / authority_program).resolve()
+        if program_path.parent == programs_path:
+            try:
+                settings = load_review_config(program_path / "review.yaml")
+            except (OSError, ConfigError):
+                pass
+            else:
+                authority_valid = (
+                    review.actor_principal in settings.knowledge_review_principals
+                    and review.reviewed_subject is not None
+                )
+    return candidate_lifecycle_summary(
+        candidate,
+        programs_root=programs_root,
+        review_authority_valid=authority_valid,
+    )
+
+
 def summarize_knowledge_status(*, knowledge_root: Path) -> KnowledgeStatusSummary:
     scope_statuses: list[KnowledgeScopeStatus] = []
     all_revisions: list[KnowledgeClaimRevision] = []
@@ -505,10 +585,16 @@ def summarize_knowledge_status(*, knowledge_root: Path) -> KnowledgeStatusSummar
                 latest_by_natural_key[revision.natural_key] = revision
         winners = tuple(latest_by_natural_key.values())
         active_claims_by_confidence = {tier.value: 0 for tier in ConfidenceTier}
+        active_claims_by_knowledge_class = {
+            knowledge_class.value: 0 for knowledge_class in all_knowledge_classes()
+        }
         for revision in winners:
             if revision.value is None:
                 continue
             active_claims_by_confidence[revision.confidence.value] += 1
+            active_claims_by_knowledge_class[
+                knowledge_class_for_predicate(revision.predicate).value
+            ] += 1
         scope_statuses.append(
             KnowledgeScopeStatus(
                 scope=scope,
@@ -519,14 +605,39 @@ def summarize_knowledge_status(*, knowledge_root: Path) -> KnowledgeStatusSummar
                 predicate_count=len({revision.predicate for revision in winners if revision.value is not None}),
                 latest_recorded_at=max((revision.recorded_at for revision in revisions), default=None),
                 active_claims_by_confidence=active_claims_by_confidence,
+                active_claims_by_knowledge_class=active_claims_by_knowledge_class,
             )
         )
     freshness = summarize_latest_claim_freshness(all_revisions)
     override_summary = summarize_active_knowledge_overrides(programs_root=programs_root)
     active_pending_candidates = active_knowledge_candidates(programs_root=programs_root)
     pending_candidates_by_pipeline: dict[str, int] = {}
+    pending_candidates_by_knowledge_class: dict[str, int] = {}
+    review_required_candidate_count = 0
+    current_review_candidate_count = 0
+    unreviewed_candidate_count = 0
+    expired_review_candidate_count = 0
+    invalid_review_candidate_count = 0
     for candidate in active_pending_candidates:
         pending_candidates_by_pipeline[candidate.pipeline] = pending_candidates_by_pipeline.get(candidate.pipeline, 0) + 1
+        knowledge_class = candidate_knowledge_class(candidate)
+        pending_candidates_by_knowledge_class[knowledge_class] = (
+            pending_candidates_by_knowledge_class.get(knowledge_class, 0) + 1
+        )
+        lifecycle = _candidate_lifecycle_for_status(
+            candidate, programs_root=programs_root
+        )
+        if lifecycle.review_state is KnowledgeCandidateReviewState.NOT_REQUIRED:
+            continue
+        review_required_candidate_count += 1
+        if lifecycle.review_state is KnowledgeCandidateReviewState.CURRENT:
+            current_review_candidate_count += 1
+        elif lifecycle.review_state is KnowledgeCandidateReviewState.UNREVIEWED:
+            unreviewed_candidate_count += 1
+        elif lifecycle.review_state is KnowledgeCandidateReviewState.EXPIRED:
+            expired_review_candidate_count += 1
+        else:
+            invalid_review_candidate_count += 1
     pending_candidates_with_created_at = [candidate.created_at for candidate in active_pending_candidates if candidate.created_at is not None]
     oldest_pending_candidate_created_at = min(pending_candidates_with_created_at) if pending_candidates_with_created_at else None
     oldest_pending_candidate_age_seconds = None
@@ -536,7 +647,21 @@ def summarize_knowledge_status(*, knowledge_root: Path) -> KnowledgeStatusSummar
     triage_activity = summarize_triage_activity(programs_root=programs_root)
     batch_progress = summarize_batch_progress(programs_root=programs_root)
 
-    candidates_dir = knowledge_root / "candidates"
+    triage_history = load_triage_decisions(programs_root=programs_root)
+    triaged_candidate_count = len(
+        {
+            decision.candidate_id
+            for decision in triage_history
+            if decision.kind in TERMINAL_DECISION_KINDS
+        }
+    )
+    verified_resolution_count = len(
+        {
+            decision.candidate_id
+            for decision in triage_history
+            if decision.kind == RESOLUTION_VERIFIED_KIND
+        }
+    )
     verify_status = load_shared_vault_verify_status(programs_root=programs_root)
     verify_age_seconds = None
     if verify_status is not None:
@@ -568,10 +693,19 @@ def summarize_knowledge_status(*, knowledge_root: Path) -> KnowledgeStatusSummar
         scopes=tuple(sorted(scope_statuses, key=lambda item: item.scope)),
         pending_candidate_count=len(active_pending_candidates),
         pending_candidates_by_pipeline=dict(sorted(pending_candidates_by_pipeline.items())),
+        pending_candidates_by_knowledge_class=dict(
+            sorted(pending_candidates_by_knowledge_class.items())
+        ),
+        review_required_candidate_count=review_required_candidate_count,
+        current_review_candidate_count=current_review_candidate_count,
+        unreviewed_candidate_count=unreviewed_candidate_count,
+        expired_review_candidate_count=expired_review_candidate_count,
+        invalid_review_candidate_count=invalid_review_candidate_count,
         oldest_pending_candidate_created_at=oldest_pending_candidate_created_at,
         oldest_pending_candidate_age_seconds=oldest_pending_candidate_age_seconds,
         pending_candidates_missing_created_at_count=pending_candidates_missing_created_at_count,
-        triaged_candidate_count=_count_jsonl_rows(candidates_dir / "triaged.jsonl"),
+        triaged_candidate_count=triaged_candidate_count,
+        verified_resolution_count=verified_resolution_count,
         latest_triage_decision_at=triage_activity.latest_decision_at,
         latest_triage_session_actor=None if triage_activity.latest_session is None else triage_activity.latest_session.actor,
         latest_triage_session_started_at=None if triage_activity.latest_session is None else triage_activity.latest_session.started_at,
@@ -581,6 +715,7 @@ def summarize_knowledge_status(*, knowledge_root: Path) -> KnowledgeStatusSummar
         latest_triage_session_throughput_per_minute=None if triage_activity.latest_session is None else triage_activity.latest_session.throughput_per_minute,
         triage_session_gap_minutes=triage_activity.session_gap_minutes,
         registered_predicate_count=registered_predicate_count(),
+        registered_knowledge_class_count=len(all_knowledge_classes()),
         batch_count=batch_progress.batch_count,
         staged_batch_count=batch_progress.staged_batch_count,
         approved_batch_count=batch_progress.approved_batch_count,
@@ -807,6 +942,7 @@ def resolve_knowledge_context(
                     recorded_at=winner.recorded_at,
                     source_document_key=source_document_key(winner.source_ref),
                     overridden_claim_ids=overridden_claim_ids,
+                    knowledge_class=knowledge_class_for_predicate(winner.predicate).value,
                 )
             )
         entries.append(

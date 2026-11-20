@@ -87,6 +87,16 @@ def test_mail_enrichment_returns_none_when_no_source_id():
     assert _mail_enrichment(record) is None
 
 
+@pytest.mark.parametrize("received_at", [None, "", "private-invalid-time"])
+def test_mail_enrichment_preserves_unknown_source_time(received_at):
+    record = _mail_record(received_at=received_at)
+
+    result = _mail_enrichment(record)
+
+    assert result is not None
+    assert result.timestamp is None
+
+
 # ── BL-26: transcript body_text ────────────────────────────────────────────────
 
 def test_transcript_enrichment_captures_content():
@@ -131,6 +141,16 @@ def test_transcript_enrichment_returns_none_when_no_source_id():
     assert _transcript_enrichment(record, as_of=_AS_OF) is None
 
 
+@pytest.mark.parametrize("captured_at", [None, "", "private-invalid-time"])
+def test_transcript_enrichment_does_not_fabricate_source_time(captured_at):
+    record = _transcript_record(captured_at=captured_at)
+
+    result = _transcript_enrichment(record, as_of=_AS_OF)
+
+    assert result is not None
+    assert result.timestamp is None
+
+
 # ── Enrichment model: body_text field ──────────────────────────────────────────
 
 def test_enrichment_body_text_defaults_to_none():
@@ -169,3 +189,15 @@ def test_enrichment_accepts_local_kb_source():
         body_text="Example Person owns 7 EXAMPLETAG1 items.",
     )
     assert e.source == "local_kb"
+
+
+def test_enrichment_accepts_unknown_source_time():
+    e = Enrichment(
+        source="mail",
+        source_id="id-unknown-time",
+        author="user",
+        timestamp=None,
+        excerpt="Subject: test",
+        permalink=None,
+    )
+    assert e.timestamp is None

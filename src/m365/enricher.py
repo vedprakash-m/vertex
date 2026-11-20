@@ -243,13 +243,13 @@ def _calendar_enrichment(record, *, as_of: datetime) -> Enrichment | None:
     if source_id is None:
         return None
     title = record.subject or "Untitled meeting"
-    start_label = record.start_at or _ensure_utc(as_of).isoformat()
+    start_label = record.start_at or "unknown source time"
     location = f" at {record.location}" if record.location else ""
     return Enrichment(
         source="calendar",
         source_id=source_id,
         author=record.organizer or "meeting organizer",
-        timestamp=_parse_timestamp(record.start_at, fallback=as_of),
+        timestamp=_parse_timestamp(record.start_at),
         excerpt=f"Meeting: {title} starting {start_label}{location}",
         permalink=record.web_url,
     )
@@ -264,7 +264,7 @@ def _teams_enrichment(record, *, fallback_channel: str, as_of: datetime) -> Enri
         source="teams_chat",
         source_id=source_id,
         author=record.sender or "teams sender",
-        timestamp=_parse_timestamp(record.sent_at, fallback=as_of),
+        timestamp=_parse_timestamp(record.sent_at),
         excerpt=f"Channel: {channel}",
         permalink=record.web_url,
     )
@@ -284,7 +284,7 @@ def _transcript_enrichment(record, *, as_of: datetime) -> Enrichment | None:
         source="transcript",
         source_id=source_id,
         author="meeting transcript",
-        timestamp=_parse_timestamp(record.captured_at, fallback=as_of),
+        timestamp=_parse_timestamp(record.captured_at),
         excerpt=f"Transcript: {title}",
         permalink=record.web_url,
         body_text=body_text,
@@ -295,18 +295,29 @@ def _dedupe_and_sort(enrichments: list[Enrichment]) -> tuple[Enrichment, ...]:
     deduped: dict[tuple[str, str], Enrichment] = {}
     for enrichment in enrichments:
         deduped[(enrichment.source, enrichment.source_id)] = enrichment
-    return tuple(sorted(deduped.values(), key=lambda enrichment: enrichment.timestamp, reverse=True))
+    return tuple(
+        sorted(
+            deduped.values(),
+            key=lambda enrichment: (
+                enrichment.timestamp is not None,
+                _ensure_utc(enrichment.timestamp)
+                if enrichment.timestamp is not None
+                else datetime.min.replace(tzinfo=timezone.utc),
+            ),
+            reverse=True,
+        )
+    )
 
 
-def _parse_timestamp(value: str | None, *, fallback: datetime | None = None) -> datetime:
+def _parse_timestamp(value: str | None) -> datetime | None:
     candidate = value.strip() if isinstance(value, str) else ""
     if candidate:
         try:
             parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
             return _ensure_utc(parsed)
-        except ValueError:
+        except (ValueError, OverflowError):
             pass
-    return _ensure_utc(fallback or datetime.now(timezone.utc))
+    return None
 
 
 def _ensure_utc(value: datetime) -> datetime:

@@ -11,6 +11,7 @@ re-exports both entry points so existing imports keep working.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -174,6 +175,19 @@ def _evaluate_program_fact_pin_drift_from_draft(
             drifted_facts=(f"program_id_mismatch:{snapshot_program_id}",),
         )
     store = ProgramFactStore(program_id, db_root=db_root)
+    try:
+        resolved_snapshot = store.load_pinned_snapshot(snapshot_id)
+    except ConfigError as exc:
+        message = str(exc)
+        if (
+            message.startswith("Unknown fact snapshot pin.")
+            or "no compatible committed predecessor" in message
+        ):
+            raise ConfigError(
+                "Declared program fact snapshot is unavailable or cannot be reconstructed. "
+                "Re-run `vertex report` and re-review before confirming."
+            ) from exc
+        raise
     if edition_name is not None or issue_number is not None:
         pin = store.load_snapshot_pin(snapshot_id)
         if pin is not None and any(
@@ -193,15 +207,29 @@ def _evaluate_program_fact_pin_drift_from_draft(
                 )
             )
     try:
-        drifted_facts = store.detect_drift(snapshot_id)
+        drift_snapshot_id = resolved_snapshot.recovered_from_snapshot_id or snapshot_id
+        drifted_facts = store.detect_drift(drift_snapshot_id)
     except KeyError as exc:
         raise ConfigError(
             "Declared program fact snapshot is unavailable. Re-run `vertex report` and re-review before confirming."
         ) from exc
-    return evaluate_program_fact_drift_gate(
+    report = evaluate_program_fact_drift_gate(
         snapshot_id=snapshot_id,
         drifted_facts=drifted_facts,
     )
+    predecessor_id = resolved_snapshot.recovered_from_snapshot_id
+    if predecessor_id is not None and report.results and report.results[0].passed:
+        return QualityGateReport(results=(
+            replace(
+                report.results[0],
+                message=(
+                    "Program fact drift gate passed using compatible committed predecessor "
+                    f"{predecessor_id} for the unavailable retained capture."
+                ),
+            ),
+            *report.results[1:],
+        ))
+    return report
 
 
 def _evaluate_milestone_trajectory_drift(

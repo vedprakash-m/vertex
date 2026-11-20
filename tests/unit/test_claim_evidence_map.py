@@ -89,10 +89,28 @@ def test_evaluate_observe_only_reports_would_block_without_raising() -> None:
     assert [f.kind for f in result.findings] == [FindingKind.UNSUPPORTED_CLAIM]
 
 
-def test_evaluate_dangling_ref_alone_does_not_would_block() -> None:
+def test_evaluate_release_block_blocks_unsupported_claims() -> None:
+    result = evaluate_truth_consistency(
+        [_link("c1")],
+        {"ado:1"},
+        mode=TruthConsistencyMode.RELEASE_BLOCK,
+    )
+    assert result.would_block is True
+    assert result.blocked is True
+
+
+def test_evaluate_dangling_ref_would_block_release() -> None:
     result = evaluate_truth_consistency([_link("c1", "ado:1", "ado:9")], {"ado:1"})
-    assert result.would_block is False
+    assert result.would_block is True
+    assert result.blocked is False
     assert [f.kind for f in result.findings] == [FindingKind.DANGLING_EVIDENCE_REF]
+
+    release = evaluate_truth_consistency(
+        [_link("c1", "ado:1", "ado:9")],
+        {"ado:1"},
+        mode=TruthConsistencyMode.RELEASE_BLOCK,
+    )
+    assert release.blocked is True
 
 
 def test_evaluate_clean_and_empty_inputs() -> None:
@@ -106,3 +124,4 @@ def test_enum_values_are_json_portable_strings() -> None:
     assert FindingKind.UNSUPPORTED_CLAIM == "unsupported_claim"
     assert FindingKind.DANGLING_EVIDENCE_REF == "dangling_evidence_ref"
     assert TruthConsistencyMode.OBSERVE_ONLY == "observe_only"
+    assert TruthConsistencyMode.RELEASE_BLOCK == "release_block"

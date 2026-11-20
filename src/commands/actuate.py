@@ -191,87 +191,19 @@ def actuate_execute(
 def _dispatch_execution(
     proposal: "ActuationProposal", reality: object, policy: "ActuationPolicy",
 ) -> "ActuationResult":
-    """Route proposal to the appropriate adapter and execute.
+    """Refuse every retained direct actuation path.
 
-    WI-7.2: AdoAdapter dispatches state_transition, comment, and
-    work_item_create (gap-fix rules only). Direct live execution is contained
-    behind ``VERTEX_ALLOW_DIRECT_ACTUATION=1`` until RELO-W5.1 moves every
-    external effect through the durable outbox and reconciliation chain.
+    RELO-W5.6 makes the outbox the sole live execution boundary.  The retained
+    proposal model remains useful for review and dry-run, but it is not itself
+    an operation-qualified dispatcher.
     """
-    import os
-
     from src.core.integration_protocol import ActuationResult
-
-    if os.environ.get("VERTEX_ALLOW_DIRECT_ACTUATION", "").strip().lower() not in {"1", "true", "yes"}:
-        return ActuationResult(
-            success=False,
-            error_message=(
-                "Direct live actuation is disabled by the RELO containment kill switch "
-                "(VERTEX_ALLOW_DIRECT_ACTUATION). Run `vertex actuate execute --dry-run` "
-                "to inspect the effect; live writes must use the durable outbox."
-            ),
-        )
-
-    from src.core.actuation_engine import actuation_execution_block_reason
-    block_reason = actuation_execution_block_reason(proposal, policy)
-    if block_reason:
-        return ActuationResult(success=False, error_message=block_reason)
-
-    adapter_name = proposal.adapter
-    operation = proposal.operation
-    payload = dict(proposal.payload)
-    payload["entity_ref"] = proposal.entity_ref
-    payload["rule_id"] = proposal.rule_id
-
-    if adapter_name == "ado":
-        from src.core.ado_actuation_adapter import AdoActuationAdapter
-        # Inject live ADO client if available via reality (Zone C path)
-        ado_client_fn = None
-        try:
-            from src.core.program_fact_store import PROGRAMS_ROOT
-            ado_client_fn = _resolve_ado_client_fn(reality)
-        except Exception:
-            pass
-
-        adapter = AdoActuationAdapter(ado_client_fn=ado_client_fn)
-        return adapter.execute(operation, payload, dry_run=False)
 
     return ActuationResult(
         success=False,
-        error_message=f"No adapter registered for {adapter_name!r}",
+        error_message=(
+            "Live actuation dispatch is blocked; execute qualified effects through "
+            "the durable outbox boundary. Run `vertex actuate execute --dry-run` "
+            "to inspect the retained proposal."
+        ),
     )
-
-
-def _resolve_ado_client_fn(reality: object):
-    """Attempt to return a callable that produces a live ADO client.
-
-    Returns None if ADO is not configured (safe for dry-run / test scenarios).
-    Actuation is CP-7 gated; production ADO client wiring is deferred until
-    per-program actuation is enabled by an operator.
-    """
-    import os
-    program_id = getattr(reality, "_program_id", None) or getattr(reality, "program_id", None)
-    if not program_id:
-        return None
-    pat = os.environ.get("ADO_PAT")
-    if not pat:
-        return None
-    try:
-        from src.core.edition_resolver import PROGRAMS_ROOT
-        from src.core.edition_resolver import load_program
-        prog = load_program(program_id, programs_root=PROGRAMS_ROOT)
-        ado_cfg = getattr(prog, "ado", None)
-        if not ado_cfg:
-            return None
-        if isinstance(ado_cfg, dict):
-            org = ado_cfg.get("organization")
-            project = ado_cfg.get("project")
-        else:
-            org = getattr(ado_cfg, "organization", None)
-            project = getattr(ado_cfg, "project", None)
-        if not org or not project:
-            return None
-        from src.core.ado_client import ADOClient
-        return lambda: ADOClient(org, project)
-    except Exception:
-        return None

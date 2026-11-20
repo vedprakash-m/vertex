@@ -2491,6 +2491,7 @@ rule, and what-Vertex-did-not-do) rather than fabricating content.
 | --edition TEXT | text | No |  | Optional edition id to scope this snapshot to. |
 | --finding TEXT | text | Yes |  | finding_id to explain. |
 | --as-of TEXT | text | No |  | Explain a retained finding without rebuilding. |
+| --expect-input-hash TEXT | text | No |  | Require this SHA-256 hash when revalidating a retained snapshot; requires --as-of. |
 
 #### `vertex cockpit tui`
 
@@ -4665,6 +4666,7 @@ Knowledge plane authoring and inspection commands.
 | --batch-id TEXT | text | Yes |  | Batch ID to quarantine. |
 | --actor TEXT | text | Yes |  | Operator quarantining the batch. |
 | --reason TEXT | text | Yes |  | Reason for quarantining the batch. |
+| --program TEXT | text | No |  | Program review authority for review-gated candidates. |
 
 #### `vertex knowledge show`
 
@@ -4711,12 +4713,16 @@ Review staged knowledge claim candidates.
 | Command | Description |
 |---|---|
 | `list` |  |
+| `review` |  |
+| `renew` |  |
 | `approve` |  |
 | `edit` |  |
 | `batch-approve` |  |
 | `batch-status` |  |
 | `reject` |  |
 | `skip` |  |
+| `verify-resolution` |  |
+| `history` |  |
 | `expire-skips` |  |
 
 #### `vertex knowledge triage list`
@@ -4731,6 +4737,34 @@ Review staged knowledge claim candidates.
 | --batch-id TEXT | text | No |  | Optional batch filter. |
 | --format TEXT | text | No | text | Output format: text or json. |
 
+#### `vertex knowledge triage review`
+
+**Usage:** `vertex knowledge triage review [OPTIONS]`
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --candidate TEXT | text | Yes |  | Candidate ID to review. |
+| --actor TEXT | text | Yes |  | Reviewer display name. |
+| --program TEXT | text | Yes |  | Program whose review policy authorizes this review. |
+| --valid-until TEXT | text | Yes |  | Explicit review expiry (ISO date or datetime). |
+| --reason TEXT | text | Yes |  | Review basis and verification performed. |
+
+#### `vertex knowledge triage renew`
+
+**Usage:** `vertex knowledge triage renew [OPTIONS]`
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --candidate TEXT | text | Yes |  | Candidate ID whose review is renewed. |
+| --actor TEXT | text | Yes |  | Reviewer display name. |
+| --program TEXT | text | Yes |  | Program whose review policy authorizes this review. |
+| --valid-until TEXT | text | Yes |  | Explicit renewed review expiry (ISO date or datetime). |
+| --reason TEXT | text | Yes |  | Reason the prior review is being renewed. |
+
 #### `vertex knowledge triage approve`
 
 **Usage:** `vertex knowledge triage approve [OPTIONS]`
@@ -4741,6 +4775,7 @@ Review staged knowledge claim candidates.
 |---|---|---|---|---|
 | --candidate TEXT | text | Yes |  | Candidate ID to approve. |
 | --actor TEXT | text | Yes |  | Operator approving the candidate. |
+| --program TEXT | text | No |  | Program review authority for review-gated candidates. |
 
 #### `vertex knowledge triage edit`
 
@@ -4759,6 +4794,7 @@ Review staged knowledge claim candidates.
 | --valid-from TEXT | text | No |  | Replacement validity start (ISO date or datetime). |
 | --valid-until TEXT | text | No |  | Replacement validity end (ISO date or datetime). |
 | --reason TEXT | text | No |  | Optional edit rationale. |
+| --program TEXT | text | No |  | Program review authority for review-gated candidates. |
 
 #### `vertex knowledge triage batch-approve`
 
@@ -4771,6 +4807,7 @@ Review staged knowledge claim candidates.
 | --batch-id TEXT | text | Yes |  | Batch ID to approve. |
 | --actor TEXT | text | Yes |  | Operator approving the batch. |
 | --min-confidence FLOAT | float | No | 0.9 | Minimum extraction confidence required for auto-approval. |
+| --program TEXT | text | No |  | Program review authority for review-gated candidates. |
 
 #### `vertex knowledge triage batch-status`
 
@@ -4795,6 +4832,7 @@ Review staged knowledge claim candidates.
 | --candidate TEXT | text | Yes |  | Candidate ID to reject. |
 | --actor TEXT | text | Yes |  | Operator rejecting the candidate. |
 | --reason TEXT | text | No |  | Optional rejection reason. |
+| --program TEXT | text | No |  | Program review authority for review-gated candidates. |
 
 #### `vertex knowledge triage skip`
 
@@ -4807,6 +4845,31 @@ Review staged knowledge claim candidates.
 | --candidate TEXT | text | Yes |  | Candidate ID to skip for now. |
 | --actor TEXT | text | Yes |  | Operator skipping the candidate. |
 | --reason TEXT | text | No |  | Optional skip reason. |
+| --program TEXT | text | No |  | Program review authority for review-gated candidates. |
+
+#### `vertex knowledge triage verify-resolution`
+
+**Usage:** `vertex knowledge triage verify-resolution [OPTIONS]`
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --candidate TEXT | text | Yes |  | Candidate ID whose terminal resolution is verified. |
+| --actor TEXT | text | Yes |  | Verifier display name. |
+| --program TEXT | text | Yes |  | Program whose review policy authorizes verification. |
+| --reason TEXT | text | Yes |  | Evidence establishing the candidate resolution. |
+
+#### `vertex knowledge triage history`
+
+**Usage:** `vertex knowledge triage history [OPTIONS]`
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --candidate TEXT | text | Yes |  | Candidate ID whose retained lifecycle history to inspect. |
+| --format TEXT | text | No | text | Output format: text or json. |
 
 #### `vertex knowledge triage expire-skips`
 
@@ -6867,6 +6930,13 @@ Run one REV retrieval cycle and stage candidates for triage.
 | --limit INTEGER | integer | No | 25 | Max candidates to enumerate. |
 | --profile TEXT | text | No |  | Override REV profile: legacy_nl \| search_hydrate \| rev_verified. |
 | --mock-fixture PATH | path | No |  | JSON fixture of messages for the P1 walking skeleton (no live consent). |
+| --workiq | boolean | No | False | Use bounded WorkIQ re-query through the existing REV ports. |
+| --workiq-query TEXT | text | No |  | Use cursor-checkpointed WorkIQ search through the REV ports. |
+| --from-date TEXT | text | No |  | ISO date lower bound for --workiq. |
+| --to-date TEXT | text | No |  | ISO date upper bound for --workiq. |
+| --workiq-window-days INTEGER RANGE | integer range | No | 7 | Days per bounded WorkIQ query window. |
+| --workiq-max-windows INTEGER RANGE | integer range | No | 4 | Maximum WorkIQ query windows. |
+| --sharepoint-fixture PATH | path | No |  | Local synthetic SharePoint drive-item fixture used through the REV enumerator/hydrator ports. |
 | --eml-inbox PATH | path | No |  | Directory containing locally-exported .eml files (inbox/ dir for EmlEnumerator). |
 | --ics-inbox PATH | path | No |  | Directory containing locally-exported .ics calendar files (inbox/ dir for IcsEnumerator). W6-1. |
 | --docs-inbox PATH | path | No |  | Directory containing locally-downloaded .docx/.pdf files (inbox/ dir for LocalFileEnumerator). P3-5. |

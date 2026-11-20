@@ -12,8 +12,9 @@ from src.core.models_v2 import KustoQuery
 
 
 class _FakeColumn:
-    def __init__(self, column_name: str) -> None:
+    def __init__(self, column_name: str, column_type: str | None = None) -> None:
         self.column_name = column_name
+        self.column_type = column_type
 
 
 class _FakeTable:
@@ -479,6 +480,57 @@ def test_common_executor_enforces_existing_scalar_cardinality(monkeypatch, row_c
         with pytest.raises(QueryError, match="scalar_required"):
             execute(query)
     assert calls[0]["servertimeout"] == timedelta(seconds=45)
+
+
+def test_live_typed_executor_preserves_sdk_column_schema(monkeypatch) -> None:
+    from src.core.integration_types import KustoResultKind, KustoResultSet
+    from src.core.kusto_client import build_live_kusto_query_executor
+
+    table = _FakeTable(["Timestamp", "Count"], [(1, 2)])
+    table.columns = [_FakeColumn("Timestamp", "datetime"), _FakeColumn("Count", "long")]
+    client = _limited_client(monkeypatch, _FakeResponse([table]), [])
+    monkeypatch.setattr("src.core.kusto_client.KustoClient", lambda: client)
+    query = KustoQuery(
+        id="typed-series",
+        cluster="synthetic",
+        database="synthetic",
+        kql="synthetic",
+        section="Synthetic",
+        render_as="table",
+        confidence="high",
+        expected_cardinality="zero_ok",
+    )
+
+    result = build_live_kusto_query_executor(typed=True)(query)
+
+    assert isinstance(result, KustoResultSet)
+    assert result.schema is not None
+    assert result.schema.kind is KustoResultKind.TIME_SERIES
+    assert result.schema.time_column == "Timestamp"
+    assert result.schema.value_columns == ("Count",)
+
+
+def test_live_typed_executor_refuses_scalar_cardinality_before_return(monkeypatch) -> None:
+    from src.core.exceptions import QueryError
+    from src.core.kusto_client import build_live_kusto_query_executor
+
+    table = _FakeTable(["Value"], [(1,), (2,)])
+    table.columns = [_FakeColumn("Value", "long")]
+    client = _limited_client(monkeypatch, _FakeResponse([table]), [])
+    monkeypatch.setattr("src.core.kusto_client.KustoClient", lambda: client)
+    query = KustoQuery(
+        id="typed-scalar",
+        cluster="synthetic",
+        database="synthetic",
+        kql="synthetic",
+        section="Synthetic",
+        render_as="table",
+        confidence="high",
+        expected_cardinality="scalar_required",
+    )
+
+    with pytest.raises(QueryError, match="scalar_required"):
+        build_live_kusto_query_executor(typed=True)(query)
 
 
 @pytest.mark.parametrize("consumer", ["hydration", "report"])

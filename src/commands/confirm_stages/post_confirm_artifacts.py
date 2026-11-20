@@ -12,14 +12,22 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid5, NAMESPACE_URL
 
 from src.ai.draft_reviewer import build_suggestion_tracking_report, render_tracking_summary, review_artifact_from_payload
-from src.ai.edit_learner import append_edit_patterns, build_edit_patterns
 from src.ai.learning_distiller import LearningDistillerError, load_tracking_reports, render_learning_markdown, render_learning_summary
 from src.commands.confirm_stages.learning_distiller import build_default_learning_distiller, build_learning_distillation_trace_context
 from src.commands.report import _write_output_json, _write_output_text
 from src.core.config_loader import EditorialRules
 from src.core.edition_resolver import resolve_edition, get_program_output_dir
+from src.core.governed_feedback_lifecycle import (
+    FeedbackKind,
+    FeedbackPrivacyClass,
+    FeedbackRetentionClass,
+    FeedbackTelemetry,
+    FeedbackValue,
+    record_feedback_observation,
+)
 from src.core.models import ReportData
 from src.core.ncfl_extractor import extract_proposals
 from src.core.ncfl_proposal_store import get_proposals_path, stage_extracted_proposals
@@ -175,16 +183,17 @@ def record_learning_distillation(
         return None, None, None, f"AI learning distillation skipped: {error}"
 
 
-def record_edit_patterns_for_v2(
+def record_governed_feedback_for_v2(
     *,
     edition_name: str,
     issue_number: int,
     draft_state: dict[str, Any],
     report: ReportData,
     confirmed_at: datetime,
+    confirmed_by: str,
     reports_root: Path,
     programs_root: Path | None = None,
-) -> str | None:
+) -> tuple[Path | None, str | None]:
     if programs_root is None:
         programs_root = reports_root.parent / "programs"
     else:
@@ -194,43 +203,57 @@ def record_edit_patterns_for_v2(
         programs_root=programs_root,
     )
     if resolved_v2 is None:
-        return None
+        return None, None
+    if not confirmed_by.strip():
+        return None, "Governed feedback skipped: confirming operator is unavailable."
 
-    draft_trace_run_id = draft_state.get("ai_trace_run_id")
-    resolved_draft_trace_run_id = None
-    if draft_trace_run_id is not None:
-        draft_trace_run_id_text = str(draft_trace_run_id).strip()
-        if draft_trace_run_id_text:
-            resolved_draft_trace_run_id = draft_trace_run_id_text
-
-    patterns = build_edit_patterns(
-        program_id=resolved_v2.program.id,
-        edition_id=edition_name,
-        issue_number=issue_number,
-        recorded_at=confirmed_at,
-        draft_exec_summary_text=str(draft_state.get("exec_summary_text") or ""),
-        confirmed_exec_summary_text=report.exec_summary_text,
-        draft_workstream_blurbs={
+    snapshot_ref = f"confirmed_issue:{edition_name}:{issue_number:03d}"
+    draft_sections = {
+        "exec_summary": str(draft_state.get("exec_summary_text") or ""),
+        **{
             str(key): str(value)
             for key, value in (draft_state.get("workstream_blurbs") or {}).items()
         },
-        confirmed_workstream_blurbs=report.workstream_blurbs,
-        draft_prompt_versions={
-            str(key): str(value)
-            for key, value in (draft_state.get("ai_prompt_versions") or {}).items()
-            if key is not None and value is not None
-        },
-        draft_ai_confidences={
-            str(key): str(value)
-            for key, value in (draft_state.get("ai_confidences") or {}).items()
-            if key is not None and value is not None
-        },
-        draft_trace_run_id=resolved_draft_trace_run_id,
-    )
-    if not patterns:
-        return None
-    append_edit_patterns(resolved_v2.program.id, patterns, programs_root=programs_root)
-    return None
+    }
+    confirmed_sections = {
+        "exec_summary": report.exec_summary_text,
+        **{str(key): str(value) for key, value in report.workstream_blurbs.items()},
+    }
+    path: Path | None = None
+    try:
+        for section_id in sorted(set(draft_sections) | set(confirmed_sections)):
+            before = " ".join(draft_sections.get(section_id, "").split())
+            after = " ".join(confirmed_sections.get(section_id, "").split())
+            if not before or not after or before == after:
+                continue
+            stable_id = str(
+                uuid5(NAMESPACE_URL, f"{resolved_v2.program.id}:{snapshot_ref}:{section_id}")
+            )
+            path = record_feedback_observation(
+                FeedbackTelemetry(
+                    observation_id=stable_id,
+                    program_id=resolved_v2.program.id,
+                    kind=FeedbackKind.GENERATED_TO_FINAL_DIFF,
+                    target_type="narrative_section",
+                    target_id=f"{snapshot_ref}:{section_id}",
+                    evidence_refs=(snapshot_ref, f"edition:{edition_name}"),
+                    before_value=FeedbackValue.text_hash(before),
+                    after_value=FeedbackValue.text_hash(after),
+                    reason="confirmed generated-to-final difference",
+                    actor_role="confirming_operator",
+                    snapshot_ref=snapshot_ref,
+                    privacy_class=FeedbackPrivacyClass.RESTRICTED,
+                    retention_class=FeedbackRetentionClass.ISSUE_CYCLE,
+                    approved_by=confirmed_by,
+                    approved_at=confirmed_at,
+                    approval_ref=snapshot_ref,
+                    observed_at=confirmed_at,
+                ),
+                programs_root=programs_root,
+            )
+    except (OSError, ValueError) as error:
+        return None, f"Governed feedback skipped: {error}"
+    return path, None
 
 
 def confirm_additional_failures(

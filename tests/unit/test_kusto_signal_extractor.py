@@ -5,7 +5,11 @@ from datetime import date, datetime, timezone
 import pytest
 
 from src.core.integration_types import KustoHydrationOutput, KustoResultSet
-from src.core.kusto_signal_extractor import KustoSignalExtractor, kusto_source_event_time
+from src.core.kusto_signal_extractor import (
+    KustoSignalExtractor,
+    format_kusto_result_text,
+    kusto_source_event_time,
+)
 
 
 def test_kusto_signal_extractor_fans_out_per_workstream() -> None:
@@ -165,9 +169,7 @@ def test_kusto_signal_extractor_flags_invalid_schema_when_result_column_missing(
     assert result.signals[0].confidence.value == "high"  # rows exist, just misconfigured -- still a real observation
 
 
-def test_kusto_signal_extractor_legacy_query_without_metric_id_keeps_row_count_text() -> None:
-    """Full backward compatibility: an unconfigured query gets the exact
-    pre-ADF-W2.3 text."""
+def test_kusto_signal_extractor_legacy_query_without_metric_id_uses_exact_facts() -> None:
     result = KustoSignalExtractor().extract(
         KustoHydrationOutput(
             result_sets=(
@@ -181,7 +183,309 @@ def test_kusto_signal_extractor_legacy_query_without_metric_id_keeps_row_count_t
         "demo",
     )
 
-    assert result.signals[0].text == "Kusto query legacy-query: 2 row(s) observed."
+    assert result.signals[0].text == (
+        "Kusto query legacy-query [kind=table, interpretation=unqualified]: "
+        'admitted_rows=2; columns=[Value]; facts=[{"Value":1},{"Value":2}]; '
+        "no qualified trend or SLO verdict."
+    )
+
+
+def test_kusto_signal_extractor_interprets_unbound_table_as_bounded_exact_facts() -> None:
+    result = KustoSignalExtractor().extract(
+        KustoHydrationOutput(
+            result_sets=(
+                KustoResultSet(
+                    query_id="region-counts",
+                    rows=(
+                        {"Region": "west", "Count": 3},
+                        {"Region": "east", "Count": 1},
+                    ),
+                    observed_at=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+                ),
+            )
+        ),
+        "demo",
+    )
+
+    assert result.signals[0].text == (
+        "Kusto query region-counts [kind=table, interpretation=unqualified]: "
+        'admitted_rows=2; columns=[Region,Count]; facts=[{"Region":"west","Count":3},'
+        '{"Region":"east","Count":1}]; no qualified trend or SLO verdict.'
+    )
+
+
+def test_kusto_signal_extractor_interprets_unbound_timeseries_without_inventing_trend() -> None:
+    result = KustoSignalExtractor().extract(
+        KustoHydrationOutput(
+            result_sets=(
+                KustoResultSet(
+                    query_id="latency",
+                    rows=(
+                        {"Timestamp": "2026-11-19T12:00:00Z", "Value": 9.5},
+                        {"Timestamp": "2026-11-19T10:00:00Z", "Value": 8.0},
+                    ),
+                    observed_at=datetime(2026, 11, 19, 12, 30, tzinfo=timezone.utc),
+                ),
+            )
+        ),
+        "demo",
+    )
+
+    assert result.signals[0].text == (
+        "Kusto query latency [kind=timeseries, interpretation=unqualified]: "
+        'admitted_rows=2; columns=[Timestamp,Value]; points=[{"Timestamp":"2026-11-19T10:00:00Z","Value":8.0},'
+        '{"Timestamp":"2026-11-19T12:00:00Z","Value":9.5}]; '
+        "data_as_of=2026-11-19T12:00:00+00:00; no qualified trend or SLO verdict."
+    )
+    assert "increased" not in result.signals[0].text
+    assert "BREACH" not in result.signals[0].text
+
+
+def test_kusto_signal_extractor_uses_declared_measure_for_unbound_timeseries() -> None:
+    result = KustoSignalExtractor().extract(
+        KustoHydrationOutput(
+            result_sets=(
+                KustoResultSet(
+                    query_id="latency-percentiles",
+                    rows=(
+                        {
+                            "Timestamp": "2026-11-19T10:00:00Z",
+                            "Primary": 8,
+                            "Secondary": 12,
+                        },
+                    ),
+                    result_column="Primary",
+                    observed_at=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+                ),
+            )
+        ),
+        "demo",
+    )
+
+    assert result.signals[0].text == (
+        "Kusto query latency-percentiles [kind=timeseries, interpretation=unqualified]: "
+        "admitted_rows=1; columns=[Timestamp,Primary,Secondary]; "
+        'points=[{"Timestamp":"2026-11-19T10:00:00Z","Primary":8}]; '
+        "data_as_of=2026-11-19T10:00:00+00:00; no qualified trend or SLO verdict."
+    )
+    assert '"Secondary":12' not in result.signals[0].text
+
+
+@pytest.mark.parametrize(
+    "rows,refusal",
+    [
+        (
+            (
+                {"Timestamp": "2026-11-19T10:00:00Z", "Primary": 1, "Secondary": 2},
+                {"Timestamp": "2026-11-19T11:00:00Z", "Primary": 3, "Secondary": 4},
+            ),
+            "multiple numeric measures",
+        ),
+        (
+            (
+                {"Timestamp": "2026-11-19T10:00:00Z", "Value": 1},
+                {"Timestamp": "2026-11-19T10:00:00Z", "Value": 2},
+            ),
+            "duplicate time points",
+        ),
+        (
+            (
+                {
+                    "Timestamp": "2026-11-19T10:00:00Z",
+                    "Snapshot": "2026-11-19T10:05:00Z",
+                    "Value": 1,
+                },
+            ),
+            "multiple time columns",
+        ),
+        (
+            ({"Timestamp": "2026-11-19T10:00:00Z", "Status": "ok"},),
+            "missing numeric measure",
+        ),
+        (
+            (
+                {
+                    "Timestamp": "2026-11-19T10:00:00Z",
+                    "Region": "west",
+                    "Value": 1,
+                },
+            ),
+            "multiple series dimensions",
+        ),
+        (
+            ({"Timestamp": "not-a-time", "Value": 1},),
+            "invalid time point",
+        ),
+    ],
+)
+def test_kusto_signal_extractor_marks_ambiguous_timeseries_without_claiming_a_series(
+    rows: tuple[dict[str, object], ...], refusal: str,
+) -> None:
+    result = KustoSignalExtractor().extract(
+        KustoHydrationOutput(
+            result_sets=(
+                KustoResultSet(
+                    query_id="ambiguous-series",
+                    rows=rows,  # type: ignore[arg-type]
+                    observed_at=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+                ),
+            )
+        ),
+        "demo",
+    )
+
+    text = result.signals[0].text
+    assert "[kind=table, interpretation=ambiguous]" in text
+    assert f"refusal={refusal}." in text
+    assert "points=" not in text
+    assert "data_as_of=" not in text
+    assert "trend" not in text.lower()
+
+
+@pytest.mark.parametrize(
+    "rows,refusal",
+    [
+        (({"": 1},), "schema drift"),
+        (({"Value": float("nan")},), "unsupported row value"),
+        (({"Value": {"nested": 1}},), "unsupported row value"),
+    ],
+)
+def test_kusto_signal_extractor_refuses_unsafe_unbound_values(
+    rows: tuple[dict[str, object], ...], refusal: str,
+) -> None:
+    text = format_kusto_result_text(
+        KustoResultSet(
+            query_id="unsafe",
+            rows=rows,  # type: ignore[arg-type]
+            observed_at=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+        )
+    )
+
+    assert "[kind=table, interpretation=ambiguous]" in text
+    assert f"refusal={refusal}." in text
+    assert "nested" not in text
+
+
+def test_kusto_signal_extractor_serializes_supported_null_date_and_datetime_values() -> None:
+    text = format_kusto_result_text(
+        KustoResultSet(
+            query_id="typed-values",
+            rows=(
+                {
+                    "Missing": None,
+                    "Day": date(2026, 11, 19),
+                    "When": datetime(2026, 11, 19, 10),
+                },
+            ),
+            observed_at=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+        )
+    )
+
+    assert text == (
+        "Kusto query typed-values [kind=table, interpretation=unqualified]: "
+        'admitted_rows=1; columns=[Missing,Day,When]; facts=[{"Missing":null,'
+        '"Day":"2026-11-19","When":"2026-11-19T10:00:00+00:00"}]; '
+        "no qualified trend or SLO verdict."
+    )
+
+
+def test_kusto_signal_extractor_refuses_row_count_mismatch() -> None:
+    text = format_kusto_result_text(
+        KustoResultSet(
+            query_id="count-mismatch",
+            rows=({"Value": 1},),
+            row_count=2,
+            observed_at=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+        )
+    )
+
+    assert text == (
+        "Kusto query count-mismatch [kind=table, interpretation=ambiguous]: "
+        "admitted_rows=1; refusal=row count mismatch."
+    )
+
+
+def test_kusto_signal_formatter_handles_explicit_empty_table_without_schema() -> None:
+    text = format_kusto_result_text(
+        KustoResultSet(
+            query_id="empty-table",
+            rows=(),
+            row_count=0,
+            observed_at=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+        )
+    )
+
+    assert text == (
+        "Kusto query empty-table [kind=table, interpretation=unqualified]: "
+        "admitted_rows=0; no qualified trend or SLO verdict."
+    )
+
+
+def test_kusto_signal_extractor_refuses_schema_drift_without_raw_values() -> None:
+    result = KustoSignalExtractor().extract(
+        KustoHydrationOutput(
+            result_sets=(
+                KustoResultSet(
+                    query_id="drifted",
+                    rows=(
+                        {"Name": "known"},
+                        {"Name": "raw-secret", "Count": 2},
+                    ),
+                    observed_at=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+                ),
+            )
+        ),
+        "demo",
+    )
+
+    assert result.signals[0].text == (
+        "Kusto query drifted [kind=table, interpretation=ambiguous]: "
+        "admitted_rows=2; refusal=schema drift."
+    )
+    assert "raw-secret" not in result.signals[0].text
+
+
+def test_kusto_signal_extractor_refuses_partial_unbound_result_without_exact_facts() -> None:
+    result = KustoSignalExtractor().extract(
+        KustoHydrationOutput(
+            result_sets=(
+                KustoResultSet(
+                    query_id="partial-table",
+                    rows=({"Name": "must-not-be-interpreted"},),
+                    observed_at=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+                    is_partial=True,
+                ),
+            )
+        ),
+        "demo",
+    )
+
+    assert result.signals[0].text == (
+        "Kusto query partial-table [kind=table, interpretation=ambiguous]: "
+        "admitted_rows=1; refusal=partial result."
+    )
+    assert "must-not-be-interpreted" not in result.signals[0].text
+
+
+def test_kusto_signal_extractor_bounds_unbound_fact_preview_count() -> None:
+    result = KustoSignalExtractor().extract(
+        KustoHydrationOutput(
+            result_sets=(
+                KustoResultSet(
+                    query_id="many-rows",
+                    rows=tuple({"Id": index} for index in range(4)),
+                    observed_at=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+                ),
+            )
+        ),
+        "demo",
+    )
+
+    assert result.signals[0].text == (
+        "Kusto query many-rows [kind=table, interpretation=unqualified]: "
+        'admitted_rows=4; columns=[Id]; facts=[{"Id":0},{"Id":1},{"Id":2}]; '
+        "omitted_rows=1; no qualified trend or SLO verdict."
+    )
 
 
 def test_kusto_signal_extractor_empty_unconfigured_result_emits_nothing() -> None:

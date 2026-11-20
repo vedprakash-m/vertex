@@ -280,6 +280,16 @@ class RevHealthReport:
             "vault_size_warn": self.vault_size_warn,
             "warnings": list(self.warnings),
             "completeness_vector": self.completeness_vector.to_dict() if self.completeness_vector is not None else None,
+            "effective_completeness": (
+                {
+                    "base": self.effective_completeness.base,
+                    "value": self.effective_completeness.value,
+                    "downgraded": self.effective_completeness.downgraded,
+                    "reasons": list(self.effective_completeness.reasons),
+                }
+                if self.effective_completeness is not None
+                else None
+            ),
         }
 
 
@@ -619,8 +629,16 @@ def render_rev_health_human(report: RevHealthReport) -> str:
     if report.completeness_vector is not None:
         lines.append(render_completeness_vector_human(report.completeness_vector).rstrip("\n"))
     effective = report.effective_completeness
-    if effective is not None and effective.downgraded:
-        lines.append(f"    effective_completeness=unknown (downgraded; reasons: {', '.join(effective.reasons)})")
+    if effective is not None and effective.reasons:
+        if effective.value is None:
+            value = "unavailable" if effective.base is None else "unknown"
+        else:
+            value = f"{effective.value:.0%}"
+        qualification = "downgraded; " if effective.downgraded else ""
+        lines.append(
+            f"    effective_completeness={value} "
+            f"({qualification}reasons: {', '.join(effective.reasons)})"
+        )
     return "\n".join(lines) + "\n"
 
 

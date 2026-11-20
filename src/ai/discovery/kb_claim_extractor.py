@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 
 from src.ai._pipeline import AIPipelineError, process_generated_text
+from src.core.knowledge.predicate_registry import get_predicate_definition
 from src.core.knowledge_candidate_store import KnowledgeCandidate, KnowledgeCandidateEntityResolution, build_candidate
 from src.core.ledger.event_log import ConfidenceTier
 from src.core.ledger.source_refs import KnowledgeDocumentRef
@@ -42,7 +43,7 @@ def extract_claim_candidates_from_markdown(
         predicate = parsed.get("predicate")
         if subject is None or predicate is None:
             continue
-        value = parsed.get("value")
+        value = _parse_predicate_value(predicate, parsed.get("value"))
         valid_from = _parse_datetime_or_date(parsed.get("valid_from")) or ingested_at
         valid_until = _parse_datetime_or_date(parsed.get("valid_until"))
         section = parsed.get("section") or f"line:{line_number}"
@@ -72,6 +73,7 @@ def extract_claim_candidates_from_markdown(
                 entity_resolution=(resolution,),
                 corroborating_refs=(),
                 batch_id=effective_batch_id,
+                requires_authorized_review=True,
             )
         )
     return ExtractedKnowledgeCandidateBatch(batch_id=effective_batch_id, candidates=tuple(candidates))
@@ -132,3 +134,18 @@ def _parse_confidence_tier(value: str | None) -> ConfidenceTier:
             "Invalid claim confidence tier. Expected one of: "
             + ", ".join(tier.value for tier in ConfidenceTier)
         ) from error
+
+
+def _parse_predicate_value(predicate: str, value: str | None) -> str | bool | None:
+    definition = get_predicate_definition(predicate)
+    if definition is None or value is None:
+        return value
+    if definition.value_kind == "boolean":
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    if definition.nullable and value.strip().lower() == "null":
+        return None
+    return value

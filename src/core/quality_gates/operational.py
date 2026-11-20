@@ -10,7 +10,7 @@ from src.core.coverage_gap import build_coverage_gaps
 from src.core.dependency_graph import detect_cross_program_cascades
 from src.core.milestone_engine import assess_milestone_health
 from src.core.models import RiskLevel, WorkItem
-from src.core.models_v2 import DependencyStatus, MilestoneStatus, Signal
+from src.core.models_v2 import DependencyStatus, MilestoneStatus, RiskEntry, Signal
 from src.core.quality_gates.current_state import load_current_dependencies, load_current_milestones, load_current_risks
 from src.core.quality_gates.models import GateEvaluation
 from src.core.store_factory import build_trajectory_store_for_program_id
@@ -37,6 +37,7 @@ def evaluate_milestone_risk_linkage_gate(
     as_of: datetime,
     program_id: str | None,
     programs_root: Path,
+    risk_entries: tuple[RiskEntry, ...] | None = None,
 ) -> GateEvaluation:
     if program_id is None:
         return GateEvaluation("QG-16", True, "Milestone risk-link gate passed.", 2, forceable=True)
@@ -53,7 +54,11 @@ def evaluate_milestone_risk_linkage_gate(
     }
     open_risks = tuple(
         risk
-        for risk in load_current_risks(program_id, programs_root=programs_root)
+        for risk in (
+            risk_entries
+            if risk_entries is not None
+            else load_current_risks(program_id, programs_root=programs_root)
+        )
         if risk.status.value != "closed"
     )
     failing_milestones: list[str] = []

@@ -392,6 +392,15 @@ def knowledge_candidate_latency_check(*, programs_root: Path) -> DoctorCheck:
     metadata = {
         "pending_candidate_count": pending_count,
         "pending_candidates_by_pipeline": dict(summary.pending_candidates_by_pipeline),
+        "pending_candidates_by_knowledge_class": dict(
+            summary.pending_candidates_by_knowledge_class
+        ),
+        "review_required_candidate_count": summary.review_required_candidate_count,
+        "current_review_candidate_count": summary.current_review_candidate_count,
+        "unreviewed_candidate_count": summary.unreviewed_candidate_count,
+        "expired_review_candidate_count": summary.expired_review_candidate_count,
+        "invalid_review_candidate_count": summary.invalid_review_candidate_count,
+        "verified_resolution_count": summary.verified_resolution_count,
         "oldest_pending_candidate_created_at": None if summary.oldest_pending_candidate_created_at is None else summary.oldest_pending_candidate_created_at.isoformat(),
         "oldest_pending_candidate_age_seconds": oldest_age_seconds,
         "pending_candidates_missing_created_at_count": summary.pending_candidates_missing_created_at_count,
@@ -421,6 +430,15 @@ def knowledge_candidate_latency_check(*, programs_root: Path) -> DoctorCheck:
         )
 
     detail_parts: list[str] = []
+    unavailable_review_count = (
+        summary.unreviewed_candidate_count
+        + summary.expired_review_candidate_count
+        + summary.invalid_review_candidate_count
+    )
+    if unavailable_review_count > 0:
+        detail_parts.append(
+            f"{unavailable_review_count} active pending knowledge candidate(s) lack a current authorized review"
+        )
     if pending_count > count_threshold:
         detail_parts.append(f"{pending_count} active pending knowledge candidate(s) exceed the threshold {count_threshold}")
     if oldest_age_seconds is not None and oldest_age_seconds > age_threshold_seconds:

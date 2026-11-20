@@ -67,9 +67,11 @@ def discover_test_files(root: Path, *, functional_only: bool = False) -> list[st
         )
         if result.returncode == 0 and result.stdout:
             relative_paths = [
-                Path(path).relative_to("tests").as_posix()
+                relative.as_posix()
                 for path in result.stdout.decode("utf-8").split("\0")
                 if path
+                for relative in (Path(path).relative_to("tests"),)
+                if (root / relative).is_file()
             ]
             if functional_only:
                 relative_paths = [

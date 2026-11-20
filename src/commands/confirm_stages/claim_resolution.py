@@ -23,9 +23,16 @@ from src.ai.claim_extractor import (
     ClaimExtractorSafetyError,
 )
 from src.core.claim_extraction_calibration_store import ClaimExtractionCalibrationRecord
+from src.core.claim_evidence_map import (
+    ClaimEvidenceLink,
+    FindingKind,
+    TruthConsistencyMode,
+    evaluate_truth_consistency,
+)
 from src.core.claim_tracker import (
     ClaimExtractionResult,
     build_claim_extraction_calibration_record,
+    extract_claims_from_confirmed_narratives,
     record_confirmed_claims,
 )
 from src.core.edition_resolver import PROGRAMS_ROOT, resolve_edition
@@ -136,18 +143,34 @@ def prepare_confirm_claim_extraction_for_v2(
         reports_root=reports_root,
         **({"programs_root": programs_root} if selected_programs_root is not None else {}),
     )
-    extraction_result, extraction_mode, warnings = resolve_confirm_claim_extraction(
-        resolved=resolved,
-        edition_name=edition_name,
-        issue_number=issue_number,
-        confirmed_at=confirmed_at,
-        narratives=narratives,
-        items=items,
-        valid_workstream_ids=tuple(workstream_area_paths),
-        workstream_area_paths=workstream_area_paths,
-        legacy_regex_extractor=legacy_regex_extractor,
-        programs_root=programs_root,
-    )
+    try:
+        extraction_result, extraction_mode, warnings = resolve_confirm_claim_extraction(
+            resolved=resolved,
+            edition_name=edition_name,
+            issue_number=issue_number,
+            confirmed_at=confirmed_at,
+            narratives=narratives,
+            items=items,
+            valid_workstream_ids=tuple(workstream_area_paths),
+            workstream_area_paths=workstream_area_paths,
+            legacy_regex_extractor=legacy_regex_extractor,
+            programs_root=programs_root,
+        )
+    except RuntimeError as error:
+        extraction_result = None
+        extraction_mode = "regex"
+        warnings = (f"Claim tracker skipped: {error}",)
+    if extraction_result is None:
+        extraction_result = extract_claims_from_confirmed_narratives(
+            program_id=resolved.program.id,
+            edition_id=edition_name,
+            issue_number=issue_number,
+            claim_date=confirmed_at.date(),
+            narratives=narratives,
+            items=items,
+            valid_workstream_ids=tuple(workstream_area_paths),
+            workstream_area_paths=workstream_area_paths,
+        )
 
     calibration_record = None
     if extraction_result is not None and extraction_mode.strip().lower() == "calibration":
@@ -221,6 +244,8 @@ def record_confirmed_claims_for_v2(
                 programs_root=programs_root,
             )
             warnings.extend(extractor_warnings)
+        elif extraction_result is None:
+            return ()
         recorded = record_confirmed_claims(
             program_id=resolved.program.id,
             edition_id=edition_name,
@@ -240,6 +265,57 @@ def record_confirmed_claims_for_v2(
                 f"Claim tracker recorded {len(recorded.written_claims)} claim(s) and {len(recorded.written_decision_asks)} decision ask(s)."
             )
         return tuple(warnings)
+
+
+def evaluate_claim_evidence_gate(
+    extraction_result: ClaimExtractionResult | None,
+    *,
+    items: tuple[WorkItem, ...],
+) -> QualityGateReport:
+    claims = extraction_result.claims if extraction_result is not None else ()
+    result = evaluate_truth_consistency(
+        (
+            ClaimEvidenceLink(
+                claim_id=claim.id,
+                claim_text=claim.text,
+                evidence_refs=claim.entity_refs,
+            )
+            for claim in claims
+        ),
+        tuple(f"WI:{item.id}" for item in items),
+        mode=TruthConsistencyMode.RELEASE_BLOCK,
+    )
+    unsupported = sum(
+        finding.kind is FindingKind.UNSUPPORTED_CLAIM
+        for finding in result.findings
+    )
+    dangling = sum(
+        finding.kind is FindingKind.DANGLING_EVIDENCE_REF
+        for finding in result.findings
+    )
+    if result.blocked:
+        return QualityGateReport(
+            results=(
+                GateEvaluation(
+                    "RELO-QG-05",
+                    False,
+                    "RELO-QG-05 truth consistency blocked release: "
+                    f"{unsupported} unsupported claim(s), "
+                    f"{dangling} dangling/unapproved evidence reference(s).",
+                    3,
+                ),
+            )
+        )
+    return QualityGateReport(
+        results=(
+            GateEvaluation(
+                "RELO-QG-05",
+                True,
+                "RELO-QG-05 truth consistency passed.",
+                3,
+            ),
+        )
+    )
 
 
 def evaluate_claim_extraction_calibration_gate(

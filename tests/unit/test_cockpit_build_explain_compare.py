@@ -1,6 +1,7 @@
 """ADF-W5.5: `vertex cockpit build/explain/compare` CLI + find_nearest_history_snapshot."""
 from __future__ import annotations
 
+import json
 
 def test_context_gap_only_cockpit_and_corrupt_history(tmp_path) -> None:
     from datetime import datetime, timezone
@@ -353,6 +354,99 @@ def test_retained_explain_does_not_read_current_evidence(
     builder.assert_not_called()
 
 
+def test_retained_json_exposes_enriched_exception_view_without_changing_snapshot(
+    programs_root: Path,
+) -> None:
+    finding = CockpitFinding(
+        finding_id="source.gap.required", area="source", status="blocked",
+        summary="Source missing", detail="Required evidence is unavailable.", owner=None,
+        next_command="vertex doctor --program acme --rev-health",
+        evidence_refs=("required-source",), observed_at=_T0,
+    )
+    snapshot = _snapshot(generated_at=_T0, findings=(finding,))
+    persist_cockpit_snapshot(snapshot, programs_root=programs_root)
+
+    result = runner.invoke(app, [
+        "show", "--program", "acme", "--as-of", _T0.isoformat(), "--format", "json",
+    ])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["input_hash"] == snapshot.input_hash
+    assert payload["exceptions"] == [{
+        "area": "source",
+        "authority_required": "not available",
+        "confidence": "not available",
+        "consequence": "Required evidence is unavailable.",
+        "diff_preview": "not available",
+        "evidence_refs": ["required-source"],
+        "exception_class": "source_gap",
+        "expected_effect": (
+            "Verifies that the retained finding matches the recorded snapshot input hash. "
+            "It does not evaluate current state or perform mutation or dispatch."
+        ),
+        "expiry_or_escalation": "not available",
+        "finding_id": "source.gap.required",
+        "next_command": "vertex doctor --program acme --rev-health",
+        "observed_at": _T0.isoformat(),
+        "owner": "not available",
+        "revalidation_command": (
+            "vertex cockpit explain --program acme --edition acme_weekly "
+            "--as-of 2026-07-01T10:00:00+00:00 "
+            f"--finding source.gap.required --expect-input-hash {snapshot.input_hash}"
+        ),
+        "safe_options": [
+            "Verify the selected retained snapshot with the read-only revalidation command.",
+            "Do not execute historical guidance until current CLI/TUI checks approve its payload, "
+            "authority, target, revision, audience and policy state.",
+        ],
+        "snapshot_generated_at": _T0.isoformat(),
+        "snapshot_input_hash": snapshot.input_hash,
+        "status": "blocked",
+        "what_failed": "Source missing",
+    }]
+
+
+def test_retained_explain_supports_exact_input_hash_revalidation(
+    programs_root: Path,
+) -> None:
+    snapshot = _snapshot(generated_at=_T0, findings=_exception_findings())
+    persist_cockpit_snapshot(snapshot, programs_root=programs_root)
+
+    exact = runner.invoke(app, [
+        "explain", "--program", "acme", "--as-of", _T0.isoformat(),
+        "--finding", "warn-first", "--expect-input-hash", snapshot.input_hash,
+    ])
+    mismatch = runner.invoke(app, [
+        "explain", "--program", "acme", "--as-of", _T0.isoformat(),
+        "--finding", "warn-first", "--expect-input-hash", "0" * 64,
+    ])
+
+    assert exact.exit_code == 0, exact.output
+    assert "exception_class: blocked_draft" in exact.output
+    assert "Safe revalidation:" in exact.output
+    assert mismatch.exit_code == 2
+    assert "Retained snapshot input hash does not match" in mismatch.output
+    assert snapshot.input_hash not in mismatch.output
+
+
+def test_tampered_retained_snapshot_hash_fails_without_fallback(
+    programs_root: Path,
+) -> None:
+    _, selected = persist_cockpit_snapshot(_snapshot(generated_at=_T0), programs_root=programs_root)
+    payload = json.loads(selected.read_text(encoding="utf-8"))
+    payload["input_hash"] = "0" * 64
+    selected.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runner.invoke(app, [
+        "show", "--program", "acme", "--as-of", _T0.isoformat(), "--format", "json",
+    ])
+
+    assert result.exit_code == 2
+    assert "Cannot read retained cockpit snapshot" in result.output
+    assert "0" * 64 not in result.output
+
+
 @pytest.mark.parametrize("arguments", [
     ["show", "--format", "html"],
     ["show", "--format", "invalid"],
@@ -360,6 +454,11 @@ def test_retained_explain_does_not_read_current_evidence(
     ["show", "--as-of", "2026-01-02"],
     ["show", "--as-of", _T0.isoformat(), "--program", "..\\other"],
     ["explain", "--finding", "x", "--as-of", "bad"],
+    ["explain", "--finding", "x", "--expect-input-hash", "0" * 64],
+    [
+        "explain", "--finding", "x", "--as-of", _T0.isoformat(),
+        "--expect-input-hash", "not-a-sha256",
+    ],
 ])
 def test_retained_arguments_reject_before_readers(
     programs_root: Path, monkeypatch: pytest.MonkeyPatch, arguments: list[str],
@@ -429,7 +528,11 @@ def test_retained_empty_and_unknown_are_not_current_clearance(programs_root: Pat
     from dataclasses import replace
 
     snapshot = _snapshot(generated_at=_T0)
-    snapshot = replace(snapshot, program_summary=replace(snapshot.program_summary, overall_risk="unknown", blocker_count=None))
+    snapshot = finalize_cockpit_snapshot(
+        replace(snapshot, program_summary=replace(
+            snapshot.program_summary, overall_risk="unknown", blocker_count=None,
+        ))
+    )
     persist_cockpit_snapshot(snapshot, programs_root=programs_root)
     for format in ("human", "html"):
         result = runner.invoke(app, ["show", "--program", "acme", "--as-of", _T0.isoformat(), "--format", format])

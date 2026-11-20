@@ -13,7 +13,8 @@ from unittest.mock import Mock
 import pytest
 
 from src.ai.ai_mode import AIMode
-from src.ai.client import AIClient, AIClientError, AIPreflightError, BudgetConfigurationError, BudgetExceeded, BudgetStateError
+from src.ai.client import AIClient, AIClientError, AIPreflightError, BudgetConfigurationError, BudgetExceeded, BudgetStateError, open_cost_chain
+from src.ai import client as ai_client
 from src.ai import context_tokenizers
 from src.ai.context_tokenizers import TiktokenTokenEstimator
 from src.ai.cost_guard import CostGuard
@@ -28,7 +29,9 @@ from src.core.ai_telemetry import (
     build_feature_cost_summary,
     read_ai_telemetry,
 )
+from src.core.exceptions import ConfigError
 from src.core.exceptions import StateError
+from src.core.model_registry import ModelBumpDetectedError
 from src.core.policy_loader import AIFeaturePolicy, AIRequestRouterPolicy
 
 
@@ -39,6 +42,17 @@ def isolate_ai_telemetry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
 
     monkeypatch.setattr("src.core.ai_telemetry.PROGRAMS_ROOT", tmp_path / "live-programs")
     monkeypatch.setattr("src.core.ai_telemetry.append_ai_telemetry", append_to_temporary_root)
+
+
+@pytest.fixture(autouse=True)
+def synthetic_explicit_client_prices(monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.ai.client as ai_client
+
+    monkeypatch.setattr(
+        ai_client,
+        "load_ai_model_cost_policy_exact",
+        lambda deployment: ai_client.load_ai_model_cost_policy(deployment),
+    )
 
 
 def _unique_run_id() -> str:
@@ -75,6 +89,36 @@ def test_fallback_structured_client_surfaces_vertex_first_missing_deployment_gui
         match="supported Vertex deployment aliases",
     ):
         client.structured("system", "user", parser=lambda payload: payload)
+
+
+def test_fallback_client_deployment_identity_covers_the_frozen_chain() -> None:
+    first = FallbackAIClient(
+        deployments=("summary-model", "summary-backup"),
+        temperature=0.2,
+        budget_usd=0.5,
+    )
+    identical = FallbackAIClient(
+        deployments=("summary-model", "summary-backup"),
+        temperature=0.2,
+        budget_usd=0.5,
+    )
+    reordered = FallbackAIClient(
+        deployments=("summary-backup", "summary-model"),
+        temperature=0.2,
+        budget_usd=0.5,
+    )
+    replacement = FallbackAIClient(
+        deployments=("summary-model", "replacement-backup"),
+        temperature=0.2,
+        budget_usd=0.5,
+    )
+
+    assert first.deployment == identical.deployment
+    assert first.deployment != reordered.deployment
+    assert first.deployment != replacement.deployment
+    assert "summary-model" not in first.deployment
+    assert "summary-backup" not in first.deployment
+
 
 class _FakeRateLimitError(Exception):
     pass
@@ -126,6 +170,10 @@ def _telemetry_budget_client(
         lambda _: SimpleNamespace(input_cost_per_1k_tokens=1.0, output_cost_per_1k_tokens=1.0),
     )
     monkeypatch.setattr(
+        "src.ai.client.load_ai_model_cost_policy_exact",
+        lambda _: SimpleNamespace(input_cost_per_1k_tokens=1.0, output_cost_per_1k_tokens=1.0),
+    )
+    monkeypatch.setattr(
         "src.ai.client.resolve_token_estimator",
         lambda _: SimpleNamespace(estimate=lambda _text: 0),
     )
@@ -139,7 +187,11 @@ def _telemetry_budget_client(
         trace_context=AITraceContext(
             edition="acme_weekly", run_id="telemetry", caller="test",
             trace_file=trace_path,
-            metadata={"program_id": "synthetic", "run_budget_usd": run_budget},
+            metadata={
+                "program_id": "synthetic",
+                "run_budget_usd": run_budget,
+                "ai_feature": "risk_proposal_generator",
+            },
         ),
     )
     return client, router, trace_path
@@ -181,7 +233,12 @@ def _retry_reservation_client(
         trace_context=AITraceContext(
             edition="acme_weekly", run_id=_unique_run_id(), caller="test",
             trace_file=trace_path,
-            metadata={"program_id": "synthetic", "run_budget_usd": run_budget, "cost_reservation_id": 999},
+            metadata={
+                "program_id": "synthetic",
+                "run_budget_usd": run_budget,
+                "cost_reservation_id": 999,
+                "ai_feature": "risk_proposal_generator",
+            },
         ),
     )
     return client, estimate, trace_path
@@ -195,6 +252,124 @@ def _retry_reservation_rows(client: AIClient) -> list[tuple[int, str, float, flo
             "SELECT reservation_id, status, reserved_usd, actual_usd "
             "FROM ai_cost_reservations ORDER BY reservation_id"
         ).fetchall()
+
+
+def test_open_cost_chain_hides_invalid_feature_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _, _ = _retry_reservation_client(tmp_path, monkeypatch)
+
+    def invalid_policy() -> dict[str, object]:
+        raise ConfigError("private-policy-detail")
+
+    monkeypatch.setattr("src.ai.client._load_ai_policy_document", invalid_policy)
+
+    with pytest.raises(BudgetConfigurationError, match="feature policy") as error:
+        open_cost_chain(client, [client.deployment])
+
+    assert "private-policy-detail" not in str(error.value)
+    assert error.value.__cause__ is None
+
+
+@pytest.mark.parametrize("overflow", [False, True])
+def test_cost_chain_rejects_non_finite_reservation_cost(
+    monkeypatch: pytest.MonkeyPatch,
+    overflow: bool,
+) -> None:
+    if overflow:
+        monkeypatch.setattr(
+            "src.ai.client.math.fsum",
+            lambda _values: (_ for _ in ()).throw(OverflowError()),
+        )
+        prices = {"summary-model": (1.0, 1.0)}
+    else:
+        prices = {"summary-model": (float("inf"), 1.0)}
+
+    chain = ai_client._CostChain(
+        SimpleNamespace(),
+        prices,
+        ("summary-model",),
+        attempts=3,
+    )
+
+    with pytest.raises(
+        BudgetConfigurationError,
+        match="finite and nonnegative",
+    ):
+        chain.worst_case_usd(prompt_tokens=100, max_tokens=100)
+
+
+def test_cost_chain_feature_hold_refuses_reinitialization_and_oversize_attempt() -> None:
+    state = ai_client._FeatureBudgetState()
+    chain = ai_client._CostChain(
+        SimpleNamespace(),
+        {"summary-model": (1.0, 1.0)},
+        ("summary-model",),
+        attempts=3,
+    )
+    chain.admit_feature_hold(state, total_usd=0.9, first_attempt_usd=0.3)
+
+    with pytest.raises(BudgetStateError, match="already initialized"):
+        chain.admit_feature_hold(state, total_usd=0.9, first_attempt_usd=0.3)
+
+    uninitialized = ai_client._CostChain(
+        SimpleNamespace(),
+        {"summary-model": (1.0, 1.0)},
+        ("summary-model",),
+        attempts=3,
+    )
+    with pytest.raises(BudgetConfigurationError, match="reserved chain bound"):
+        uninitialized.admit_feature_hold(
+            state,
+            total_usd=0.2,
+            first_attempt_usd=0.3,
+        )
+
+
+def test_cost_chain_feature_hold_refuses_foreign_state_and_overdraw() -> None:
+    state = ai_client._FeatureBudgetState()
+    foreign = ai_client._FeatureBudgetState()
+    chain = ai_client._CostChain(
+        SimpleNamespace(),
+        {"summary-model": (1.0, 1.0)},
+        ("summary-model",),
+        attempts=3,
+    )
+    chain.admit_feature_hold(state, total_usd=0.9, first_attempt_usd=0.3)
+
+    for operation in (chain.draw_feature_hold, chain.require_feature_hold):
+        with pytest.raises(BudgetStateError, match="not bound"):
+            operation(foreign, 0.1)
+        with pytest.raises(BudgetStateError, match="exceeds"):
+            operation(state, 0.7)
+
+
+@pytest.mark.parametrize(
+    ("feature", "features"),
+    [
+        (None, {"summary": {}}),
+        ("", {"summary": {}}),
+        ("unknown-feature", {"summary": {}}),
+    ],
+)
+def test_open_cost_chain_refuses_missing_or_unknown_feature_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feature: str | None,
+    features: dict[str, object],
+) -> None:
+    client, _, _ = _retry_reservation_client(tmp_path, monkeypatch)
+    assert client._trace_context is not None
+    client._trace_context.metadata["ai_feature"] = feature
+    monkeypatch.setattr(
+        "src.ai.client._load_ai_policy_document",
+        lambda: {"ai_features": features},
+    )
+
+    message = "metadata is required" if not feature else "Unknown AI feature"
+    with pytest.raises(BudgetConfigurationError, match=message):
+        open_cost_chain(client, [client.deployment])
 
 
 @pytest.mark.parametrize("method", ["chat", "structured"])
@@ -489,11 +664,12 @@ def test_retry_reservation_id_refusal_stops_dispatch_and_fallback(
     with pytest.raises(error_type):
         getattr(target, method)("system", "user", max_tokens=100, **arguments)
     parser.assert_not_called()
-    if via_fallback and refusal == "run":
-        # RELO-W1.4: the whole-chain worst case (0.2 x 3 attempts x 2 deployments) exceeds the run ceiling,
+    if via_fallback and refusal in {"feature", "run"}:
+        # RELO-W1.4: the whole-chain worst case exceeds either ceiling,
         # so the chain is refused before its first dispatch.
         assert _FakeAzureOpenAI.create_calls == 0
-        assert _retry_reservation_rows(client) == []
+        if guard.ledger_path.exists():
+            assert _retry_reservation_rows(client) == []
         assert guard.current_state().reserved_usd == 0.0
         return
     assert _FakeAzureOpenAI.create_calls == 1
@@ -1011,10 +1187,16 @@ def test_non_dispatch_release_stops_fallback_without_provider_telemetry(
         [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
         if trace_path.exists() else []
     )
-    assert len(traces) == (1 if stage == "retry-rate" else 0)
-    if traces:
-        assert traces[0]["cost_reservation_id"] == rows[0][0]
-    assert len(read_ai_telemetry("synthetic", programs_root=tmp_path / "telemetry")) == len(traces)
+    assert len(traces) == (2 if stage == "retry-rate" else 1)
+    assert traces[-1]["outcome"] == "released"
+    assert traces[-1]["cost_reservation_id"] == rows[-1][0]
+    telemetry = read_ai_telemetry(
+        "synthetic",
+        programs_root=tmp_path / "telemetry",
+    )
+    assert len(telemetry) == len(traces)
+    assert telemetry[-1].outcome == "released"
+    assert telemetry[-1].cost_reservation_id == rows[-1][0]
 
 
 @pytest.mark.parametrize("method", ["chat", "structured"])
@@ -1130,7 +1312,7 @@ def test_non_dispatch_release_allows_later_call_to_reuse_budget(
         ).fetchall() == [(rows[0][0],)]
     assert guard.current_state().ai_calls == 1
     assert guard.current_state().spent_usd == pytest.approx(0.05)
-    assert len(trace_path.read_text(encoding="utf-8").splitlines()) == 1
+    assert len(trace_path.read_text(encoding="utf-8").splitlines()) == 2
 
 
 @pytest.mark.parametrize("stage", ["interruption", "retry-backoff"])

@@ -79,19 +79,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Generic, Protocol, TypeVar
 
 from src.ai.client import AIPreflightError, BudgetConfigurationError, BudgetExceeded, BudgetStateError
-from src.ai.tiered_router import RouteOutcome, Tier, TierDecision, TierResult, _notify_sink
+from src.ai.tiered_router import (
+    RouteOutcome,
+    Tier,
+    TierDecision,
+    TierResult,
+    _notify_sink,
+    _record,
+)
+from src.core.ai_result_cache import AI_RESULT_TTL_DAYS
 from src.core._db import open_program_db
 from src.core.context_compiler import CompiledContext, ContextCompileRejected
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.exceptions import StateError
+from src.core.execution_taxonomy import ExecutionClass, parse_execution_class
+from src.core.selection_identity import UNVERIFIED
 from src.core.workspace_paths import is_bare_identifier
 
 RequestT = TypeVar("RequestT")
@@ -352,9 +363,38 @@ class CacheIdentity:
     execution_classification: str
     principal: str
     snapshot_id: str
+    selection_identity: str
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "program_id",
+            "feature",
+            "request_hash",
+            "context_hash",
+            "compiler_cache_key",
+            "prompt_version",
+            "policy_version",
+            "compiler_policy_version",
+            "deployment_fingerprint",
+            "tokenizer_id",
+            "response_schema_version",
+            "validator_version",
+            "classification",
+            "execution_classification",
+            "principal",
+            "snapshot_id",
+            "selection_identity",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise StateError(f"Cache identity requires a nonblank string {field_name}.")
 
     def cache_key(self) -> str:
-        raw = json.dumps(
+        raw = self.selection_json()
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def selection_json(self) -> str:
+        return json.dumps(
             (
                 self.program_id,
                 self.feature,
@@ -372,10 +412,10 @@ class CacheIdentity:
                 self.execution_classification,
                 self.principal,
                 self.snapshot_id,
+                self.selection_identity,
             ),
             separators=(",", ":"),
         )
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 _RELEASED_CACHE_SCHEMA_SQL = """
@@ -387,9 +427,11 @@ CREATE TABLE IF NOT EXISTS released_result_cache (
     payload               TEXT NOT NULL,
     released_content_hash TEXT NOT NULL,
     release_run_id        TEXT NOT NULL,
-    cached_at             TEXT NOT NULL
+    cached_at             TEXT NOT NULL,
+    selection_json        TEXT NOT NULL
 );
 """
+RELEASED_RESULT_CACHE_TTL_DAYS = 7
 
 
 def _released_content_hash(payload: object) -> str:
@@ -402,14 +444,64 @@ def _released_content_hash(payload: object) -> str:
 
 
 def _delete_observed_released_cache_entry(
-    connection: sqlite3.Connection, cache_key: str, observed: sqlite3.Row,
-) -> None:
-    connection.execute(
+    connection: sqlite3.Connection,
+    cache_key: str,
+    observed: sqlite3.Row | tuple[object, ...],
+) -> int:
+    cursor = connection.execute(
         "DELETE FROM released_result_cache "
         "WHERE cache_key = ? AND feature IS ? AND principal IS ? AND classification IS ? "
-        "AND payload IS ? AND released_content_hash IS ? AND release_run_id IS ? AND cached_at IS ?",
+        "AND payload IS ? AND released_content_hash IS ? AND release_run_id IS ? "
+        "AND cached_at IS ? AND selection_json IS ?",
         (cache_key, *observed),
     )
+    return cursor.rowcount
+
+
+def _ensure_released_cache_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(_RELEASED_CACHE_SCHEMA_SQL)
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(released_result_cache)").fetchall()
+    }
+    if "selection_json" not in columns:
+        connection.execute("ALTER TABLE released_result_cache ADD COLUMN selection_json TEXT")
+
+
+def _identity_from_selection_json(value: object) -> CacheIdentity:
+    if not isinstance(value, str):
+        raise StateError("Released-result cache selection identity is invalid.")
+    try:
+        payload = json.JSONDecoder().decode(value)
+    except (ValueError, RecursionError) as error:
+        raise StateError("Released-result cache selection identity is invalid.") from error
+    if (
+        not isinstance(payload, list)
+        or len(payload) != 17
+        or any(not isinstance(item, str) for item in payload)
+    ):
+        raise StateError("Released-result cache selection identity is invalid.")
+    try:
+        return CacheIdentity(*payload)
+    except (StateError, TypeError):
+        raise StateError("Released-result cache selection identity is invalid.") from None
+
+
+def _released_cached_at_is_stale(value: object, *, now: datetime) -> bool:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise StateError("Released-result cache evaluation time must be UTC.")
+    now = now.astimezone(timezone.utc)
+    if not isinstance(value, str):
+        raise StateError("Released-result cache cached_at is invalid.")
+    try:
+        cached_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise StateError("Released-result cache cached_at is invalid.") from None
+    if cached_at.tzinfo is None or cached_at.utcoffset() != timedelta(0):
+        raise StateError("Released-result cache cached_at must be UTC.")
+    if cached_at > now:
+        raise StateError("Released-result cache cached_at is in the future.")
+    return now - cached_at > timedelta(days=AI_RESULT_TTL_DAYS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,21 +535,28 @@ class ReleasedResultCache:
         self._record_release = record_release
         self._verify_release = verify_release
 
+    @property
+    def release_bound(self) -> bool:
+        return self._record_release is not None and self._verify_release is not None
+
     def get(
         self,
         identity: CacheIdentity,
         *,
         deserialize: Callable[[str], ResponseT],
+        now: datetime | None = None,
     ) -> ResponseT | None:
         """Read a value; the runner's private check may evict but does not suppress it."""
-        operation = "read"
-        invalid = False
+        invalid_error: StateError | None = None
+        stale = False
+        evaluation_time = now or datetime.now(timezone.utc)
         try:
             with open_program_db(self._db_path, durability="strict") as connection:
-                connection.executescript(_RELEASED_CACHE_SCHEMA_SQL)
+                _ensure_released_cache_schema(connection)
                 cache_key = identity.cache_key()
                 row = connection.execute(
-                    "SELECT feature, principal, classification, payload, released_content_hash, release_run_id, cached_at "
+                    "SELECT feature, principal, classification, payload, released_content_hash, "
+                    "release_run_id, cached_at, selection_json "
                     "FROM released_result_cache WHERE cache_key = ?",
                     (cache_key,),
                 ).fetchone()
@@ -467,21 +566,37 @@ class ReleasedResultCache:
                 payload, stored_hash = row["payload"], row["released_content_hash"]
                 if row["feature"] != identity.feature or principal != identity.principal or classification != identity.classification:
                     return None
-                try:
-                    actual_hash = _released_content_hash(payload)
-                except StateError:
-                    invalid = True
-                else:
-                    invalid = not isinstance(stored_hash, str) or stored_hash != actual_hash
-                if invalid:
-                    operation = "evict an invalid entry from"
+                stored_identity = _identity_from_selection_json(row["selection_json"])
+                if stored_identity != identity:
+                    raise StateError(
+                        "Released-result cache selection identity does not match the retained row."
+                    )
+                stale = _released_cached_at_is_stale(
+                    row["cached_at"], now=evaluation_time
+                )
+                actual_hash = _released_content_hash(payload)
+                if not isinstance(stored_hash, str) or stored_hash != actual_hash:
+                    raise StateError("Released-result cache payload integrity check failed.")
+        except StateError as error:
+            invalid_error = error
+            try:
+                with open_program_db(self._db_path, durability="strict") as connection:
                     _delete_observed_released_cache_entry(connection, cache_key, row)
-        except sqlite3.DatabaseError as error:
-            if operation != "read":
+                    connection.commit()
+            except (sqlite3.DatabaseError, OSError):
                 raise StateError("Unable to evict invalid released-result cache entry.") from None
+        except sqlite3.DatabaseError as error:
             raise StateError(f"Unable to read released-result cache at {self._db_path}") from error
-        if invalid:
-            raise StateError("Released-result cache payload integrity check failed.")
+        if invalid_error is not None:
+            raise invalid_error
+        if stale:
+            try:
+                with open_program_db(self._db_path, durability="strict") as connection:
+                    _delete_observed_released_cache_entry(connection, cache_key, row)
+                    connection.commit()
+            except (sqlite3.DatabaseError, OSError):
+                raise StateError("Unable to evict invalid released-result cache entry.") from None
+            return None
         assert isinstance(payload, str)
         if self._verify_release is not None:
             origin_run_id = row["release_run_id"]
@@ -548,15 +663,16 @@ class ReleasedResultCache:
                 raise StateError("Released-result cache release run ID must be a nonblank string.")
         try:
             with open_program_db(self._db_path, durability="strict") as connection:
-                connection.executescript(_RELEASED_CACHE_SCHEMA_SQL)
+                _ensure_released_cache_schema(connection)
                 connection.execute(
                     "INSERT INTO released_result_cache "
-                    "(cache_key, feature, principal, classification, payload, released_content_hash, release_run_id, cached_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                    "(cache_key, feature, principal, classification, payload, released_content_hash, "
+                    "release_run_id, cached_at, selection_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(cache_key) DO UPDATE SET feature = excluded.feature, "
                     "principal = excluded.principal, classification = excluded.classification, payload = excluded.payload, "
                     "released_content_hash = excluded.released_content_hash, release_run_id = excluded.release_run_id, "
-                    "cached_at = excluded.cached_at",
+                    "cached_at = excluded.cached_at, selection_json = excluded.selection_json",
                     (
                         identity.cache_key(),
                         identity.feature,
@@ -566,11 +682,102 @@ class ReleasedResultCache:
                         released_content_hash,
                         release_run_id,
                         datetime.now(timezone.utc).isoformat(),
+                        identity.selection_json(),
                     ),
                 )
                 connection.commit()
         except sqlite3.DatabaseError as error:
             raise StateError(f"Unable to write released-result cache at {self._db_path}") from error
+
+    def sweep(
+        self,
+        *,
+        now: datetime | None = None,
+        preserve_payload_integrity_errors: bool = False,
+    ) -> int:
+        """Evict stale, malformed or revoked retained entries; return removed rows."""
+        evaluation_time = now or datetime.now(timezone.utc)
+        try:
+            with open_program_db(self._db_path, durability="strict") as connection:
+                _ensure_released_cache_schema(connection)
+                rows = connection.execute(
+                    "SELECT cache_key, feature, principal, classification, payload, released_content_hash, "
+                    "release_run_id, cached_at, selection_json FROM released_result_cache"
+                ).fetchall()
+        except sqlite3.DatabaseError:
+            raise StateError(f"Unable to read released-result cache at {self._db_path}") from None
+
+        removed = 0
+        for row in rows:
+            cache_key = row["cache_key"]
+            observed = tuple(row[index] for index in range(1, 9))
+            identity: CacheIdentity | None = None
+            should_remove = False
+            preserve_for_read = False
+            try:
+                identity = _identity_from_selection_json(row["selection_json"])
+                if identity.cache_key() != cache_key:
+                    should_remove = True
+                payload_hash_mismatch = (
+                    _released_content_hash(row["payload"])
+                    != row["released_content_hash"]
+                )
+                if payload_hash_mismatch:
+                    if (
+                        preserve_payload_integrity_errors
+                        and identity.feature
+                        == "dependency_blast_radius_generator"
+                    ):
+                        preserve_for_read = True
+                    else:
+                        should_remove = True
+                if (
+                    preserve_payload_integrity_errors
+                    and identity.feature == "dependency_blast_radius_generator"
+                    and not preserve_for_read
+                ):
+                    try:
+                        json.loads(row["payload"])
+                    except (json.JSONDecodeError, TypeError):
+                        preserve_for_read = True
+                if _released_cached_at_is_stale(row["cached_at"], now=evaluation_time):
+                    should_remove = True
+            except StateError:
+                should_remove = True
+
+            if (
+                not should_remove
+                and not preserve_for_read
+                and self._verify_release is not None
+            ):
+                assert identity is not None
+                origin_run_id = row["release_run_id"]
+                if not isinstance(origin_run_id, str) or not origin_run_id.strip():
+                    should_remove = True
+                else:
+                    verified = self._verify_release(identity, row["payload"], origin_run_id)
+                    if verified is not True and verified is not False:
+                        raise StateError("Released-result cache release verification result is invalid.")
+                    if (
+                        verified is False
+                        and preserve_payload_integrity_errors
+                        and identity.feature == "dependency_blast_radius_generator"
+                    ):
+                        preserve_for_read = True
+                    else:
+                        should_remove = verified is False
+
+            if not should_remove:
+                continue
+            try:
+                with open_program_db(self._db_path, durability="strict") as connection:
+                    removed += _delete_observed_released_cache_entry(
+                        connection, str(cache_key), observed,
+                    )
+                    connection.commit()
+            except (sqlite3.DatabaseError, OSError):
+                raise StateError("Unable to evict invalid released-result cache entry.") from None
+        return removed
 
     def evict(self, identity: CacheIdentity) -> None:
         """Invalid, revoked, privacy-excised, or obsolete entries must be
@@ -578,7 +785,7 @@ class ReleasedResultCache:
         detects post-hoc that a previously-released entry was revoked."""
         try:
             with open_program_db(self._db_path, durability="strict") as connection:
-                connection.executescript(_RELEASED_CACHE_SCHEMA_SQL)
+                _ensure_released_cache_schema(connection)
                 connection.execute("DELETE FROM released_result_cache WHERE cache_key = ?", (identity.cache_key(),))
                 connection.commit()
         except sqlite3.DatabaseError as error:
@@ -718,6 +925,9 @@ class RunnerContext:
     snapshot_id: str
     principal: str
     classification: str = "internal"
+    execution_class: ExecutionClass | str | None = None
+    model_id: str | None = None
+    deployment_id: str | None = None
 
     def __post_init__(self) -> None:
         for field in ("program_id", "run_id", "policy_version", "snapshot_id", "principal", "classification"):
@@ -725,6 +935,21 @@ class RunnerContext:
             if not isinstance(value, str) or not value.strip():
                 raise StateError(f"Runner context requires a nonblank string {field}.")
         _require_runner_program_id(self.program_id)
+        execution_class = (
+            None
+            if self.execution_class is None
+            else parse_execution_class(self.execution_class)
+        )
+        if self.execution_class is not None and execution_class is None:
+            raise StateError("Runner context execution_class is invalid.")
+        if execution_class in {ExecutionClass.AI_ASSISTED, ExecutionClass.AI_GENERATED}:
+            for field in ("model_id", "deployment_id"):
+                value = getattr(self, field)
+                if not isinstance(value, str) or not value.strip():
+                    raise StateError(f"Runner context requires a nonblank string {field} for AI execution.")
+        elif self.model_id is not None or self.deployment_id is not None:
+            raise StateError("Runner context model identity requires an AI execution class.")
+        object.__setattr__(self, "execution_class", execution_class)
 
 
 class StructuredFeatureRunner:
@@ -750,6 +975,7 @@ class StructuredFeatureRunner:
         self._released_cache = released_cache if released_cache is not None else ReleasedResultCache(
             released_result_cache_path(context.program_id)
         )
+        self._released_cache_swept = False
         self._deterministic_cache = deterministic_cache if deterministic_cache is not None else DeterministicResultCache(
             deterministic_result_cache_path(context.program_id)
         )
@@ -782,6 +1008,8 @@ class StructuredFeatureRunner:
         request: RequestT,
         context_build: ContextBuildResult,
     ) -> CacheIdentity | None:
+        if not self._released_cache.release_bound:
+            return None
         # Caching is opt-in per feature: a spec that supplies none of these
         # simply never checks/writes the cache (Sec 8.1.7's key requires
         # every field; an incomplete identity cannot gate reuse).
@@ -794,12 +1022,42 @@ class StructuredFeatureRunner:
         ):
             return None
         manifest = context_build.compiled.manifest
+        selection_identity = manifest.selection_identity
+        if (
+            selection_identity == UNVERIFIED
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", selection_identity)
+            or context_build.compiled.selection_identity != selection_identity
+        ):
+            return None
         if not isinstance(manifest.cache_key, str) or not manifest.cache_key.strip():
             raise StateError("Compiled context cache identity is invalid.")
+        request_hash = spec.request_hash(request)
+        frozen_identity = (
+            spec.feature,
+            request_hash,
+            manifest.context_hash,
+            manifest.cache_key,
+            spec.prompt_version,
+            self._context.policy_version,
+            manifest.policy_version,
+            spec.deployment_fingerprint,
+            manifest.tokenizer_id,
+            spec.schema_version,
+            spec.validator_version,
+            manifest.classification,
+            self._context.classification,
+            self._context.principal,
+            self._context.snapshot_id,
+        )
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in frozen_identity
+        ):
+            return None
         return CacheIdentity(
             program_id=self._context.program_id,
             feature=spec.feature,
-            request_hash=spec.request_hash(request),
+            request_hash=request_hash,
             context_hash=manifest.context_hash,
             compiler_cache_key=manifest.cache_key,
             prompt_version=spec.prompt_version,
@@ -813,6 +1071,7 @@ class StructuredFeatureRunner:
             execution_classification=self._context.classification,
             principal=self._context.principal,
             snapshot_id=self._context.snapshot_id,
+            selection_identity=selection_identity,
         )
 
     def _context_binding_failure(
@@ -944,8 +1203,15 @@ class StructuredFeatureRunner:
         # A cache hit skips the call-ceiling check and the
         # provider entirely -- it is not a call, remote or otherwise.
         cache_identity = self._cache_identity(spec, request, context_build)
-        if cache_identity is not None:
+        release_cache_enabled = cache_identity is not None and self._released_cache.release_bound
+        if release_cache_enabled:
+            assert cache_identity is not None
             assert spec.deserialize_response is not None
+            if not self._released_cache_swept:
+                self._released_cache.sweep(
+                    preserve_payload_integrity_errors=True
+                )
+                self._released_cache_swept = True
             validation: ValidationResult | None = None
             validated_value: ResponseT | None = None
 
@@ -957,9 +1223,17 @@ class StructuredFeatureRunner:
                 validation = spec.semantic_validator(request, value)
                 return validation.valid is False
 
-            cached_value = self._released_cache.get(
-                cache_identity, deserialize=_RunnerCacheDecoder(spec.deserialize_response, validate_cached_value),
-            )
+            try:
+                cached_value = self._released_cache.get(
+                    cache_identity,
+                    deserialize=_RunnerCacheDecoder(
+                        spec.deserialize_response, validate_cached_value
+                    ),
+                )
+            except StateError as error:
+                if "cached_at" not in str(error) and "must be UTC" not in str(error):
+                    raise
+                cached_value = None
             if cached_value is not None or validated_value is not None or validation is not None:
                 if cached_value is None or validation is None or cached_value is not validated_value:
                     raise StateError("Released-result cache did not validate the decoded response.")
@@ -1024,7 +1298,7 @@ class StructuredFeatureRunner:
 
         if not isinstance(response, spec.response_type):
             self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_CALL, 0.0)
-            if cache_identity is not None:
+            if release_cache_enabled:
                 raise StateError("Released-result cache received an unexpected response type.")
             raise StateError("Provider returned an unexpected response type.")
 
@@ -1043,7 +1317,8 @@ class StructuredFeatureRunner:
             )
 
         # A configured released cache records its release before the write.
-        if cache_identity is not None:
+        if release_cache_enabled:
+            assert cache_identity is not None
             assert spec.serialize_response is not None
             assert spec.deserialize_response is not None
             payload = spec.serialize_response(response)
@@ -1309,9 +1584,18 @@ class StructuredFeatureRunner:
             frontier_called=(tier == Tier.FRONTIER),
             trace_id=self._context.run_id,
             recorded_at=datetime.now(timezone.utc).isoformat(),
+            execution_class=(
+                self._context.execution_class.value
+                if isinstance(self._context.execution_class, ExecutionClass)
+                else self._context.execution_class
+            ),
+            model_version=self._context.model_id,
+            deployment_id=self._context.deployment_id,
         )
         if self._decision_sink is not None:
             _notify_sink(self._decision_sink, decision)
+        else:
+            _record(decision)
 
 
 __all__ = [

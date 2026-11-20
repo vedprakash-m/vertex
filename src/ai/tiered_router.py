@@ -81,6 +81,9 @@ class TierDecision:
     frontier_called: bool
     trace_id: Optional[str]
     recorded_at: str
+    execution_class: Optional[str] = None
+    model_version: Optional[str] = None
+    deployment_id: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)

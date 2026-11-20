@@ -65,7 +65,7 @@ def detect_risk_duplicates(entries: tuple[RiskEntry, ...]) -> tuple[RiskDedupeFi
             findings.append(RiskDedupeFinding(kind="duplicate", risk_ids=tuple(sorted(ids)), dedupe_key=key))
 
     known = {entry.id for entry in entries}
-    successor: dict[str, str] = {}
+    edges: dict[str, set[str]] = {}
     for entry in sorted(entries, key=lambda e: e.id):
         for ref, is_supersedes in ((entry.supersedes, True), (entry.superseded_by, False)):
             if ref is None:
@@ -74,7 +74,27 @@ def detect_risk_duplicates(entries: tuple[RiskEntry, ...]) -> tuple[RiskDedupeFi
             if ref not in known:
                 findings.append(RiskDedupeFinding(kind="supersede_dangling", risk_ids=(entry.id, ref)))
             else:
-                successor.setdefault(old, new)
+                edges.setdefault(old, set()).add(new)
+
+    for old, successors in sorted(edges.items()):
+        if len(successors) > 1:
+            findings.append(RiskDedupeFinding(
+                kind="supersede_fork",
+                risk_ids=(old, *sorted(successors)),
+            ))
+    predecessors: dict[str, set[str]] = {}
+    for old, successors in edges.items():
+        for new in successors:
+            predecessors.setdefault(new, set()).add(old)
+    for new, old_entries in sorted(predecessors.items()):
+        cyclic_predecessors = edges.get(new, set()) & old_entries
+        if len(old_entries) > 1 and not cyclic_predecessors:
+            findings.append(RiskDedupeFinding(
+                kind="supersede_merge",
+                risk_ids=(new, *sorted(old_entries)),
+            ))
+
+    successor = {old: sorted(successors)[0] for old, successors in edges.items()}
 
     visited: set[str] = set()
     for head in sorted(set(successor) - set(successor.values())):

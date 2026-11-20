@@ -510,6 +510,7 @@ commands:
         value_options:
         - --as-of
         - --edition
+        - --expect-input-hash
         - --finding
         - --program
       measure:
@@ -1118,6 +1119,7 @@ commands:
         value_options:
         - --actor
         - --batch-id
+        - --program
         - --reason
       redact:
         flags: []
@@ -1620,13 +1622,15 @@ commands:
         - --program
         - --programs-root
       run:
-        flags: []
+        flags:
+        - --workiq
         value_options:
         - --body
         - --container
         - --docs-inbox
         - --eml-inbox
         - --extractor
+        - --from-date
         - --ics-inbox
         - --limit
         - --mailbox
@@ -1634,8 +1638,13 @@ commands:
         - --profile
         - --program
         - --sender
+        - --sharepoint-fixture
         - --subject
         - --tenant-id
+        - --to-date
+        - --workiq-max-windows
+        - --workiq-query
+        - --workiq-window-days
   review-debrief:
     callback:
       flags:

@@ -7,7 +7,7 @@ import sqlite3
 from typing import Iterator
 
 from src.core._db import open_program_db
-from src.core.knowledge_candidate_store import KnowledgeCandidate, KnowledgeCandidateDecisionRecord, load_pending_candidates, load_triage_decisions
+from src.core.knowledge_candidate_store import RESOLUTION_VERIFIED_KIND, REVIEW_EVENT_KINDS, KnowledgeCandidate, KnowledgeCandidateDecisionRecord, load_pending_candidates, load_triage_decisions
 from src.core.knowledge_claim_store import KnowledgeClaimRevision, load_all_claim_revisions
 from src.core.workspace_lease import cooperative_capture_fence
 
@@ -120,6 +120,8 @@ def _insert_candidate_ref(connection: sqlite3.Connection, candidate_id: str, vau
 
 
 def _apply_candidate_decision(connection: sqlite3.Connection, decision: KnowledgeCandidateDecisionRecord) -> None:
+    if decision.kind in REVIEW_EVENT_KINDS or decision.kind == RESOLUTION_VERIFIED_KIND:
+        return
     if decision.kind == "skipped":
         expires_at = (decision.decided_at + timedelta(days=SKIP_EXPIRY_DAYS)).isoformat()
         connection.execute(

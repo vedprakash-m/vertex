@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import hashlib
 import json
 import os
 import subprocess
@@ -10,6 +11,8 @@ from pathlib import Path
 import pytest
 
 from scripts.verify_relo import (
+    CheckResult,
+    _check_evidence_packets,
     _check_deployment_vars,
     _check_spec_size_budget,
     lint_specification,
@@ -107,6 +110,409 @@ def _write_budgets(root, *, line_status: str, line_value, obligation_status: str
     )
 
 
+def _write_evidence_packet_set(root: Path) -> list[Path]:
+    governance = root / "governance"
+    evidence = root / "evidence"
+    governance.mkdir(exist_ok=True)
+    evidence.mkdir(exist_ok=True)
+    (governance / "relo-work-packages.yaml").write_text(
+        json.dumps({
+            "schema_version": "1",
+            "work_items": [
+                {"id": "RELO-W0.13", "blocking_decisions": ["RELO-D6d", "RELO-D13"]},
+                {"id": "RELO-W0.13h", "blocking_decisions": ["RELO-D6d", "RELO-D13"]},
+                {"id": "RELO-W0.14b", "blocking_decisions": ["RELO-D6d"]},
+                {"id": "RELO-W1.9", "blocking_decisions": ["RELO-D6d"]},
+                {"id": "RELO-W1.10", "blocking_decisions": ["RELO-D6d"]},
+                {"id": "RELO-W6.2", "blocking_decisions": ["RELO-D7"]},
+                {"id": "RELO-W6.10", "blocking_decisions": ["RELO-D13", "RELO-D14"]},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    artifact = evidence / "synthetic-source.json"
+    artifact.write_text('{"synthetic": true}\n', encoding="utf-8")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    (governance / "nfr-budgets.yaml").write_text(
+        """schema_version: "1"
+budgets:
+  - id: synthetic-ratified
+    area: Synthetic
+    description: d
+    budget_class: integration
+    direction: ceiling
+    unit: usd
+    value: 1
+    status: ratified
+    ratified_at: "2026-01-01"
+    ratified_by: synthetic
+""",
+        encoding="utf-8",
+    )
+    common = {
+        "schema_version": "1",
+        "captured_at": "2026-11-18T00:00:00Z",
+        "valid_until": "2026-11-25T00:00:00Z",
+        "observed_from": "2026-11-01T00:00:00Z",
+        "observed_through": "2026-11-17T00:00:00Z",
+        "decision": {"state": "pending"},
+    }
+    definitions = {
+        "RELO-D6d": {
+            "cards": ["RELO-W0.13", "RELO-W0.13h", "RELO-W0.14b", "RELO-W1.9", "RELO-W1.10"],
+            "claims": {
+                "shadow_run_count": 4,
+                "cost_per_certified_artifact_usd": 1.0,
+                "cost_per_completed_cycle_usd": 2.0,
+                "cost_per_active_program_month_usd": 3.0,
+                "unattributed_cost_usd": 0.0,
+            },
+        },
+        "RELO-D7": {
+            "cards": ["RELO-W6.2"],
+            "claims": {
+                "baseline_count": 5,
+                "matched_cycle_count": 8,
+                "matched_cycle_span_days": 49,
+                "workflow_class_count": 1,
+                "confidence_95_lower_bound": 0.81,
+            },
+        },
+        "RELO-D13": {
+            "cards": ["RELO-W0.13", "RELO-W0.13h", "RELO-W6.10"],
+            "claims": {
+                "two_program_profile": {
+                    "program_count": 2, "entity_count": 20, "relation_count": 30,
+                    "document_count": 40, "history": {"days": 90},
+                    "compiler": {"spans": 100}, "storage": {"gb": 10},
+                    "queue": {"concurrency": 1}, "latency": {"p95_s": 30},
+                },
+                "maximum_profile": {
+                    "program_count": 4, "entity_count": 40, "relation_count": 60,
+                    "document_count": 80, "history": {"days": 180},
+                    "compiler": {"spans": 200}, "storage": {"gb": 20},
+                    "queue": {"concurrency": 2}, "latency": {"p95_s": 60},
+                },
+                "next_program_admission_tripwire": {"threshold": "synthetic"},
+                "separate_architecture_tripwire": {"threshold": "synthetic"},
+            },
+        },
+        "RELO-D14": {
+            "cards": ["RELO-W6.10"],
+            "claims": {
+                "cost_per_certified_artifact_ceiling_usd": 2.0,
+                "cost_per_completed_cycle_ceiling_usd": 4.0,
+                "cost_per_active_program_month_ceiling_usd": 6.0,
+            },
+        },
+    }
+    packet_paths = []
+    for decision, definition in definitions.items():
+        packet_id = f"packet-{decision.lower().removeprefix('relo-')}"
+        claims = [
+            {
+                "id": claim_id,
+                "value": value,
+                "source_artifact_ids": ["source"],
+            }
+            for claim_id, value in definition["claims"].items()
+        ]
+        packet = {
+            **common,
+            "packet_id": packet_id,
+            "decision_id": decision,
+            "card_ids": definition["cards"],
+            "artifacts": [{
+                "id": "source",
+                "path": "evidence/synthetic-source.json",
+                "sha256": digest,
+            }],
+            "claims": claims,
+        }
+        if decision == "RELO-D14":
+            packet["depends_on_packets"] = {
+                "RELO-D6d": "packet-d6d",
+            }
+            packet["budget_reconciliations"] = [{
+                "budget_id": "synthetic-ratified",
+                "disposition": "pending",
+                "evidence_refs": ["source"],
+            }]
+        path = root / f"{decision}.yaml"
+        path.write_text(json.dumps(packet), encoding="utf-8")
+        packet_paths.append(path)
+    return packet_paths
+
+
+def test_evidence_packet_preflight_accepts_complete_fresh_linked_set(tmp_path) -> None:
+    packets = _write_evidence_packet_set(tmp_path)
+
+    results = _check_evidence_packets(
+        tmp_path, tuple(packets), as_of="2026-11-19T00:00:00Z",
+    )
+
+    assert [result.id for result in results] == [
+        "RELO-EVIDENCE-D6d",
+        "RELO-EVIDENCE-D7",
+        "RELO-EVIDENCE-D13",
+        "RELO-EVIDENCE-D14",
+    ]
+    assert all(result.passed for result in results)
+    assert all("unassessed" in result.detail for result in results)
+
+
+@pytest.mark.parametrize(("case", "decision", "diagnostic"), [
+    ("stale", "RELO-D6d", "stale"),
+    ("future", "RELO-D7", "stale"),
+    ("cards", "RELO-D13", "ledger blockers"),
+    ("hash", "RELO-D14", "hash mismatch"),
+    ("claim", "RELO-D6d", "shadow_run_count"),
+    ("dependency", "RELO-D14", "supplied D6d packet"),
+    ("profile", "RELO-D13", "scale dimensions"),
+    ("packet_id", "RELO-D14", "duplicated across decisions"),
+    ("confidence", "RELO-D7", "confidence_95_lower_bound"),
+    ("profile_count", "RELO-D13", "two_program_profile"),
+])
+def test_evidence_packet_preflight_rejects_invalid_selected_gate(
+    tmp_path, case, decision, diagnostic,
+) -> None:
+    packets = _write_evidence_packet_set(tmp_path)
+    path = next(path for path in packets if path.stem == decision)
+    packet = json.loads(path.read_text(encoding="utf-8"))
+    if case == "stale":
+        packet["valid_until"] = "2026-11-18T23:59:59Z"
+    elif case == "future":
+        packet["captured_at"] = "2026-11-20T00:00:00Z"
+    elif case == "cards":
+        packet["card_ids"].append("RELO-W6.12")
+    elif case == "hash":
+        packet["artifacts"][0]["sha256"] = "0" * 64
+    elif case == "claim":
+        packet["claims"][0]["value"] = 3
+    elif case == "dependency":
+        packet["depends_on_packets"]["RELO-D6d"] = "wrong-packet"
+    elif case == "profile":
+        next(claim for claim in packet["claims"] if claim["id"] == "two_program_profile")[
+            "value"
+        ]["queue"] = None
+    elif case == "packet_id":
+        packet["packet_id"] = "packet-d6d"
+    elif case == "confidence":
+        next(claim for claim in packet["claims"] if claim["id"] == "confidence_95_lower_bound")[
+            "value"
+        ] = 1.2
+    elif case == "profile_count":
+        next(claim for claim in packet["claims"] if claim["id"] == "two_program_profile")[
+            "value"
+        ]["program_count"] = 3
+    path.write_text(json.dumps(packet), encoding="utf-8")
+
+    results = _check_evidence_packets(
+        tmp_path, tuple(packets), as_of="2026-11-19T00:00:00Z",
+    )
+
+    selected = next(
+        result for result in results
+        if result.id == f"RELO-EVIDENCE-{decision.removeprefix('RELO-')}"
+    )
+    assert selected.passed is False
+    assert diagnostic in selected.detail
+
+
+def test_evidence_packet_preflight_requires_all_four_packets_and_reproducible_as_of(tmp_path) -> None:
+    packets = _write_evidence_packet_set(tmp_path)
+
+    missing = _check_evidence_packets(
+        tmp_path, tuple(packets[:-1]), as_of="2026-11-19T00:00:00Z",
+    )
+    without_clock = _check_evidence_packets(tmp_path, tuple(packets), as_of=None)
+
+    assert next(row for row in missing if row.id == "RELO-EVIDENCE-D14").passed is False
+    assert all(not row.passed and "--as-of" in row.detail for row in without_clock)
+
+
+@pytest.mark.parametrize(("case", "decision", "diagnostic"), [
+    ("schema", "RELO-D6d", "schema_version"),
+    ("packet_id", "RELO-D6d", "packet_id"),
+    ("card_shape", "RELO-D6d", "card_ids"),
+    ("timestamps", "RELO-D7", "timestamps"),
+    ("artifacts", "RELO-D7", "artifacts"),
+    ("artifact_entry", "RELO-D7", "artifact entry"),
+    ("artifact_path", "RELO-D7", "outside or unavailable"),
+    ("artifact_unavailable", "RELO-D7", "unavailable"),
+    ("claims", "RELO-D13", "claims"),
+    ("claim_entry", "RELO-D13", "claim entry"),
+    ("claim_link", "RELO-D13", "unlinked"),
+    ("decision_state", "RELO-D13", "decision state"),
+    ("ratified_approver", "RELO-D14", "ratified decision"),
+])
+def test_evidence_packet_preflight_rejects_malformed_structures(
+    tmp_path, case, decision, diagnostic,
+) -> None:
+    packets = _write_evidence_packet_set(tmp_path)
+    path = next(path for path in packets if path.stem == decision)
+    packet = json.loads(path.read_text(encoding="utf-8"))
+    if case == "schema":
+        packet.pop("schema_version")
+    elif case == "packet_id":
+        packet["packet_id"] = ""
+    elif case == "card_shape":
+        packet["card_ids"] = "not-a-list"
+    elif case == "timestamps":
+        packet["observed_from"] = "bad-time"
+    elif case == "artifacts":
+        packet["artifacts"] = []
+    elif case == "artifact_entry":
+        packet["artifacts"] = [None]
+    elif case == "artifact_path":
+        outside = tmp_path.parent / f"{tmp_path.name}-outside.json"
+        outside.write_text("{}\n", encoding="utf-8")
+        packet["artifacts"][0]["path"] = f"../{outside.name}"
+    elif case == "artifact_unavailable":
+        packet["artifacts"][0]["path"] = "evidence/missing.json"
+    elif case == "claims":
+        packet["claims"] = []
+    elif case == "claim_entry":
+        packet["claims"] = [None]
+    elif case == "claim_link":
+        packet["claims"][0]["source_artifact_ids"] = ["missing"]
+    elif case == "decision_state":
+        packet["decision"]["state"] = "unknown"
+    elif case == "ratified_approver":
+        packet["decision"]["state"] = "ratified"
+    path.write_text(json.dumps(packet), encoding="utf-8")
+
+    results = _check_evidence_packets(
+        tmp_path, tuple(packets), as_of="2026-11-19T00:00:00Z",
+    )
+
+    selected = next(
+        row for row in results
+        if row.id == f"RELO-EVIDENCE-{decision.removeprefix('RELO-')}"
+    )
+    assert selected.passed is False
+    assert diagnostic in selected.detail
+
+
+@pytest.mark.parametrize("case", ["missing", "duplicate", "invented_value", "contradiction"])
+def test_evidence_packet_preflight_rejects_incomplete_budget_reconciliation(tmp_path, case) -> None:
+    packets = _write_evidence_packet_set(tmp_path)
+    path = next(path for path in packets if path.stem == "RELO-D14")
+    packet = json.loads(path.read_text(encoding="utf-8"))
+    if case == "missing":
+        packet["budget_reconciliations"] = []
+    elif case == "duplicate":
+        packet["budget_reconciliations"].append(
+            packet["budget_reconciliations"][0].copy(),
+        )
+    elif case == "invented_value":
+        packet["budget_reconciliations"][0]["proposed_value"] = 99
+    elif case == "contradiction":
+        packet["budget_reconciliations"][0]["disposition"] = "retain"
+        packet["budget_reconciliations"][0]["evidence_refs"] = []
+    path.write_text(json.dumps(packet), encoding="utf-8")
+
+    results = _check_evidence_packets(
+        tmp_path, tuple(packets), as_of="2026-11-19T00:00:00Z",
+    )
+
+    selected = next(row for row in results if row.id == "RELO-EVIDENCE-D14")
+    assert selected.passed is False
+    assert "budget reconciliation" in selected.detail
+
+
+def test_evidence_packet_preflight_reports_unavailable_ledger_and_malformed_input(tmp_path) -> None:
+    packets = _write_evidence_packet_set(tmp_path)
+    ledger = tmp_path / "governance" / "relo-work-packages.yaml"
+    before = ledger.read_text(encoding="utf-8")
+    ledger.write_text("a: [", encoding="utf-8")
+    unavailable = _check_evidence_packets(
+        tmp_path, tuple(packets), as_of="2026-11-19T00:00:00Z",
+    )
+    ledger.write_text(before, encoding="utf-8")
+    packets[0].write_text("a: [", encoding="utf-8")
+    malformed = _check_evidence_packets(
+        tmp_path, tuple(packets), as_of="2026-11-19T00:00:00Z",
+    )
+
+    assert all(not row.passed and "ledger" in row.detail for row in unavailable)
+    general = next(row for row in malformed if row.id == "RELO-EVIDENCE-PREFLIGHT")
+    assert not general.passed
+    assert "cannot be read or parsed" in general.detail
+
+
+def test_evidence_packet_preflight_rejects_duplicate_and_unsupported_packets(tmp_path) -> None:
+    packets = _write_evidence_packet_set(tmp_path)
+    duplicate = tmp_path / "duplicate.yaml"
+    duplicate.write_text(packets[0].read_text(encoding="utf-8"), encoding="utf-8")
+    duplicate_results = _check_evidence_packets(
+        tmp_path, (*packets, duplicate), as_of="2026-11-19T00:00:00Z",
+    )
+    unsupported = tmp_path / "unsupported.yaml"
+    unsupported.write_text(
+        json.dumps({"schema_version": "1", "decision_id": "RELO-D99"}),
+        encoding="utf-8",
+    )
+    unsupported_results = _check_evidence_packets(
+        tmp_path, tuple(packets) + (unsupported,), as_of="2026-11-19T00:00:00Z",
+    )
+
+    d6d = next(row for row in duplicate_results if row.id == "RELO-EVIDENCE-D6d")
+    d14 = next(row for row in duplicate_results if row.id == "RELO-EVIDENCE-D14")
+    assert d6d.passed is False
+    assert "multiple packets" in d6d.detail
+    assert "duplicated across decisions" in d6d.detail
+    assert d14.passed is False
+    assert any(row.id == "RELO-EVIDENCE-PREFLIGHT" for row in unsupported_results)
+
+
+def test_evidence_packet_preflight_rejects_duplicate_yaml_keys(tmp_path) -> None:
+    packets = _write_evidence_packet_set(tmp_path)
+    packets[0].write_text(
+        packets[0].read_text(encoding="utf-8")[:-1] + ', "schema_version": "1"}',
+        encoding="utf-8",
+    )
+
+    results = _check_evidence_packets(
+        tmp_path, tuple(packets), as_of="2026-11-19T00:00:00Z",
+    )
+
+    general = next(row for row in results if row.id == "RELO-EVIDENCE-PREFLIGHT")
+    assert not general.passed
+    assert "cannot be read or parsed" in general.detail
+
+
+def test_d14_preflight_cannot_pass_when_referenced_d6d_packet_fails(tmp_path) -> None:
+    packets = _write_evidence_packet_set(tmp_path)
+    d6d = next(path for path in packets if path.stem == "RELO-D6d")
+    document = json.loads(d6d.read_text(encoding="utf-8"))
+    document["artifacts"][0]["sha256"] = "0" * 64
+    d6d.write_text(json.dumps(document), encoding="utf-8")
+
+    results = _check_evidence_packets(
+        tmp_path, tuple(packets), as_of="2026-11-19T00:00:00Z",
+    )
+
+    assert next(row for row in results if row.id == "RELO-EVIDENCE-D6d").passed is False
+    d14 = next(row for row in results if row.id == "RELO-EVIDENCE-D14")
+    assert d14.passed is False
+    assert "inadmissible D6d" in d14.detail
+
+
+def test_evidence_packet_preflight_rejects_malformed_ledger_linkage(tmp_path) -> None:
+    packets = _write_evidence_packet_set(tmp_path)
+    ledger = tmp_path / "governance" / "relo-work-packages.yaml"
+    document = json.loads(ledger.read_text(encoding="utf-8"))
+    document["work_items"][0]["blocking_decisions"] = "RELO-D6d"
+    ledger.write_text(json.dumps(document), encoding="utf-8")
+
+    results = _check_evidence_packets(
+        tmp_path, tuple(packets), as_of="2026-11-19T00:00:00Z",
+    )
+
+    assert all(not row.passed and "ledger" in row.detail for row in results)
+
+
 def test_spec_size_budget_passes_within_ratified_ceilings(tmp_path) -> None:
     spec = tmp_path / "relo.md"
     spec.write_text("line1\nline2\n| RELO-W0.1 | item |\n", encoding="utf-8")
@@ -126,6 +532,16 @@ def test_spec_size_budget_fails_over_ratified_line_ceiling(tmp_path) -> None:
 
     assert result.passed is False
     assert "line count" in result.detail
+
+
+def test_spec_size_budget_does_not_count_a_terminating_newline_as_a_line(tmp_path) -> None:
+    spec = tmp_path / "relo.md"
+    spec.write_text("line1\nline2\n", encoding="utf-8")
+    _write_budgets(tmp_path, line_status="ratified", line_value=2, obligation_status="ratified", obligation_value=10)
+
+    result = _check_spec_size_budget(spec, repo_root=tmp_path)
+
+    assert result.passed is True
 
 
 def test_spec_size_budget_fails_over_ratified_obligation_ceiling(tmp_path) -> None:
@@ -163,6 +579,30 @@ def test_cli_requires_explicit_repository_and_specification() -> None:
     with pytest.raises(SystemExit) as error:
         main([])
     assert error.value.code == 2
+
+
+def test_cli_forwards_selected_evidence_packets_and_as_of(tmp_path, monkeypatch, capsys) -> None:
+    packet = tmp_path / "packet.yaml"
+    packet.write_text("schema_version: '1'\n", encoding="utf-8")
+    spec = tmp_path / "spec.md"
+    spec.write_text("**Version:** 1.0\n- **v1.0 — fixture:** note\n", encoding="utf-8")
+    captured = {}
+
+    def selected_verify(*_args, **kwargs):
+        captured.update(kwargs)
+        return (CheckResult("X", True, "ok"),)
+
+    monkeypatch.setattr("scripts.verify_relo.verify", selected_verify)
+
+    assert main([
+        "--repo-root", str(tmp_path),
+        "--spec", str(spec),
+        "--evidence-packet", str(packet),
+        "--as-of", "2026-11-19T00:00:00Z",
+    ]) == 0
+    assert captured["evidence_packet_paths"] == (packet,)
+    assert captured["as_of"] == "2026-11-19T00:00:00Z"
+    assert capsys.readouterr().out == "PASS X: ok\n"
 
 
 def test_generic_verifier_does_not_select_programs_or_telemetry(tmp_path) -> None:
@@ -1562,6 +2002,310 @@ def test_work_package_lint_rejects_missing_cards_and_unresolved_agent_paths(tmp_
     assert "unresolved file path" in result.detail
 
 
+@pytest.mark.parametrize(
+    "row",
+    [
+        "| RELO-W0.1a | child item | child passes |",
+        "| RELO-W0.1a | child item | existing.py | child passes |",
+    ],
+)
+def test_work_package_lint_accepts_compacted_child_definitions(tmp_path, row) -> None:
+    (tmp_path / "governance").mkdir()
+    (tmp_path / "existing.py").write_text("# synthetic\n", encoding="utf-8")
+    spec = tmp_path / "relo.md"
+    spec.write_text(
+        "## 11. Plan\n"
+        "### 11.1 Phase RELO-0\n| ID | Work item |\n|---|---|\n"
+        "| RELO-W0.1 | parent item |\n",
+        encoding="utf-8",
+    )
+    cards = [
+        _ready_work_package(),
+        {
+            **_ready_work_package("RELO-W0.1a"),
+            "definition": {
+                "parent_id": "RELO-W0.1",
+                "row": row,
+                "row_sha256": hashlib.sha256(row.encode("utf-8")).hexdigest(),
+            },
+        },
+    ]
+    (tmp_path / "governance" / "relo-work-packages.yaml").write_text(
+        json.dumps({"schema_version": "1", "work_items": cards}),
+        encoding="utf-8",
+    )
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is True
+
+
+@pytest.mark.parametrize("fault", ["parent", "row_id", "row_hash"])
+def test_work_package_lint_rejects_invalid_compacted_child_definitions(tmp_path, fault) -> None:
+    (tmp_path / "governance").mkdir()
+    (tmp_path / "existing.py").write_text("# synthetic\n", encoding="utf-8")
+    spec = tmp_path / "relo.md"
+    spec.write_text(
+        "## 11. Plan\n"
+        "### 11.1 Phase RELO-0\n| ID | Work item |\n|---|---|\n"
+        "| RELO-W0.1 | parent item |\n",
+        encoding="utf-8",
+    )
+    row = "| RELO-W0.1a | child item | existing.py | child passes |"
+    definition = {
+        "parent_id": "RELO-W0.1",
+        "row": row,
+        "row_sha256": hashlib.sha256(row.encode("utf-8")).hexdigest(),
+    }
+    if fault == "parent":
+        definition["parent_id"] = "RELO-W0.2"
+    elif fault == "row_id":
+        definition["row"] = row.replace("W0.1a", "W0.2a")
+    else:
+        definition["row_sha256"] = "0" * 64
+    card = {**_ready_work_package("RELO-W0.1a"), "definition": definition}
+    (tmp_path / "governance" / "relo-work-packages.yaml").write_text(
+        json.dumps({"schema_version": "1", "work_items": [_ready_work_package(), card]}),
+        encoding="utf-8",
+    )
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is False
+    assert "invalid compacted definition" in result.detail
+
+
+def test_work_package_lint_accepts_explicit_rootless_compacted_definition(tmp_path) -> None:
+    (tmp_path / "governance").mkdir()
+    (tmp_path / "existing.py").write_text("# synthetic\n", encoding="utf-8")
+    spec = tmp_path / "relo.md"
+    spec.write_text(
+        "## 11. Plan\n"
+        "### 11.1 Phase RELO-0\n| ID | Work item |\n|---|---|\n"
+        "| RELO-W0.1 | parent item |\n",
+        encoding="utf-8",
+    )
+    row = "| RELO-W0.15a | rootless child item | existing.py | child passes |"
+    child = {
+        **_ready_work_package("RELO-W0.15a"),
+        "definition": {
+            "parent_id": "RELO-W0.15",
+            "parent_status": "rootless",
+            "row": row,
+            "row_sha256": hashlib.sha256(row.encode("utf-8")).hexdigest(),
+        },
+    }
+    (tmp_path / "governance" / "relo-work-packages.yaml").write_text(
+        json.dumps({"schema_version": "1", "work_items": [_ready_work_package(), child]}),
+        encoding="utf-8",
+    )
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is True
+
+
+def test_spec_lint_validates_external_problem_registry(tmp_path) -> None:
+    markdown = "#### RELO-P1 — Synthetic finding\n\nEvidence remains synthetic.\n"
+    (tmp_path / "governance").mkdir()
+    (tmp_path / "governance" / "relo-problem-statements.yaml").write_text(
+        json.dumps({
+            "schema_version": "1",
+            "expected_count": 1,
+            "problems": [{
+                "id": "RELO-P1",
+                "markdown": markdown,
+                "markdown_sha256": hashlib.sha256(markdown.encode("utf-8")).hexdigest(),
+            }],
+        }),
+        encoding="utf-8",
+    )
+    spec = tmp_path / "relo.md"
+    spec.write_text(
+        "**Version:** 1.0\n- **v1.0 — synthetic:** note\n\n"
+        "## Table of Contents\n"
+        "### 4.2 Problem statements\n"
+        "Canonical text: `governance/relo-problem-statements.yaml`.\n\n"
+        "RELO-P1 remains traceable.\n",
+        encoding="utf-8",
+    )
+
+    valid = lint_specification(spec)
+    (tmp_path / "governance" / "relo-problem-statements.yaml").write_text(
+        json.dumps({
+            "schema_version": "1",
+            "expected_count": 1,
+            "problems": [{
+                "id": "RELO-P1",
+                "markdown": markdown,
+                "markdown_sha256": "0" * 64,
+            }],
+        }),
+        encoding="utf-8",
+    )
+    invalid = lint_specification(spec)
+
+    assert valid.passed is True
+    assert invalid.passed is False
+    assert "problem registry definition hash mismatch" in invalid.detail
+
+
+@pytest.mark.parametrize(("fault", "diagnostic"), [
+    ("missing", "problem registry is unavailable"),
+    ("utf8", "problem registry is not valid UTF-8"),
+    ("yaml", "problem registry is not valid YAML"),
+    ("schema", "problem registry schema_version"),
+    ("count", "problem registry expected_count must be a positive integer"),
+    ("problems", "problem registry problems must be a list"),
+    ("entry", "problem registry entry 1 must be a mapping"),
+    ("id", "problem registry entry 1 has invalid id"),
+    ("definition", "problem registry definition is malformed"),
+    ("duplicate", "duplicate problem registry ID"),
+    ("sequence", "problem registry IDs must be contiguous"),
+    ("reference", "unresolved problem registry reference"),
+])
+def test_spec_lint_rejects_malformed_problem_registries(tmp_path, fault, diagnostic) -> None:
+    markdown = "#### RELO-P1 — Synthetic finding\n\nEvidence.\n"
+    document = {
+        "schema_version": "1",
+        "expected_count": 1,
+        "problems": [{
+            "id": "RELO-P1",
+            "markdown": markdown,
+            "markdown_sha256": hashlib.sha256(markdown.encode("utf-8")).hexdigest(),
+        }],
+    }
+    spec = tmp_path / "relo.md"
+    spec.write_text(
+        "**Version:** 1.0\n- **v1.0 — synthetic:** note\n\n"
+        "Canonical text: `governance/relo-problem-statements.yaml`.\n"
+        "RELO-P1 remains traceable.\n",
+        encoding="utf-8",
+    )
+    governance = tmp_path / "governance"
+    governance.mkdir()
+    registry = governance / "relo-problem-statements.yaml"
+    if fault == "missing":
+        pass
+    elif fault == "utf8":
+        registry.write_bytes(b"\xff")
+    elif fault == "yaml":
+        registry.write_text("a: [", encoding="utf-8")
+    else:
+        if fault == "schema":
+            document["schema_version"] = "2"
+        elif fault == "count":
+            document["expected_count"] = 0
+        elif fault == "problems":
+            document["problems"] = {}
+        elif fault == "entry":
+            document["problems"] = [None]
+        elif fault == "id":
+            document["problems"][0]["id"] = "P1"
+        elif fault == "definition":
+            document["problems"][0]["markdown"] = "not a heading"
+        elif fault == "duplicate":
+            document["expected_count"] = 2
+            document["problems"].append(document["problems"][0].copy())
+        elif fault == "sequence":
+            second = document["problems"][0].copy()
+            second["id"] = "RELO-P3"
+            second["markdown"] = "#### RELO-P3 — Third\n"
+            second["markdown_sha256"] = hashlib.sha256(second["markdown"].encode("utf-8")).hexdigest()
+            document["expected_count"] = 2
+            document["problems"].append(second)
+        elif fault == "reference":
+            spec.write_text(spec.read_text(encoding="utf-8").replace("RELO-P1", "RELO-P2"), encoding="utf-8")
+        registry.write_text(json.dumps(document), encoding="utf-8")
+
+    result = lint_specification(spec)
+
+    assert result.passed is False
+    assert diagnostic in result.detail
+
+
+def test_spec_lint_validates_compacted_history_archive(tmp_path) -> None:
+    history = "old changelog line\n"
+    toc = "1. [Old](#old)\n"
+    archive_root = tmp_path / ".archive" / "specs"
+    archive_root.mkdir(parents=True)
+    archive = archive_root / "relo-history-through-v3.247.md"
+    archive_text = (
+        "# Archive\n\n"
+        f"**History lines:** 1\n**History SHA-256:** {hashlib.sha256(history.encode('utf-8')).hexdigest()}\n"
+        f"**TOC lines:** 1\n**TOC SHA-256:** {hashlib.sha256(toc.encode('utf-8')).hexdigest()}\n\n"
+        "## Changelog through v3.247\n\nold changelog line\n\n"
+        "## Previous table of contents\n\n1. [Old](#old)\n"
+    )
+    archive.write_text(archive_text, encoding="utf-8")
+    spec = tmp_path / "relo.md"
+    spec.write_text(
+        "**Version:** 1.0\n- **v1.0 — synthetic:** note\n\n"
+        "Earlier history and generated navigation: `.archive/specs/relo-history-through-v3.247.md`.\n",
+        encoding="utf-8",
+    )
+
+    valid = lint_specification(spec)
+    archive.write_text(archive_text.replace("old changelog line", "changed changelog line", 1), encoding="utf-8")
+    invalid = lint_specification(spec)
+
+    assert valid.passed is True
+    assert invalid.passed is False
+    assert "archived history hash mismatch" in invalid.detail
+
+
+@pytest.mark.parametrize(("fault", "diagnostic"), [
+    ("missing", "compaction archive is unavailable"),
+    ("utf8", "compaction archive is not valid UTF-8"),
+    ("metadata", "compaction archive metadata is missing or malformed"),
+    ("heading", "compaction archive section headings are missing"),
+    ("history_count", "archived history line count mismatch"),
+    ("toc_count", "archived table-of-contents line count mismatch"),
+    ("toc_hash", "archived table-of-contents hash mismatch"),
+])
+def test_spec_lint_rejects_malformed_compaction_archives(tmp_path, fault, diagnostic) -> None:
+    history = "old\n"
+    toc = "1. [Old](#old)\n"
+    archive_root = tmp_path / ".archive" / "specs"
+    archive_root.mkdir(parents=True)
+    archive = archive_root / "relo-history-through-v3.247.md"
+    archive_text = (
+        "# Archive\n\n"
+        f"**History lines:** 1\n**History SHA-256:** {hashlib.sha256(history.encode('utf-8')).hexdigest()}\n"
+        f"**TOC lines:** 1\n**TOC SHA-256:** {hashlib.sha256(toc.encode('utf-8')).hexdigest()}\n\n"
+        "## Changelog through v3.247\n\nold\n\n"
+        "## Previous table of contents\n\n1. [Old](#old)\n"
+    )
+    spec = tmp_path / "relo.md"
+    spec.write_text(
+        "**Version:** 1.0\n- **v1.0 — synthetic:** note\n\n"
+        "Earlier history and generated navigation: `.archive/specs/relo-history-through-v3.247.md`.\n",
+        encoding="utf-8",
+    )
+    if fault == "missing":
+        pass
+    elif fault == "utf8":
+        archive.write_bytes(b"\xff")
+    else:
+        if fault == "metadata":
+            archive_text = archive_text.replace("**History lines:** 1\n", "")
+        elif fault == "heading":
+            archive_text = archive_text.replace("## Previous table of contents", "## Other")
+        elif fault == "history_count":
+            archive_text = archive_text.replace("\nold\n\n", "\nold\nextra\n\n")
+        elif fault == "toc_count":
+            archive_text = archive_text.replace("1. [Old](#old)\n", "1. [Old](#old)\n2. [New](#new)\n")
+        elif fault == "toc_hash":
+            archive_text = archive_text.replace("**TOC SHA-256:** " + hashlib.sha256(toc.encode()).hexdigest(),
+                                                   "**TOC SHA-256:** " + "0" * 64)
+        archive.write_text(archive_text, encoding="utf-8")
+
+    result = lint_specification(spec)
+
+    assert result.passed is False
+    assert diagnostic in result.detail
+
+
 def _ready_work_package(identifier="RELO-W0.1"):
     return {
         "id": identifier,
@@ -1600,6 +2344,41 @@ def _write_work_package_fixture(tmp_path, cards, identifiers=("RELO-W0.1",), *, 
         encoding="utf-8",
     )
     return spec
+
+
+def test_work_package_lint_rejects_incompatible_w0_startability(tmp_path) -> None:
+    child_row = "| RELO-W0.12a | decision item | acceptance |"
+    child = {
+        "id": "RELO-W0.12a",
+        "class": "NEEDS_DECISION",
+        "status": "partial",
+        "blocking_decisions": ["RELO-D1"],
+        "current_slice": True,
+        "startability": "code_now",
+        "depends_on": [],
+        "definition": {
+            "parent_id": "RELO-W0.12",
+            "row": child_row,
+            "row_sha256": hashlib.sha256(child_row.encode("utf-8")).hexdigest(),
+        },
+    }
+    spec = _write_work_package_fixture(
+        tmp_path, [_ready_work_package("RELO-W0.12"), child],
+        identifiers=("RELO-W0.12",),
+    )
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace(
+            "### 11.3 Next\n",
+            "### 11.3 Next\n| **RELO-D1** | decision |\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is False
+    assert "startability is incompatible with class/status" in result.detail
 
 
 @pytest.mark.parametrize("covered", [False, True])
@@ -3182,3 +3961,214 @@ def test_verifier_cli_rejects_outside_work_package_path_without_mutation(tmp_pat
     assert supplied not in output.out + output.err
     assert {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
     assert outside.read_bytes() == outside_before
+
+def test_goal_traceability_rejects_unlinked_defined_requirement(tmp_path) -> None:
+    spec = _write_goal_traceability_spec(
+        tmp_path,
+        rows=_GOAL_ROWS.replace("RELO-NFR-01; ", ""),
+    )
+
+    result = lint_specification(spec)
+
+    assert result.passed is False
+    assert "missing goal requirement traceability row(s): RELO-NFR-01" in result.detail
+
+
+def test_goal_traceability_rejects_duplicate_goal_rows(tmp_path) -> None:
+    spec = _write_goal_traceability_spec(
+        tmp_path,
+        rows=_GOAL_ROWS + "\n| RELO-G1 | RELO-O1 | RELO-FR-01 |",
+    )
+
+    result = lint_specification(spec)
+
+    assert result.passed is False
+    assert "duplicate goal traceability row(s): RELO-G1" in result.detail
+
+
+@pytest.mark.parametrize("family", [
+    "goal", "objective", "functional", "nonfunctional",
+])
+def test_goal_traceability_rejects_duplicate_definition_ids(tmp_path, family) -> None:
+    spec = _write_goal_traceability_spec(tmp_path)
+    content = spec.read_text(encoding="utf-8")
+    replacements = {
+        "goal": (
+            "| **RELO-G2** | second |\n",
+            "| **RELO-G2** | second |\n| **RELO-G2** | duplicate |\n",
+            "duplicate goal definition",
+        ),
+        "objective": (
+            "| **RELO-O3** | three | evidence |\n",
+            "| **RELO-O3** | three | evidence |\n| **RELO-O3** | duplicate | evidence |\n",
+            "duplicate objective definition",
+        ),
+        "functional": (
+            "| **RELO-FR-02** | second |\n",
+            "| **RELO-FR-02** | second |\n| **RELO-FR-02** | duplicate |\n",
+            "duplicate requirement definition",
+        ),
+        "nonfunctional": (
+            "| **RELO-NFR-01 — Safety** | safety |\n",
+            "| **RELO-NFR-01 — Safety** | safety |\n"
+            "| **RELO-NFR-01 — Duplicate** | duplicate |\n",
+            "duplicate requirement definition",
+        ),
+    }
+    original, replacement, diagnostic = replacements[family]
+    spec.write_text(content.replace(original, replacement), encoding="utf-8")
+
+    result = lint_specification(spec)
+
+    assert result.passed is False
+    assert diagnostic in result.detail
+
+
+def _write_semantic_traceability_fixture(tmp_path):
+    governance = tmp_path / "governance"
+    governance.mkdir()
+    (tmp_path / "specs").mkdir()
+    (tmp_path / "existing.py").write_text("# synthetic\n", encoding="utf-8")
+    (tmp_path / "specs" / "re-vertex.md").write_text(
+        "# W0.12 semantic traceability\n", encoding="utf-8",
+    )
+    definition_row = (
+        "| RELO-W0.12z | Trace semantic ownership | Existing verifier and tests | "
+        "Locally implemented: requirement, definition and evidence references agree |"
+    )
+    card = {
+        **_ready_work_package("RELO-W0.12z"),
+        "requirements": ["RELO-FR-22"],
+        "problems": ["RELO-P1"],
+        "authority_ref": "specs/re-vertex.md#w0-12-semantic-traceability",
+        "acceptance": [{"test": "tests/unit/test_verify_relo.py", "kind": "NEW"}],
+        "definition": {
+            "parent_id": "RELO-W0.12",
+            "row": definition_row,
+            "row_sha256": hashlib.sha256(definition_row.encode("utf-8")).hexdigest(),
+        },
+    }
+    ledger = governance / "relo-work-packages.yaml"
+    ledger.write_text(
+        json.dumps({"schema_version": "1", "work_items": [_ready_work_package("RELO-W0.12"), card]}),
+        encoding="utf-8",
+    )
+    problem = {
+        "schema_version": "1",
+        "expected_count": 1,
+        "problems": [{
+            "id": "RELO-P1",
+            "markdown": (
+                "#### RELO-P1 — Requirements are not delivery-traceable\n\n"
+                "Mappings remain explicit.\n"
+            ),
+            "markdown_sha256": hashlib.sha256(
+                (
+                    "#### RELO-P1 — Requirements are not delivery-traceable\n\n"
+                    "Mappings remain explicit.\n"
+                ).encode(),
+            ).hexdigest(),
+        }],
+    }
+    (governance / "relo-problem-statements.yaml").write_text(
+        json.dumps(problem), encoding="utf-8",
+    )
+    spec = tmp_path / "specs" / "relo.md"
+    spec.write_text(
+        "**Version:** 1.0\n- **v1.0 — synthetic:** note\n\n"
+        "## Table of Contents\n"
+        "## 4. Problems\n"
+        "Canonical text: `governance/relo-problem-statements.yaml`.\n\n"
+        "## 5. Requirements\n"
+        "### 5.5 Functional requirements\n"
+        "| ID | Requirement |\n|---|---|\n"
+        "| RELO-FR-22 | Trace delivery |\n"
+        "## 11. Work\n"
+        "### 11.1 Phase RELO-0\n"
+        "| ID | Work item |\n|---|---|\n"
+        "| RELO-W0.12 | Verify traceability |\n"
+        "## 19. Traceability\n"
+        "### 19.2 Requirement-to-delivery traceability\n"
+        "| Requirement | Work items | Gate | Primary test/evidence | Phase |\n"
+        "|---|---|---|---|---|\n"
+        "| RELO-FR-22 | W0.12z | All | `tests/unit/test_verify_relo.py` | RELO-0 |\n"
+        "### 19.3 Audit-to-work traceability\n"
+        "| Audit finding | Requirement/workstream | Acceptance evidence |\n"
+        "|---|---|---|\n"
+        "| Missing delivery trace | RELO-P1, W0.12z | declared verifier mapping |\n",
+        encoding="utf-8",
+    )
+    return spec, ledger
+
+
+def test_semantic_traceability_accepts_exact_cross_file_mapping(tmp_path) -> None:
+    spec, _ = _write_semantic_traceability_fixture(tmp_path)
+
+    results = (lint_specification(spec), lint_work_packages(tmp_path, spec_path=spec))
+
+    assert all(result.passed for result in results), results
+
+
+@pytest.mark.parametrize(("fault", "diagnostic"), [
+    ("missing_work", "missing work-item coverage"),
+    ("duplicate_requirement", "duplicate"),
+    ("orphan_child", "orphan semantic traceability"),
+    ("unresolved_requirement", "unresolved"),
+    ("missing_evidence", "evidence"),
+    ("duplicate_definition", "duplicate"),
+    ("duplicate_problem", "duplicate"),
+    ("missing_problem", "missing"),
+    ("citation", "citation"),
+    ("hash", "definition owner"),
+])
+def test_semantic_traceability_rejects_incomplete_or_ambiguous_mapping(
+    tmp_path, fault, diagnostic,
+) -> None:
+    spec, ledger = _write_semantic_traceability_fixture(tmp_path)
+    document = json.loads(ledger.read_text(encoding="utf-8"))
+    card = document["work_items"][1]
+    content = spec.read_text(encoding="utf-8")
+    if fault == "missing_work":
+        content = content.replace(
+            "| RELO-W0.12 | Verify traceability |\n",
+            "| RELO-W0.12 | Verify traceability |\n| RELO-W0.13 | Other work |\n",
+        ).replace("W0.12z | All", "W0.13 | All")
+    elif fault == "duplicate_requirement":
+        row = (
+            "| RELO-FR-22 | W0.12z | All | `tests/unit/test_verify_relo.py` | RELO-0 |\n"
+        )
+        content = content.replace(row, row + row)
+    elif fault == "orphan_child":
+        card.pop("requirements")
+    elif fault == "unresolved_requirement":
+        card["requirements"] = ["RELO-FR-99"]
+    elif fault == "missing_evidence":
+        content = content.replace("`tests/unit/test_verify_relo.py`", "declared verifier evidence")
+    elif fault == "duplicate_definition":
+        content = content.replace(
+            "| RELO-W0.12 | Verify traceability |\n",
+            "| RELO-W0.12 | Verify traceability |\n| RELO-W0.12z | Duplicate owner |\n",
+        )
+    elif fault == "duplicate_problem":
+        row = (
+            "| Missing delivery trace | RELO-P1, W0.12z | declared verifier mapping |\n"
+        )
+        content = content.replace(row, row + row)
+    elif fault == "missing_problem":
+        content = content.replace(
+            "| Missing delivery trace | RELO-P1, W0.12z | declared verifier mapping |\n",
+            "",
+        )
+    elif fault == "citation":
+        card["authority_ref"] = "specs/missing.md#traceability"
+    else:
+        card["definition"]["row_sha256"] = "0" * 64
+    spec.write_text(content, encoding="utf-8")
+    ledger.write_text(json.dumps(document), encoding="utf-8")
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    results = (lint_specification(spec), lint_work_packages(tmp_path, spec_path=spec))
+
+    assert diagnostic in "; ".join(result.detail for result in results)
+    assert any(not result.passed for result in results)
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before

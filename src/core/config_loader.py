@@ -118,6 +118,7 @@ class ReviewSettings:
     reviewers: tuple[ReviewerSettings, ...]
     required: bool
     reply_origin_verifier_principals: tuple[str, ...] = ()
+    knowledge_review_principals: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1199,6 +1200,10 @@ def load_review_config(path: Path) -> ReviewSettings:
         reply_origin_verifier_principals=_parse_string_tuple(
             raw_review.get("reply_origin_verifier_principals"),
             field_name="reply_origin_verifier_principals", path=path,
+        ),
+        knowledge_review_principals=_parse_string_tuple(
+            raw_review.get("knowledge_review_principals"),
+            field_name="knowledge_review_principals", path=path,
         ),
     )
 

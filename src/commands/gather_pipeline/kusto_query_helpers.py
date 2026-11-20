@@ -14,7 +14,6 @@ from src.commands.gather_pipeline.support import (
     parse_date,
     roll_query_value_history,
 )
-from src.commands.gather_workiq_helpers import _truncate_signal_text
 from src.core.integration_types import KustoResultSet
 from src.core.kusto_hydration import compute_kusto_slo_breach
 from src.core.kusto_ref_utils import extract_kusto_entity_refs as _extract_kusto_entity_refs
@@ -152,6 +151,9 @@ def extract_kusto_query_numeric_value(query: KustoQuery, rows: list[dict[str, An
         result_limits=query.result_limits,
     ):
         return None
+    if query.engine == "kusto" and query.metric_id is None:
+        if len(rows) != 1 or query.result_column is None:
+            return None
     value = kusto_kpi_value(query, rows[0])
     if query.metric_id is not None:
         return coerce_metric_value(value)
@@ -217,27 +219,17 @@ def build_kusto_signal(
 
 
 def summarize_kusto_rows(query: KustoQuery, rows: list[dict[str, Any]], *, as_of: datetime) -> str:
-    if query.metric_id is not None:
-        observed_value = extract_kusto_query_numeric_value(query, rows)
-        return format_kusto_result_text(KustoResultSet(
-            query_id=query.id,
-            rows=tuple(rows),
-            observed_at=as_of,
-            metric_id=query.metric_id,
-            result_column=query.result_column,
-            unit=query.unit,
-            slo_target=query.slo_target,
-            comparison=query.comparison,
-            observed_value=observed_value,
-            is_breach=compute_kusto_slo_breach(observed_value, query.slo_target, query.comparison),
-        ))
-    first_row = rows[0]
-    preview_parts: list[str] = []
-    for key, value in first_row.items():
-        if value in (None, ""):
-            continue
-        preview_parts.append(f"{key}={value}")
-        if len(preview_parts) == 3:
-            break
-    preview = ", ".join(preview_parts) if preview_parts else "rows available"
-    return _truncate_signal_text(f"Kusto {query.id} returned {len(rows)} row(s): {preview}")
+    observed_value = extract_kusto_query_numeric_value(query, rows)
+    return format_kusto_result_text(KustoResultSet(
+        query_id=query.id,
+        rows=tuple(rows),
+        observed_at=as_of,
+        metric_id=query.metric_id,
+        result_column=query.result_column,
+        unit=query.unit,
+        slo_target=query.slo_target,
+        comparison=query.comparison,
+        observed_value=observed_value,
+        is_breach=compute_kusto_slo_breach(observed_value, query.slo_target, query.comparison),
+        row_count=len(rows),
+    ))

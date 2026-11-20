@@ -35,7 +35,13 @@ from __future__ import annotations
 from html import escape
 from urllib.parse import urlparse
 
-from src.core.cockpit_models import CockpitFinding, CockpitSnapshot, select_cockpit_exceptions
+from src.core.cockpit_builder import build_cockpit_exception_views
+from src.core.cockpit_models import (
+    CockpitExceptionView,
+    CockpitFinding,
+    CockpitSnapshot,
+    select_cockpit_exceptions,
+)
 
 #: Section 10.3's "URLs and schemes are allowlisted."
 _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
@@ -65,19 +71,62 @@ def _safe_evidence_link(ref: str) -> str:
     return escape(ref)
 
 
-def _render_finding(finding: CockpitFinding, *, retained: bool = False) -> str:
+def _display(value: object | None) -> str:
+    return str(value) if value not in (None, "") else "not available"
+
+
+def _render_finding(
+    finding: CockpitFinding,
+    *,
+    retained: bool = False,
+    exception_view: CockpitExceptionView | None = None,
+) -> str:
     status_label = _STATUS_LABEL.get(finding.status, finding.status)
-    owner = escape(finding.owner) if finding.owner else "unassigned"
-    next_command = f"<code>{escape(finding.next_command)}</code>" if finding.next_command else "none"
+    owner = escape(finding.owner) if finding.owner else (
+        "not available" if exception_view is not None else "unassigned"
+    )
+    next_command = f"<code>{escape(finding.next_command)}</code>" if finding.next_command else (
+        "not available" if exception_view is not None else "none"
+    )
     evidence = (
         "".join(f"<li>{_safe_evidence_link(ref)}</li>" for ref in finding.evidence_refs)
         if finding.evidence_refs
-        else "<li>none</li>"
+        else f"<li>{'not available' if exception_view is not None else 'none'}</li>"
     )
     limitation = (
         "<p>Confidence, current authority, expiry/escalation, diff and expected effect: "
         "not available in this retained finding.</p>" if retained else ""
     )
+    next_command_field = (
+        ""
+        if exception_view is not None
+        else f"\n        <dt>Next command</dt><dd>{next_command}</dd>"
+    )
+    exception_fields = ""
+    if exception_view is not None:
+        safe_options = "".join(f"<li>{escape(option)}</li>" for option in exception_view.safe_options)
+        revalidation = (
+            f"<code>{escape(exception_view.revalidation_command)}</code>"
+            if exception_view.revalidation_command
+            else "not available"
+        )
+        next_label = (
+            "Historical next command (not current guidance)"
+            if retained
+            else "Next command (after safe revalidation)"
+        )
+        exception_fields = f"""
+        <dt>Exception class</dt><dd>{escape(exception_view.exception_class.value)}</dd>
+        <dt>Snapshot</dt><dd>generated {escape(exception_view.snapshot_generated_at.isoformat())};
+          input hash <code>{escape(exception_view.snapshot_input_hash)}</code></dd>
+        <dt>Confidence</dt><dd>{escape(_display(exception_view.confidence))}</dd>
+        <dt>Safe options</dt><dd><ul>{safe_options}</ul></dd>
+        <dt>Expected effect</dt><dd>{escape(exception_view.expected_effect)}</dd>
+        <dt>Diff / preview</dt><dd>{escape(_display(exception_view.diff_preview))}</dd>
+        <dt>{next_label}</dt><dd>{next_command}</dd>
+        <dt>Authority required</dt><dd>{escape(_display(exception_view.authority_required))}</dd>
+        <dt>Expiry / escalation</dt><dd>{escape(_display(exception_view.expiry_or_escalation))}</dd>
+        <dt>Safe revalidation</dt><dd>{revalidation}</dd>"""
     return f"""
     <li class="finding finding-{escape(finding.status)}">
       <span class="finding-status" aria-label="Status: {escape(status_label)}">[{escape(status_label)}]</span>
@@ -86,10 +135,9 @@ def _render_finding(finding: CockpitFinding, *, retained: bool = False) -> str:
       <dl>
         <dt>Finding ID</dt><dd>{escape(finding.finding_id)}</dd>
         <dt>Area</dt><dd>{escape(finding.area)}</dd>
-        <dt>Owner</dt><dd>{owner}</dd>
-        <dt>Next command</dt><dd>{next_command}</dd>
+        <dt>Owner</dt><dd>{owner}</dd>{next_command_field}
         <dt>Evidence</dt><dd><ul>{evidence}</ul></dd>
-        <dt>Observed</dt><dd>{escape(finding.observed_at.isoformat())}</dd>
+        <dt>Observed</dt><dd>{escape(finding.observed_at.isoformat())}</dd>{exception_fields}
       </dl>{limitation}
     </li>"""
 
@@ -101,11 +149,29 @@ def render_cockpit_html(snapshot: CockpitSnapshot, *, retained: bool = False) ->
     source = snapshot.source_summary
     value = snapshot.value_summary
     risk_color = _RISK_COLOR.get(program.overall_risk, "#57606a")
-    exceptions = select_cockpit_exceptions(snapshot.findings)
-    exceptions_html = "".join(_render_finding(f, retained=retained) for f in exceptions)
-    exceptions_html = exceptions_html or "<li>No blocked/warn findings in this retained snapshot</li>"
+    exception_views = build_cockpit_exception_views(snapshot, retained=retained)
+    exceptions_html = "".join(
+        _render_finding(
+            finding,
+            retained=retained,
+            exception_view=view,
+        )
+        for finding, view in zip(select_cockpit_exceptions(snapshot.findings), exception_views, strict=True)
+    )
+    exceptions_html = exceptions_html or (
+        "<li>No blocked/warn findings in this retained snapshot; this is not current clearance.</li>"
+        if retained
+        else (
+            "<li>No blocked/warn findings were projected at generation time; input completeness "
+            "and current clearance are not established.</li>"
+        )
+    )
     findings_html = "".join(
-        _render_finding(f, retained=retained) for f in snapshot.findings if f.status not in {"blocked", "warn"}
+        _render_finding(
+            f, retained=retained
+        )
+        for f in snapshot.findings
+        if f.status not in {"blocked", "warn"}
     ) or "<li>No findings.</li>"
     retained_notice = (
         "<p>Retained cockpit snapshot — Current source and action state not evaluated. "
@@ -162,7 +228,8 @@ def render_cockpit_html(snapshot: CockpitSnapshot, *, retained: bool = False) ->
     <h2 id="program-health">Program health</h2>
     <p><span class="risk-badge">{escape(program.overall_risk.upper())}</span>
        readiness {escape(readiness)} · {blocker_count} blocker(s)</p>
-    <p>Next action: {escape(program.next_action) if program.next_action else "none"}</p>
+    <p>{"Historical next action (not current guidance)" if retained else "Next action (after safe revalidation)"}:
+       {escape(program.next_action) if program.next_action else "none"}</p>
   </section>
   <section aria-labelledby="source-health">
     <h2 id="source-health">Source health</h2>
@@ -182,6 +249,10 @@ def render_cockpit_html(snapshot: CockpitSnapshot, *, retained: bool = False) ->
     <ul class="findings">{findings_html}</ul>
   </section>
 </main>
+<footer>
+  <p>Automated evidence does not establish independent human accessibility or operator proficiency.
+     Human accessibility and operator proficiency qualification: not established.</p>
+</footer>
 </body>
 </html>
 """

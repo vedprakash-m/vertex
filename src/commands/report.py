@@ -65,8 +65,8 @@ from src.ai.draft_reviewer import build_review_artifact, render_review_markdown,
 from src.commands.chart_gather import _scrub_pii_rows
 from src.commands.report_ai import _AIGeneratedSection, _AISynthesisResult, _DraftAIContext
 from src.commands.report_ai import _GuardedReviewEvidence
-from src.commands.report_ai import _build_draft_readiness
 from src.commands.report_ai import _edit_pattern_context_lines
+from src.commands.report_ai import _build_draft_readiness
 from src.commands.report_ai import _build_newsletter_narrative_covered_item_ids as _build_newsletter_narrative_covered_item_ids_impl
 from src.commands.report_ai import _build_newsletter_scoped_items as _build_newsletter_scoped_items_impl
 from src.commands.report_ai import _item_trajectory_points
@@ -245,7 +245,7 @@ from src.core.jinja_filters import build_anchor, configure_ado_web_url, configur
 from src.core.kusto_client import build_live_kusto_query_executor
 from src.core.kusto_query_loader import load_kpi_queries
 from src.core.kusto_rendering import KustoQueryExecutor, build_kusto_sections
-from src.core.manifest_writer import build_run_evidence_snapshot, build_run_manifest, chart_gate_evidence_sha256, write_run_manifest
+from src.core.manifest_writer import build_run_evidence_snapshot, build_run_manifest, chart_gate_evidence_sha256, hash_jsonable, write_run_manifest
 from src.core.narrative_store import build_workstream_narrative_history
 from src.core.notification_state_store import load_latest_notification_state
 from src.core.observability import RunLoggerAdapter, configure_file_logging, get_command_trace_path
@@ -305,6 +305,7 @@ from src.core.view_models import Citation, ContinuityJumpLink, ContinuityRenderD
 from src.core.view_models import RetrospectiveIntelligenceRow, RetrospectiveIntelligenceSummary, ScorecardData, Top3Item, WorkstreamData
 from src.core.voice_validator import find_voice_violations
 from src.core.models_v2 import Assumption, AssumptionStatus, DecisionEntry, DecisionStatus, Milestone, MilestoneAssessment, MilestoneStatus, RiskEntry, RiskStatus, Signal, Workstream
+from src.core.workspace_lease import cooperative_capture_fence
 from src.m365.graph_send_client import GraphMailMessage
 
 # re-export all assembly-stage identifiers so existing import sites
@@ -1184,6 +1185,8 @@ class _LookbackStage:
                 gather_run_id=ctx.gather_run_id,
                 gather_run_hash=ctx.gather_run_hash,
                 programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
+                kusto_query_executor=ctx.kusto_query_executor,
+                risk_entries=tuple(ctx.risks) if ctx.risks is not None else None,
             ),
         )
 
@@ -1222,40 +1225,62 @@ class _OutputStage:
         )
         if ctx.resolved_v2 is not None and ctx.fact_snapshot_pin is None:
             raise ConfigError("Report fact snapshot baseline is missing. Re-run the report.")
-        draft_fact_snapshot = _pin_program_fact_snapshot(
-            draft_program_id,
-            edition_name=ctx.edition_name,
-            issue_number=ctx.resolved_issue_number,
-            generated_at=ctx.started_at,
-            db_root=_runtime_db_root_for_reports(
-                ctx.reports_root, programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
-            ),
-            pin=ctx.fact_snapshot_pin,
-        )
         render_state = ctx.render_state
         validation_state = ctx.validation_state
-        if (ctx.gather_run_id, ctx.gather_run_hash) != (validation_state.manifest.gather_run_id, validation_state.manifest.gather_run_hash):
-            raise ConfigError("Run evidence gather aliases are inconsistent.")
-        capture = build_run_evidence_snapshot(
-            ctx.fact_snapshot_pin, ctx.fact_snapshot, ctx.gather_run_manifest,
-            validation_state.manifest, render_state.snapshot,
-            effective_family_modes=report_family_selectors(ctx),
-        ) if ctx.resolved_v2 is not None else None
-        if capture is not None:
-            verdict_observation = observe_program_verdict(
-                capture, render_state.snapshot, tuple((ctx.eta_forecasts or {}).values()),
-                risks=ctx.risks, risk_assessments=ctx.risk_assessments,
-                risk_warnings=ctx.risk_warnings, stale_risk_ids=ctx.stale_risk_ids,
-                milestones=ctx.milestones, milestone_assessments=ctx.milestone_assessments,
-                milestone_warnings=ctx.milestone_warnings,
+        draft_fact_snapshot = None
+        capture = None
+        if ctx.resolved_v2 is None:
+            db_root = _runtime_db_root_for_reports(
+                ctx.reports_root, programs_root=None
             )
-            validation_state = replace(validation_state, manifest=replace(
-                validation_state.manifest, metadata={
-                    **validation_state.manifest.metadata, "run_evidence_snapshot": capture,
-                    "program_verdict_observation": verdict_observation,
-                    "program_verdict_comparison": compare_report_health(render_state.health, verdict_observation),
-                },
-            ))
+            draft_fact_snapshot = _pin_program_fact_snapshot(
+                draft_program_id,
+                edition_name=ctx.edition_name,
+                issue_number=ctx.resolved_issue_number,
+                generated_at=ctx.started_at,
+                db_root=db_root,
+                pin=ctx.fact_snapshot_pin,
+            )
+        if ctx.resolved_v2 is not None:
+            assert draft_program_id is not None
+            db_root = _runtime_db_root_for_reports(ctx.reports_root, programs_root=ctx.programs_root)
+            fact_store = ProgramFactStore(draft_program_id, db_root=db_root)
+            with cooperative_capture_fence(fact_store.db_path):
+                draft_fact_snapshot = _pin_program_fact_snapshot(
+                    draft_program_id,
+                    edition_name=ctx.edition_name,
+                    issue_number=ctx.resolved_issue_number,
+                    generated_at=ctx.started_at,
+                    db_root=db_root,
+                    pin=ctx.fact_snapshot_pin,
+                )
+                if (ctx.gather_run_id, ctx.gather_run_hash) != (
+                    validation_state.manifest.gather_run_id,
+                    validation_state.manifest.gather_run_hash,
+                ):
+                    raise ConfigError("Run evidence gather aliases are inconsistent.")
+                capture = build_run_evidence_snapshot(
+                    ctx.fact_snapshot_pin, ctx.fact_snapshot, ctx.gather_run_manifest,
+                    validation_state.manifest, render_state.snapshot,
+                    effective_family_modes=report_family_selectors(ctx),
+                )
+                verdict_observation = observe_program_verdict(
+                    capture, render_state.snapshot, tuple((ctx.eta_forecasts or {}).values()),
+                    risks=ctx.risks, risk_assessments=ctx.risk_assessments,
+                    risk_warnings=ctx.risk_warnings, stale_risk_ids=ctx.stale_risk_ids,
+                    milestones=ctx.milestones, milestone_assessments=ctx.milestone_assessments,
+                    milestone_warnings=ctx.milestone_warnings,
+                )
+                validation_state = replace(validation_state, manifest=replace(
+                    validation_state.manifest, metadata={
+                        **validation_state.manifest.metadata,
+                        "run_evidence_snapshot": capture,
+                        "program_verdict_observation": verdict_observation,
+                        "program_verdict_comparison": compare_report_health(
+                            render_state.health, verdict_observation
+                        ),
+                    },
+                ))
         diff_summary = None
         if ctx.diff_mode and ctx.previous_dry_run_state is not None and ctx.evidence_by_item is not None:
             ado_lines = _build_draft_ado_diff_lines(
@@ -1282,22 +1307,30 @@ class _OutputStage:
         output_dir = get_program_output_dir(ctx.edition_name, programs_root=ctx.programs_root)
         output_dir.mkdir(parents=True, exist_ok=True)
         issue_dir = output_dir / f"issue_{ctx.resolved_issue_number:03d}"
-        quality_matrix_md_path = _write_output_text(
-            issue_dir / f"issue_{ctx.resolved_issue_number:03d}.quality_matrix.md",
-            render_quality_matrix_markdown(render_state.quality_matrix),
-        )
-        quality_matrix_json_path = _write_output_json(
-            issue_dir / f"issue_{ctx.resolved_issue_number:03d}.quality_matrix.json",
-            render_state.quality_matrix,
-        )
-        remediation_md_path = _write_output_text(
-            issue_dir / f"issue_{ctx.resolved_issue_number:03d}.remediation.md",
-            render_remediation_markdown(render_state.remediation_report),
-        )
-        remediation_json_path = _write_output_json(
-            issue_dir / f"issue_{ctx.resolved_issue_number:03d}.remediation.json",
-            render_state.remediation_report,
-        )
+        quality_matrix = getattr(render_state, "quality_matrix", None)
+        quality_matrix_md_path = None
+        quality_matrix_json_path = None
+        if quality_matrix is not None:
+            quality_matrix_md_path = _write_output_text(
+                issue_dir / f"issue_{ctx.resolved_issue_number:03d}.quality_matrix.md",
+                render_quality_matrix_markdown(quality_matrix),
+            )
+            quality_matrix_json_path = _write_output_json(
+                issue_dir / f"issue_{ctx.resolved_issue_number:03d}.quality_matrix.json",
+                quality_matrix,
+            )
+        remediation_report = getattr(render_state, "remediation_report", None)
+        remediation_md_path = None
+        remediation_json_path = None
+        if remediation_report is not None:
+            remediation_md_path = _write_output_text(
+                issue_dir / f"issue_{ctx.resolved_issue_number:03d}.remediation.md",
+                render_remediation_markdown(remediation_report),
+            )
+            remediation_json_path = _write_output_json(
+                issue_dir / f"issue_{ctx.resolved_issue_number:03d}.remediation.json",
+                remediation_report,
+            )
         workstream_snapshot_md_path, workstream_snapshot_json_path, workstream_associations_json_path = _write_workstream_snapshot_artifacts(
             program_id=(
                 ctx.resolved_v2.program.id
@@ -1395,6 +1428,11 @@ class _OutputStage:
                 override_snapshot=ctx.override_snapshot,
                 program_fact_snapshot=draft_fact_snapshot,
                 run_evidence_snapshot_sha256=capture.sha256 if capture is not None else None,
+                program_verdict_observation_sha256=(
+                    hash_jsonable(verdict_observation)
+                    if capture is not None and verdict_observation is not None
+                    else None
+                ),
                 chart_gate_evidence_sha256=(
                     chart_gate_evidence_sha256(
                         validation_state.manifest.manifest_id, validation_state.manifest.qg_results,

@@ -463,7 +463,7 @@ def _seed_trust_workspace(programs_root: Path) -> None:
     (program_dir / "_feedback" / "author_salience.yaml").write_text(
         "\n".join(
             (
-                'schema_version: "1.0"',
+                'schema_version: "2.0"',
                 'updated_at: "2026-05-20T11:00:00+00:00"',
                 'author_alias: "owner"',
                 'ema_alpha: 0.1',

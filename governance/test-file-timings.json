@@ -588,9 +588,6 @@
     "golden/test_setup_preview.py": {
       "seconds": 0.004
     },
-    "golden/test_sprint_planner.py": {
-      "seconds": 0.015
-    },
     "golden/test_synthesize_snapshots.py": {
       "seconds": 0.12
     },
@@ -2349,9 +2346,6 @@
     "unit/test_local_file_enumerator_hydrator.py": {
       "seconds": 0.57
     },
-    "unit/test_long_horizon_relevance.py": {
-      "seconds": 0.015
-    },
     "unit/test_lt_deck_extractor.py": {
       "seconds": 0.012
     },
@@ -2540,9 +2534,6 @@
     },
     "unit/test_nudge_waiver_filtering.py": {
       "seconds": 0.009
-    },
-    "unit/test_object_lifecycle.py": {
-      "seconds": 0.021
     },
     "unit/test_observability.py": {
       "seconds": 0.044

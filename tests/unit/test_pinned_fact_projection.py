@@ -205,6 +205,44 @@ def test_unknown_and_other_program_pin_reject(store, monkeypatch) -> None:
         other.load_pinned_snapshot(pin.snapshot_id)
 
 
+def test_missing_members_recover_only_from_latest_identical_committed_pin(store) -> None:
+    store.append_fact(_fact(), recorded_at=NOW - timedelta(days=2))
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = NOW
+    with patch.object(program_fact_store, "datetime", clock):
+        predecessor = store.pin_snapshot(created_at=NOW - timedelta(days=2))
+        requested = store.pin_snapshot(created_at=NOW - timedelta(days=1))
+    with store._connect() as connection:
+        connection.execute(
+            "DELETE FROM program_fact_snapshot_members WHERE snapshot_id = ?",
+            (requested.snapshot_id,),
+        )
+
+    loaded = store.load_pinned_snapshot(requested.snapshot_id)
+
+    assert loaded.recovered_from_snapshot_id == predecessor.snapshot_id
+    assert loaded.facts == store.load_pinned_snapshot(predecessor.snapshot_id).facts
+
+
+def test_missing_members_do_not_rebind_to_a_different_snapshot(store) -> None:
+    store.append_fact(_fact(), recorded_at=NOW - timedelta(days=2))
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = NOW
+    with patch.object(program_fact_store, "datetime", clock):
+        store.pin_snapshot(created_at=NOW - timedelta(days=2))
+    store.append_fact(_fact("a2"), recorded_at=NOW - timedelta(days=1))
+    with patch.object(program_fact_store, "datetime", clock):
+        requested = store.pin_snapshot(created_at=NOW)
+    with store._connect() as connection:
+        connection.execute(
+            "DELETE FROM program_fact_snapshot_members WHERE snapshot_id = ?",
+            (requested.snapshot_id,),
+        )
+
+    with pytest.raises(ConfigError, match="compatible committed predecessor"):
+        store.load_pinned_snapshot(requested.snapshot_id)
+
+
 @pytest.mark.parametrize("version", [None, 1, 2])
 def test_old_pins_cannot_exact_load_but_drift_stays_compatible(store, version) -> None:
     pin = _pin(store)

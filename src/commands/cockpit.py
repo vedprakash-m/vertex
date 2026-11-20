@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
+import re
 
 import typer
 
@@ -30,22 +31,25 @@ from src.core.proposal_autonomy_ladder import (
     demote_proposal_class_explicit,
     promote_proposal_class_explicit,
 )
-from src.core.cockpit_builder import build_cockpit_snapshot
+from src.core.cockpit_builder import build_cockpit_exception_views, build_cockpit_snapshot
 from src.core.cockpit_html import render_cockpit_html
 from src.core.cockpit_retention import rotate_cockpit_history
 from src.core.cockpit_models import (
+    CockpitExceptionView,
     CockpitFinding,
     CockpitSnapshot,
     ValueCockpitSummary,
     cockpit_history_filename,
+    cockpit_exception_view_to_json_dict,
     cockpit_snapshot_from_json_dict,
     cockpit_snapshot_to_json,
     cockpit_snapshot_to_json_dict,
+    compute_cockpit_input_hash,
     select_cockpit_exceptions,
 )
 from src.core.workspace_paths import is_bare_identifier
 from src.core.action_tracker import get_actions_path, load_actions
-from src.core.exception_queue import build_exception_queue
+from src.core.exception_queue import build_exception_queue, load_dispatch_exceptions
 from src.core.risk_register_engine import get_risk_register_path, load_risk_register
 from src.core.alerts import StateError, append_or_suppress_alert, read_alerts
 from src.core.edition_resolver import PROGRAMS_ROOT
@@ -76,6 +80,7 @@ _RETAINED_UNAVAILABLE = (
     "Confidence, current authority, expiry/escalation, diff and expected effect: "
     "not available in this retained finding."
 )
+_SAFE_INPUT_HASH = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _validate_cockpit_selection(program_id: str, programs_root: Path) -> None:
@@ -227,7 +232,8 @@ def _emit_value_baseline_freshness_alert_best_effort(
 
     Evaluates the freshly-built snapshot's ``value_summary`` measured metrics
     against the freshness (Section 15.6 "contemporaneously recorded") and
-    evidence (Section 8.1.8 ">= 8 matched pairs") contracts. Only
+    evidence (Section 8.1.8 ">= 8 matched pairs" and RELO-W6.2's confidence
+    lower bound) contracts. Only
     ``MEASUREDED``-confidence metrics are evaluated -- a ``CALIBRATED``/``PROXY``
     metric is already honestly labeled and cannot create the false confidence
     this category exists to catch (INV-ADF-11). Best-effort: a detection or
@@ -291,6 +297,7 @@ def find_nearest_history_snapshot(
         if (
             snapshot.program_id != program_id or snapshot.generated_at.tzinfo is None
             or snapshot.generated_at > at_utc or cockpit_history_filename(snapshot) != best_path.name
+            or compute_cockpit_input_hash(snapshot) != snapshot.input_hash
         ):
             raise ValueError("Snapshot identity or time mismatch")
         return snapshot
@@ -352,6 +359,22 @@ def render_cockpit_terminal(snapshot: CockpitSnapshot, *, retained: bool = False
         f"Data trust:            {source.required_healthy}/{source.required_total} required sources healthy; lineage {lineage}{synthesis_qualifier}",
         f"Value:                 {value_line}",
     ]
+    exception_views = build_cockpit_exception_views(snapshot, retained=retained)
+    if not retained and exception_views:
+        lines.append("Exceptions:")
+        lines.extend(
+            (
+                f"  [{view.status}] [{view.exception_class.value}] {view.finding_id}: {view.what_failed}; "
+                f"evidence={', '.join(view.evidence_refs) if view.evidence_refs else 'not available'}; "
+                f"revalidate={view.revalidation_command or 'not available'}"
+            )
+            for view in exception_views
+        )
+    if not retained:
+        lines.append(
+            "Human accessibility and operator proficiency qualification: "
+            "not established by automated evidence."
+        )
     if next_actions:
         lines.append("Next actions:")
         lines.extend(f"  - {command}" for command in next_actions)
@@ -359,15 +382,26 @@ def render_cockpit_terminal(snapshot: CockpitSnapshot, *, retained: bool = False
     if retained:
         lines.insert(0, _retained_heading(snapshot))
         lines[-1] += f" --as-of {snapshot.generated_at.isoformat()}"
-        lines.append("Exceptions:")
-        exceptions = select_cockpit_exceptions(snapshot.findings)
-        if not exceptions:
+    if retained or exception_views:
+        if retained:
+            lines.append("Exceptions:")
+        if retained and not exception_views:
             lines.append("No blocked/warn findings in this retained snapshot")
-        lines.extend(_render_finding_explanation(finding) + "\n" + _RETAINED_UNAVAILABLE for finding in exceptions)
+        if retained:
+            lines.extend(
+                _render_exception_explanation(view) + "\n" + _RETAINED_UNAVAILABLE
+                for view in exception_views
+            )
+    if retained:
         other_findings = [finding for finding in snapshot.findings if finding.status not in {"blocked", "warn"}]
         if other_findings:
             lines.append("Other findings:")
             lines.extend(_render_finding_explanation(finding) for finding in other_findings)
+    if retained:
+        lines.append(
+            "Human accessibility and operator proficiency qualification: "
+            "not established by automated evidence."
+        )
     return "\n".join(lines)
 
 
@@ -431,7 +465,7 @@ def cockpit_show(
             typer.echo("No retained cockpit snapshot at or before the requested time; evidence unavailable.", err=True)
             raise typer.Exit(code=1)
         if format == "json":
-            typer.echo(json.dumps(cockpit_snapshot_to_json_dict(snapshot), indent=2, sort_keys=True))
+            typer.echo(json.dumps(_cockpit_output_json_dict(snapshot, retained=True), indent=2, sort_keys=True))
         elif format == "html":
             typer.echo(render_cockpit_html(snapshot, retained=True))
         else:
@@ -479,7 +513,7 @@ def cockpit_show(
             pass
 
     if format == "json":
-        typer.echo(json.dumps(cockpit_snapshot_to_json_dict(snapshot), indent=2, sort_keys=True))
+        typer.echo(json.dumps(_cockpit_output_json_dict(snapshot), indent=2, sort_keys=True))
         return
     if first_run:
         typer.echo(_ONBOARDING_WALKTHROUGH)
@@ -535,12 +569,22 @@ def cockpit_explain(
     edition: str | None = typer.Option(None, "--edition", help="Optional edition id to scope this snapshot to."),
     finding: str = typer.Option(..., "--finding", help="finding_id to explain."),
     as_of: str | None = typer.Option(None, "--as-of", help="Explain a retained finding without rebuilding."),
+    expect_input_hash: str | None = typer.Option(
+        None,
+        "--expect-input-hash",
+        help="Require this SHA-256 hash when revalidating a retained snapshot; requires --as-of.",
+    ),
 ) -> None:
     """Section 10.4: full explainability for one finding. Renders every
     field ``CockpitFinding`` structurally carries; explicitly labels the
     two Section 10.4 fields it has no dedicated data for yet (calculation/
     rule, and what-Vertex-did-not-do) rather than fabricating content."""
     at = _parse_cockpit_time(as_of) if as_of is not None else None
+    if expect_input_hash is not None:
+        if at is None:
+            raise typer.BadParameter("--expect-input-hash requires --as-of for an exact retained snapshot.")
+        if _SAFE_INPUT_HASH.fullmatch(expect_input_hash) is None:
+            raise typer.BadParameter("--expect-input-hash must be a lowercase SHA-256 hex digest.")
     _validate_cockpit_selection(program, PROGRAMS_ROOT)
     snapshot = (
         _load_retained_cockpit(program, at) if at is not None
@@ -549,6 +593,10 @@ def cockpit_explain(
     if snapshot is None:
         typer.echo("No retained cockpit snapshot at or before the requested time; evidence unavailable.", err=True)
         raise typer.Exit(code=1)
+    if expect_input_hash is not None and snapshot.input_hash != expect_input_hash:
+        raise typer.BadParameter(
+            "Retained snapshot input hash does not match. Re-run the current cockpit and review the finding before acting."
+        )
     match = next((f for f in snapshot.findings if f.finding_id == finding), None)
     if match is None:
         scope = "retained" if at is not None else "current"
@@ -556,7 +604,19 @@ def cockpit_explain(
         raise typer.Exit(code=1)
     if at is not None:
         typer.echo(_retained_heading(snapshot))
-    typer.echo(_render_finding_explanation(match))
+    exception_view = next(
+        (
+            view
+            for view in build_cockpit_exception_views(snapshot, retained=at is not None)
+            if view.finding_id == match.finding_id
+        ),
+        None,
+    )
+    typer.echo(
+        _render_exception_explanation(exception_view)
+        if exception_view is not None
+        else _render_finding_explanation(match)
+    )
     if at is not None:
         typer.echo(_RETAINED_UNAVAILABLE)
 
@@ -576,6 +636,47 @@ def _render_finding_explanation(finding: CockpitFinding) -> str:
         "What Vertex did / did not do: not yet structured fields on CockpitFinding.",
     ]
     return "\n".join(lines)
+
+
+def _available(value: object | None) -> str:
+    return str(value) if value not in (None, "") else "not available"
+
+
+def _render_exception_explanation(view: CockpitExceptionView) -> str:
+    return "\n".join([
+        f"exception_class: {view.exception_class.value}",
+        f"Finding: {view.finding_id} ({view.area}, {view.status})",
+        f"What failed: {view.what_failed}",
+        f"Consequence: {view.consequence}",
+        f"Owner: {_available(view.owner)}",
+        f"Snapshot: generated {view.snapshot_generated_at.isoformat()}; hash {view.snapshot_input_hash}",
+        f"Evidence refs: {', '.join(view.evidence_refs) if view.evidence_refs else 'not available'}",
+        f"Confidence: {_available(view.confidence)}",
+        "Safe options:",
+        *(f"  {index}. {option}" for index, option in enumerate(view.safe_options, start=1)),
+        f"Expected effect: {view.expected_effect}",
+        f"Diff / preview: {_available(view.diff_preview)}",
+        f"Next command: {_available(view.next_command)}",
+        f"Authority required: {_available(view.authority_required)}",
+        f"Expiry / escalation: {_available(view.expiry_or_escalation)}",
+        f"Safe revalidation: {_available(view.revalidation_command)}",
+        f"Observed: {view.observed_at.isoformat()}",
+    ])
+
+
+def _cockpit_output_json_dict(
+    snapshot: CockpitSnapshot, *, retained: bool = False
+) -> dict[str, object]:
+    payload: dict[str, object] = cockpit_snapshot_to_json_dict(snapshot)
+    payload["exceptions"] = [
+        cockpit_exception_view_to_json_dict(view)
+        for view in build_cockpit_exception_views(snapshot, retained=retained)
+    ]
+    payload["qualification"] = {
+        "human_accessibility": "not established",
+        "operator_proficiency": "not established",
+    }
+    return payload
 
 
 @app.command("tui")
@@ -863,7 +964,15 @@ def cockpit_exceptions(
     risk_present = get_risk_register_path(program, PROGRAMS_ROOT).exists()
     actions_present = get_actions_path(program, PROGRAMS_ROOT).exists()
     actions = load_actions(program, PROGRAMS_ROOT, repair_corruption=False) if actions_present else ()
-    queue = build_exception_queue(load_risk_register(program, PROGRAMS_ROOT), actions, as_of_date)
+    dispatch_exceptions = load_dispatch_exceptions(
+        program, programs_root=PROGRAMS_ROOT, as_of=as_of_date,
+    )
+    queue = build_exception_queue(
+        load_risk_register(program, PROGRAMS_ROOT),
+        actions,
+        as_of_date,
+        dispatch_exceptions=dispatch_exceptions,
+    )
     lines = [f"Exception queue ({program}, as of {as_of_date.isoformat()}): {len(queue)}"]
     lines.extend(
         f"  {index}. [{item.kind}] {item.subject_id} ({item.age_days}d) {item.reason} <{item.evidence}>"
@@ -879,7 +988,7 @@ def cockpit_exceptions(
     if missing_inputs:
         lines.append(f"  Inputs not detected when checked: {', '.join(missing_inputs)}.")
     lines.append(
-        "  Scope: unassessed risks, overdue actions, and stale risks only; "
+        "  Scope: unresolved dispatch reconciliation, unassessed risks, overdue actions, and stale risks only; "
         "other exceptions and input completeness are not evaluated."
     )
     lines.append("  Risk exceptions use the risk register; primary judgment facts are not evaluated.")

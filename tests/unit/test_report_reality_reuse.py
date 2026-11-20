@@ -15,6 +15,7 @@ from src.core.program_fact_store import ProgramFactInput, ProgramFactSnapshot, P
 from src.core.program_reality import ProgramReality
 from src.core.stages import action_stage, milestone_stage, risk_stage, sor_gated_load, validation_stage
 from tests.unit.test_config_loader import _write_demo_v2_layout
+from tests.unit.test_risk_dedupe import _risk
 
 
 @pytest.fixture
@@ -79,6 +80,25 @@ def test_ordinary_stages_reduce_actual_loader_calls_and_preserve_risk_parity(
     assert loader.call_count == 1
     assert fresh_result.risk_assessments == tuple(reality.risks())
     assert fresh_result.milestone_assessments == ()
+
+
+def test_risk_stage_retains_merge_lifecycle_findings(
+    report_context, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, _, _, mode = report_context
+    mode.update(default="legacy", families={})
+    selected = (
+        _risk("old-a", title="Duplicate", superseded_by="new"),
+        _risk("old-b", title="Duplicate", superseded_by="new"),
+        _risk("new", title="Merged duplicate"),
+    )
+    monkeypatch.setattr(risk_stage, "_load_current_risks", Mock(return_value=selected))
+
+    result = risk_stage.RiskStage().execute(ctx)
+
+    assert result.risks == selected
+    assert any("supersede_merge: new, old-a, old-b" in warning for warning in result.risk_warnings)
+    assert any("duplicate: old-a, old-b" in warning for warning in result.risk_warnings)
 
 
 @pytest.mark.parametrize("change", [

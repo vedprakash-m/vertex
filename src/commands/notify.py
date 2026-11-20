@@ -18,8 +18,8 @@ from src.core.knowledge_store import KnowledgeStore, load_program_knowledge
 from src.core.models import NotificationRecord, NotifyPreview
 from src.core.models_v2 import DecisionAsk
 from src.m365.adaptive_card_renderer import AdaptiveCardRenderer
-from src.m365.graph_send_client import GraphMailMessage, GraphSendClient
-from src.m365.teams_webhook_client import TeamsWebhookClient
+from src.m365.graph_send_client import GraphMailMessage
+from src.m365.outbound_dispatch import dispatch_email_via_outbox, dispatch_teams_card_via_outbox
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -207,8 +207,7 @@ def send_notify_previews(
 
 
 def _send_notify_email(preview: NotifyPreview) -> NotificationRecord:
-    graph_client = GraphSendClient()
-    graph_client.send_mail(
+    dispatch_email_via_outbox(
         GraphMailMessage(
             to=preview.to,
             cc=preview.cc,
@@ -415,10 +414,10 @@ def _build_notify_adaptive_card_drafts(
 
 
 def _build_notify_teams_sender(webhook_url: str) -> NotifyCardSender:
-    client = TeamsWebhookClient(webhook_url=webhook_url)
+    del webhook_url
 
     def _sender(recipient_email: str, subject: str, payload: dict[str, Any]) -> NotificationRecord:
-        client.post_card(payload)
+        dispatch_teams_card_via_outbox(payload)
         return NotificationRecord(
             sent_at=datetime.now(timezone.utc),
             channel="teams",

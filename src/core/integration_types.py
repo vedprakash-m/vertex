@@ -332,6 +332,8 @@ class ADOHydrationOutput:
     relation_truncation: PaginationOutcome | None = None
     # RELO-W2.3: per-subresource checkpoints to commit with verification.
     checkpoint_advances: tuple[CheckpointAdvance, ...] = ()
+    checkpoint_evidence_ref_ids: tuple[tuple[str, str], ...] = ()
+    checkpoint_reseed_reasons: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,6 +398,27 @@ class EmailHydrationOutput:
     messages: tuple[EmailMessage, ...] = ()
 
 
+class KustoResultKind(str, Enum):
+    SCALAR = "scalar"
+    TABLE = "table"
+    TIME_SERIES = "time_series"
+
+
+@dataclass(frozen=True, slots=True)
+class KustoResultColumn:
+    name: str
+    type_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class KustoResultSchema:
+    kind: KustoResultKind
+    columns: tuple[KustoResultColumn, ...]
+    row_count: int
+    time_column: str | None = None
+    value_columns: tuple[str, ...] = ()
+
+
 @dataclass(frozen=True, slots=True)
 class KustoResultSet:
     query_id: str
@@ -414,6 +437,7 @@ class KustoResultSet:
     is_breach: bool | None = None
     is_partial: bool = False
     row_count: int | None = None
+    schema: KustoResultSchema | None = None
 
 
 @dataclass(frozen=True, slots=True)

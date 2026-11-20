@@ -52,7 +52,8 @@ from src.core.signal_classification import classify_signal as _classify_signal
 from src.core.store_factory import build_signal_store_for_program_id, build_trajectory_store_for_program_id, resolve_storage_backend
 from src.core.vitality_reporting import effective_vitality_exempt_aliases, vitality_settings_from_program
 from src.core.vitality_scorer import aggregate_vitality, freshness_days_for_policy, score_vitality
-from src.m365.graph_send_client import GraphMailMessage, GraphSendClient
+from src.m365.graph_send_client import GraphMailMessage
+from src.m365.outbound_dispatch import dispatch_email_via_outbox
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1569,7 +1570,7 @@ def _write_escalation_eml(
 
 def _send_escalation_email(preview: EscalationPreview, *, author_email: str) -> str | None:
     cc = (author_email,) if author_email.strip() else ()
-    GraphSendClient().send_mail(
+    dispatch_email_via_outbox(
         GraphMailMessage(
             to=preview.recipients,
             cc=cc,

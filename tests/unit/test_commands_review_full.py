@@ -720,7 +720,7 @@ def test_generate_review_full_renders_engms_reference_docs(repo_root: Path, tmp_
     (knowledge_dir / "engms_pages.yaml").write_text(
         "\n".join(
             (
-                'schema_version: "1.0"',
+                'schema_version: "2.0"',
                 "pages:",
                 "  - id: acme-readiness-spec",
                 "    title: Acme Readiness Spec",
@@ -2937,7 +2937,7 @@ def _seed_review_full_trust_state(programs_root: Path) -> None:
     (program_dir / "_feedback" / "author_salience.yaml").write_text(
         "\n".join(
             (
-                'schema_version: "1.0"',
+                'schema_version: "2.0"',
                 'updated_at: "2026-05-20T11:00:00+00:00"',
                 'author_alias: "owner"',
                 'ema_alpha: 0.1',

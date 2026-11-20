@@ -106,7 +106,8 @@ class FakeChangeFeed:
 
     ``inject_changes`` queues changed candidates; ``inject_tombstones`` queues
     deletions. Each call to ``changes`` drains one page and returns the next
-    delta_link (or ``None`` when caught up).
+    delta_link (or ``None`` when caught up). The supplied delta link identifies
+    the next fixture page, so persisted links resume the same way after restart.
     """
 
     entity_type: EntityType = EntityType.MESSAGE
@@ -130,6 +131,18 @@ class FakeChangeFeed:
         delta_link: str | None,
         correlation_id: str,
     ) -> PortResult[tuple[EnumeratedCandidate, ...]]:
+        if delta_link is not None:
+            resumed_index = next(
+                (
+                    index + 1
+                    for index, page in enumerate(self._pages)
+                    if page.delta_link == delta_link
+                ),
+                None,
+            )
+            if resumed_index is None:
+                return Incomplete((), reason="delta_link_not_found")
+            self._page_index = resumed_index
         if self._page_index >= len(self._pages):
             # No more changes — return a stable empty page.
             return Success(())

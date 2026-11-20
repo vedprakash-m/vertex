@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 
 LEGACY_DEPLOYMENT_ALIAS_NOTICE = "configure one of the supported Vertex deployment aliases."
 
@@ -18,9 +20,11 @@ from src.ai.client import (
     AIClientError,
     AIPreflightError,
     NON_RETRYABLE_AI_ERRORS,
+    _AttemptSequence,
     _FeatureBudgetState,
     open_cost_chain,
     run_in_cost_chain,
+    use_attempt_sequence,
 )
 from src.ai.llm_trace import AITraceContext
 from src.ai.provider import LLMProvider
@@ -46,10 +50,10 @@ def resolve_ai_deployments(
         deployments.append(primary)
 
     backup = _resolve_first_deployment(backup_candidates, fallback_envs=backup_fallback_envs)
-    if backup is not None and backup not in deployments:
+    if backup is not None:
         deployments.append(backup)
 
-    return tuple(deployments)
+    return tuple(dict.fromkeys(deployments))
 
 
 def resolve_ai_deployments_for_feature(
@@ -123,9 +127,8 @@ class FallbackAIClient:
         self._requests_per_minute = requests_per_minute
         self._trace_context = trace_context
         self._client_factory = client_factory or AIClient
-        self._feature_budget_state = (
-            _FeatureBudgetState() if self._client_factory is _BUILTIN_AI_CLIENT else None
-        )
+        self._feature_budget_state = _FeatureBudgetState()
+        self._attempt_sequence = _AttemptSequence()
         self._retryable_exceptions = retryable_exceptions or (AIClientError, RuntimeError)
         self._clients: dict[str, LLMProvider] = {}
         self._clients_lock = Lock()
@@ -134,6 +137,16 @@ class FallbackAIClient:
     def configured_deployments(self) -> tuple[str, ...]:
         """Return the configured fallback order, not the selected deployment."""
         return self._deployments
+
+    @property
+    def deployment(self) -> str:
+        """Return a stable identity for the complete frozen fallback chain."""
+        encoded = json.dumps(
+            self._deployments,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"fallback-chain.v1:{hashlib.sha256(encoded).hexdigest()}"
 
     def chat(
         self,
@@ -161,11 +174,15 @@ class FallbackAIClient:
         ))
 
     def _dispatch(self, system: str, user: str, max_tokens: int, invoke: Callable[[LLMProvider], ResultT]) -> ResultT:
-        failed: dict[str, BaseException] = {}
-        chain = self._open_cost_chain(failed)
-        return run_in_cost_chain(chain, lambda: self._fallback(invoke, failed))
+        with use_attempt_sequence(self._attempt_sequence):
+            failed: dict[int, BaseException] = {}
+            chain = self._open_cost_chain(failed)
+            return run_in_cost_chain(
+                chain,
+                lambda: self._fallback(invoke, failed),
+            )
 
-    def _open_cost_chain(self, failed: dict[str, BaseException]) -> Any:
+    def _open_cost_chain(self, failed: dict[int, BaseException]) -> Any:
         """Price the whole retry/fallback chain before the first dispatch (RELO-W1.4).
 
         The first constructible client prices every deployment; backups stay lazily
@@ -177,7 +194,7 @@ class FallbackAIClient:
             except NON_RETRYABLE_AI_ERRORS:
                 raise
             except self._retryable_exceptions as error:
-                failed[deployment] = error
+                failed[index] = error
                 continue
             try:
                 return open_cost_chain(primary, self._deployments[index:])
@@ -190,12 +207,16 @@ class FallbackAIClient:
                 ) from None
         return None
 
-    def _fallback(self, invoke: Callable[[LLMProvider], ResultT], failed: dict[str, BaseException]) -> ResultT:
+    def _fallback(
+        self,
+        invoke: Callable[[LLMProvider], ResultT],
+        failed: dict[int, BaseException],
+    ) -> ResultT:
         last_error: BaseException | None = None
 
-        for deployment in self._deployments:
-            if deployment in failed:
-                last_error = failed[deployment]
+        for index, deployment in enumerate(self._deployments):
+            if index in failed:
+                last_error = failed[index]
                 continue
             try:
                 return invoke(self._get_client(deployment))
@@ -228,10 +249,13 @@ class FallbackAIClient:
                 client_kwargs["requests_per_minute"] = self._requests_per_minute
             if self._trace_context is not None and _client_factory_supports_parameter(self._client_factory, "trace_context"):
                 client_kwargs["trace_context"] = self._trace_context
-            if self._feature_budget_state is not None:
+            if self._client_factory is _BUILTIN_AI_CLIENT:
                 client_kwargs["_feature_budget_state"] = self._feature_budget_state
+                client_kwargs["_attempt_sequence"] = self._attempt_sequence
 
             client = self._client_factory(**client_kwargs)
+            if isinstance(client, _BUILTIN_AI_CLIENT):
+                client._feature_budget_state = self._feature_budget_state
             self._clients[deployment] = client
             return client
 

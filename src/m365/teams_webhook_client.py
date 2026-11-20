@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from src.core.exceptions import AuthError, QueryError
+from src.core.actuation_outbox import require_dispatchable_operation
+from src.core.exceptions import AuthError, StateError
+from src.core.ledger.durable_outbox_store import OutboxError
 
 
 class TeamsWebhookClient:
@@ -15,33 +17,21 @@ class TeamsWebhookClient:
         self._webhook_url = normalized
 
     def post_card(self, payload: Mapping[str, Any]) -> None:
-        requests_module = _get_requests_module()
-        response = requests_module.post(
-            self._webhook_url,
-            headers={"Content-Type": "application/json"},
-            json=dict(payload),
-            timeout=30,
+        try:
+            require_dispatchable_operation("teams_message.v1")
+        except OutboxError as error:
+            raise StateError(
+                "Direct Teams webhook delivery is blocked: teams_message.v1 has no "
+                "qualified durable-outbox capability."
+            ) from error
+        raise StateError(
+            "Direct Teams webhook delivery is blocked; invoke the provider primitive "
+            "only from a qualified durable-outbox callback."
         )
 
-        if response.status_code in {200, 202}:
-            return
-        if response.status_code in {401, 403}:
-            raise AuthError(
-                "Teams webhook delivery was rejected. Verify the incoming webhook URL is still valid for the target channel."
-            )
-        if response.status_code in {404, 410}:
-            raise AuthError("Teams incoming webhook URL was not found. Recreate or update the configured webhook URL.")
-        if response.status_code == 429:
-            retry_after = response.headers.get("Retry-After", "?")
-            raise QueryError(f"429 Too Many Requests from Teams incoming webhook delivery (Retry-After: {retry_after}s).")
-        if response.status_code >= 500:
-            raise QueryError(f"{response.status_code} Server Error from Teams incoming webhook delivery: {response.text[:200]}")
-        raise QueryError(f"{response.status_code} Error from Teams incoming webhook delivery: {response.text[:200]}")
-
-
-def _get_requests_module() -> Any:
-    try:
-        import requests
-    except ImportError as error:
-        raise QueryError("Teams incoming webhook delivery requires requests, which is missing from the current environment.") from error
-    return requests
+    def _dispatch_qualified_card(self, payload: Mapping[str, Any]) -> None:
+        del payload
+        raise StateError(
+            "Teams provider dispatch is unavailable until an outbox callback is "
+            "separately qualified; no webhook request was attempted."
+        )

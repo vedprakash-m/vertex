@@ -96,7 +96,7 @@ def _comment_proposal() -> ADOUpdateProposal:
     )
 
 
-def test_ado_apply_add_comment_busy_lease_surfaces_as_failed_entry(tmp_path: Path) -> None:
+def test_ado_apply_add_comment_fails_at_outbox_boundary_before_lease(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     proposal = _comment_proposal()
     manifest_path = write_proposal_manifest(proposal, programs_root=programs_root)
@@ -111,12 +111,12 @@ def test_ado_apply_add_comment_busy_lease_surfaces_as_failed_entry(tmp_path: Pat
     assert artifacts.failed_count == 1
     assert artifacts.applied_count == 0
     entry = artifacts.proposal.entries[0]
-    assert "lease busy" in (entry.status_reason or "")
+    assert "outbox" in (entry.status_reason or "").lower()
     # The mutation was never actually issued while contended.
     assert client._session.calls == []
 
 
-def test_ado_rollback_add_comment_busy_lease_surfaces_as_failed_result(tmp_path: Path) -> None:
+def test_ado_rollback_add_comment_fails_at_outbox_boundary_before_lease(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     proposal = _comment_proposal()
     applied_entry = ADOUpdateEntry(
@@ -144,7 +144,7 @@ def test_ado_rollback_add_comment_busy_lease_surfaces_as_failed_result(tmp_path:
     assert artifacts.failed_count == 1
     result = artifacts.results[0]
     assert result.status == "failed"
-    assert "lease busy" in (result.status_reason or "")
+    assert "outbox" in (result.status_reason or "").lower()
     assert client._session.calls == []
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import operator as _operator
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -16,11 +17,13 @@ from src.core.integration_types import (
     HydrationResult,
     IntegrationError,
     KustoHydrationOutput,
+    KustoResultSchema,
     KustoResultSet,
     ProviderCapability,
 )
 from src.core.kusto_client import build_live_kusto_query_executor
 from src.core.kusto_query_loader import load_kpi_queries
+from src.core.kusto_result_contract import admit_kusto_execution
 from src.core.kusto_templates import KustoTemplateContext, render_kusto_query
 from src.core.metric_binding_validator import coerce_metric_value, kusto_metric_result_error
 from src.core.models_v2 import KustoQuery, Program, Workstream
@@ -31,6 +34,23 @@ class _QueryExecution:
     rows: list[dict[str, Any]] | None
     error: str | None
     timed_out: bool = False
+    cancelled: bool = False
+    schema: KustoResultSchema | None = None
+
+
+class KustoCancellationToken:
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._event.wait(timeout)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,9 +67,19 @@ class KustoHydrationConfig:
 
 
 class KustoHydrationProvider:
-    def __init__(self, executor: Callable[[KustoQuery], list[dict[str, Any]]] | None = None, query_loader=load_kpi_queries):
-        self._executor = executor or build_live_kusto_query_executor()
+    def __init__(
+        self,
+        executor: Callable[[KustoQuery], list[dict[str, Any]] | KustoResultSet] | None = None,
+        query_loader=load_kpi_queries,
+        *,
+        cancellable_executor: Callable[
+            [KustoQuery, KustoCancellationToken],
+            list[dict[str, Any]] | KustoResultSet,
+        ] | None = None,
+    ):
+        self._executor = executor or build_live_kusto_query_executor(typed=True)
         self._query_loader = query_loader
+        self._cancellable_executor = cancellable_executor
 
     @classmethod
     def from_program(
@@ -178,7 +208,11 @@ class KustoHydrationProvider:
                 )
                 continue
             normalized_rows = tuple(_normalize_kusto_row(row) for row in execution.rows or ())
-            observed_value = _extract_observed_value(normalized_rows, query.result_column)
+            observed_value = (
+                _extract_observed_value(normalized_rows, query.result_column)
+                if query.metric_id is not None
+                else None
+            )
             result_sets.append(
                 KustoResultSet(
                     query_id=registration.ref_id,
@@ -197,6 +231,7 @@ class KustoHydrationProvider:
                     observed_value=observed_value,
                     is_breach=compute_kusto_slo_breach(observed_value, query.slo_target, query.comparison),
                     row_count=len(normalized_rows),
+                    schema=execution.schema,
                 )
             )
             hydrated_ref_ids.append((registration.ref_id, registration.ref_kind))
@@ -248,19 +283,37 @@ class KustoHydrationProvider:
             return executions
         max_workers = min(config.max_concurrency, len(runnable))
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="kusto-query")
-        future_to_ref_id = {
-            executor.submit(self._run_one, registration, query, program_id, config): registration.ref_id
-            for registration, query in runnable
-        }
+        future_to_ref_id: dict[concurrent.futures.Future[_QueryExecution], str] = {}
+        future_to_token: dict[concurrent.futures.Future[_QueryExecution], KustoCancellationToken] = {}
+        for registration, query in runnable:
+            token = KustoCancellationToken()
+            future = executor.submit(
+                self._run_one,
+                registration,
+                query,
+                program_id,
+                config,
+                token,
+            )
+            future_to_ref_id[future] = registration.ref_id
+            future_to_token[future] = token
         try:
             for future, ref_id in future_to_ref_id.items():
                 try:
                     executions[ref_id] = future.result(timeout=config.per_query_timeout_seconds)
                 except concurrent.futures.TimeoutError:
+                    token = future_to_token[future]
+                    token.cancel()
+                    future.cancel()
                     executions[ref_id] = _QueryExecution(
                         rows=None,
-                        error=f"Kusto query '{ref_id}' exceeded its {config.per_query_timeout_seconds}s per-query budget.",
+                        error=(
+                            f"Kusto query '{ref_id}' exceeded its "
+                            f"{config.per_query_timeout_seconds}s per-query budget; "
+                            "adapter execution was cancelled."
+                        ),
                         timed_out=True,
+                        cancelled=token.cancelled,
                     )
                 except Exception as error:  # pragma: no cover - _run_one already catches provider errors
                     executions[ref_id] = _QueryExecution(rows=None, error=str(error))
@@ -274,6 +327,7 @@ class KustoHydrationProvider:
         query: KustoQuery,
         program_id: str,
         config: KustoHydrationConfig,
+        cancellation: KustoCancellationToken | None = None,
     ) -> _QueryExecution:
         rendered_query = render_kusto_query(
             query,
@@ -284,10 +338,20 @@ class KustoHydrationProvider:
             ),
         )
         try:
-            rows = self._executor(rendered_query)
+            execution = (
+                self._cancellable_executor(rendered_query, cancellation or KustoCancellationToken())
+                if self._cancellable_executor is not None
+                else self._executor(rendered_query)
+            )
+            rows, schema = admit_kusto_execution(
+                execution,
+                query_id=rendered_query.id,
+                expected_cardinality=rendered_query.expected_cardinality,
+                result_limits=rendered_query.result_limits,
+            )
         except Exception as error:
             return _QueryExecution(rows=None, error=str(error))
-        return _QueryExecution(rows=rows, error=None)
+        return _QueryExecution(rows=rows, error=None, schema=schema)
 
 
 def _normalize_kusto_row(row: dict[str, Any]) -> dict[str, str | int | float | bool | None]:

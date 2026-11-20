@@ -20,7 +20,7 @@ Commands:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,18 +30,39 @@ from src.ai.rev.extractor import DeterministicRevExtractor, LLMRevExtractor, LLM
 from src.ai.rev.verification import run_layered_verification
 from src.core.config_loader import PROGRAMS_ROOT
 from src.core.edition_resolver import load_program
+from src.core.knowledge_store import load_program_knowledge, select_engms_pages
 from src.core.models_v2 import REV_PROFILE_LEGACY_NL, REV_PROFILE_REV_VERIFIED, REV_PROFILE_SEARCH_HYDRATE, RevRetrievalProfile
 from src.core.rev.entity_types import EntityType
 from src.core.rev.governor import BudgetLimits
 from src.core.rev.pipeline import RevPipelineDeps, run_rev_cycle
 from src.core.rev.prompt_shields import LocalOnlyPromptShields, PromptShields
 from src.core.rev.query_planner import RetrievalIntent
+from src.core.rev.result import Incomplete, Success
+from src.m365.agency_bridge import AgencyBridge
 from src.m365.rev import FakeRevGraphClient, GraphMessage
 from src.core.rev.ports import CandidateEnumerator, ContentHydrator
 from src.m365.rev.eml_enumerator import EmlEnumerator
 from src.m365.rev.eml_hydrator import EmlHydrator
 from src.m365.rev.local_file_enumerator import LocalFileEnumerator
 from src.m365.rev.local_file_hydrator import LocalFileHydrator
+from src.m365.rev.sharepoint_enumerator import SharePointEnumerator
+from src.m365.rev.sharepoint_hydrator import (
+    FakeRevSharePointClient,
+    GraphDriveItem,
+    SharePointContext,
+    SharePointHydrator,
+)
+from src.m365.rev.workiq_enumerator import (
+    WorkIQContext,
+    WorkIQEnumerator,
+    WorkIQHydrator,
+    WorkIQQueryPage,
+)
+from src.m365.workiq_ask_support import (
+    DiscoveryRequest,
+    build_structured_discovery_question,
+    validate_structured_discovery_payload_with_diagnostics,
+)
 
 
 def _resolve_shields() -> PromptShields:
@@ -81,7 +102,9 @@ P0_SPIKE_NOTE = (
     "Supply --eml-inbox <dir> to process locally-exported .eml files, "
     "--ics-inbox <dir> to process locally-exported .ics calendar files, "
     "--docs-inbox <dir> to process locally-downloaded .docx/.pdf files, or "
-    "--mock-fixture <path> for a JSON fixture walking skeleton."
+    "--mock-fixture <path> for a JSON fixture walking skeleton. "
+    "Bounded WorkIQ or fixture-backed SharePoint acquisition is available through "
+    "--workiq or --sharepoint-fixture."
 )
 
 # Local-import inbox README written by ``vertex rev init-inbox`` (P1-5).
@@ -185,6 +208,69 @@ def _resolve_profile(program_id: str, override: str | None, *, programs_root: Pa
     return RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE)
 
 
+def _parse_acquisition_date(value: str | None, *, label: str) -> date | None:
+    if value is None:
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise typer.BadParameter(f"{label} must be YYYY-MM-DD") from None
+    if parsed.isoformat() != value:
+        raise typer.BadParameter(f"{label} must be YYYY-MM-DD")
+    return parsed
+
+
+def _load_sharepoint_fixture(path: Path) -> dict[str, GraphDriveItem]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise typer.BadParameter(
+            f"Could not read --sharepoint-fixture {str(path)!r} ({type(error).__name__})."
+        ) from None
+    rows = document.get("items") if isinstance(document, dict) else None
+    if not isinstance(rows, list):
+        raise typer.BadParameter("--sharepoint-fixture must contain an 'items' array.")
+    items: dict[str, GraphDriveItem] = {}
+    for position, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise typer.BadParameter(f"SharePoint fixture item {position} must be an object.")
+        page_id = row.get("page_id")
+        item_id = row.get("item_id")
+        drive_id = row.get("drive_id")
+        if (
+            not isinstance(page_id, str)
+            or not page_id.strip()
+            or not isinstance(item_id, str)
+            or not item_id.strip()
+            or not isinstance(drive_id, str)
+            or not drive_id.strip()
+            or page_id.strip() in items
+        ):
+            raise typer.BadParameter(
+                f"SharePoint fixture item {position} needs unique page_id, item_id and drive_id."
+            )
+        content_text = row.get("content_text") or ""
+        if not isinstance(content_text, str):
+            raise typer.BadParameter(
+                f"SharePoint fixture item {position} content_text must be a string."
+            )
+        content = content_text.encode("utf-8")
+        items[page_id.strip()] = GraphDriveItem(
+            item_id=item_id.strip(),
+            drive_id=drive_id.strip(),
+            name=str(row.get("name") or item_id),
+            web_url=str(row.get("web_url") or ""),
+            etag=str(row.get("etag") or ""),
+            mime_type=str(row.get("mime_type") or "text/plain"),
+            file_content=content,
+            size=len(content),
+            last_modified=str(row.get("last_modified") or ""),
+            site_id=str(row.get("site_id") or ""),
+            parent_path=str(row.get("parent_path") or ""),
+        )
+    return items
+
+
 @app.command("run")
 def rev_run(
     program: str = typer.Option(..., "--program", "-p", help="Program ID."),
@@ -197,6 +283,13 @@ def rev_run(
     limit: int = typer.Option(25, "--limit", help="Max candidates to enumerate."),
     profile: str | None = typer.Option(None, "--profile", help="Override REV profile: legacy_nl | search_hydrate | rev_verified."),
     mock_fixture: Path | None = typer.Option(None, "--mock-fixture", help="JSON fixture of messages for the P1 walking skeleton (no live consent)."),
+    workiq: bool = typer.Option(False, "--workiq", help="Use bounded WorkIQ re-query through the existing REV ports."),
+    workiq_query: str | None = typer.Option(None, "--workiq-query", help="Use cursor-checkpointed WorkIQ search through the REV ports."),
+    from_date: str | None = typer.Option(None, "--from-date", help="ISO date lower bound for --workiq."),
+    to_date: str | None = typer.Option(None, "--to-date", help="ISO date upper bound for --workiq."),
+    workiq_window_days: int = typer.Option(7, "--workiq-window-days", min=1, max=28, help="Days per bounded WorkIQ query window."),
+    workiq_max_windows: int = typer.Option(4, "--workiq-max-windows", min=1, max=4, help="Maximum WorkIQ query windows."),
+    sharepoint_fixture: Path | None = typer.Option(None, "--sharepoint-fixture", help="Local synthetic SharePoint drive-item fixture used through the REV enumerator/hydrator ports."),
     eml_inbox: Path | None = typer.Option(None, "--eml-inbox", help="Directory containing locally-exported .eml files (inbox/ dir for EmlEnumerator)."),
     ics_inbox: Path | None = typer.Option(None, "--ics-inbox", help="Directory containing locally-exported .ics calendar files (inbox/ dir for IcsEnumerator). W6-1."),
     docs_inbox: Path | None = typer.Option(None, "--docs-inbox", help="Directory containing locally-downloaded .docx/.pdf files (inbox/ dir for LocalFileEnumerator). P3-5."),
@@ -204,9 +297,25 @@ def rev_run(
     programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
 ) -> None:
     """Run one REV retrieval cycle and stage candidates for triage."""
-    if mock_fixture is None and eml_inbox is None and ics_inbox is None and docs_inbox is None:
+    selected_sources = sum(
+        source is not None or enabled
+        for source, enabled in (
+            (mock_fixture, False),
+            (eml_inbox, False),
+            (ics_inbox, False),
+            (docs_inbox, False),
+            (None, workiq),
+            (workiq_query, False),
+            (sharepoint_fixture, False),
+        )
+    )
+    if selected_sources == 0:
         typer.echo(P0_SPIKE_NOTE)
         raise typer.Exit(code=2)
+    if selected_sources > 1:
+        raise typer.BadParameter(
+            "Select exactly one REV source: mock fixture, local inbox, WorkIQ, or SharePoint fixture."
+        )
 
     retrieval_profile = _resolve_profile(program, profile, programs_root=programs_root)
 
@@ -236,23 +345,224 @@ def rev_run(
         typer.echo(f"Error: unknown --extractor '{extractor}'. Choose: deterministic | llm", err=True)
         raise typer.Exit(code=2)
 
+    acquisition_from = _parse_acquisition_date(from_date, label="--from-date")
+    acquisition_to = _parse_acquisition_date(to_date, label="--to-date")
+    _enumerator: CandidateEnumerator
+    _hydrator: ContentHydrator
+    if workiq_query is not None:
+        configured_program = load_program(program, programs_root=programs_root)
+        retrieval = configured_program.m365.retrieval if (
+            configured_program is not None
+            and configured_program.m365 is not None
+            and configured_program.m365.retrieval is not None
+        ) else None
+        acquisition_to = datetime.now(timezone.utc).date()
+        lookback_days = retrieval.discovery_lookback_days if retrieval is not None else 14
+        acquisition_from = acquisition_to - timedelta(days=lookback_days)
+    elif workiq:
+        acquisition_to = acquisition_to or datetime.now(timezone.utc).date()
+        acquisition_from = acquisition_from or (
+            acquisition_to - timedelta(days=workiq_window_days * workiq_max_windows - 1)
+        )
+        if acquisition_from > acquisition_to:
+            raise typer.BadParameter("--from-date must not be after --to-date.")
+        if not subject and not body:
+            raise typer.BadParameter(
+                "--workiq requires at least one --subject or --body term."
+            )
     intent = RetrievalIntent(
-        entity_type=EntityType.MESSAGE,
+        entity_type=EntityType.DRIVE_ITEM if sharepoint_fixture is not None else EntityType.MESSAGE,
         subject_terms=tuple(subject),
         body_terms=tuple(body),
         senders=tuple(senders),
+        from_date=acquisition_from if workiq or workiq_query is not None else None,
+        to_date=acquisition_to if workiq or workiq_query is not None else None,
         limit=limit,
     )
 
-    if eml_inbox is not None:
-        _enumerator: CandidateEnumerator = EmlEnumerator(
+    if workiq_query is not None:
+        from src.m365.agency_bridge import AgencyBridge as WorkIQAgencyBridge
+        from src.m365.graph_mail_client import GraphMailClient
+        from src.m365.rev.workiq_enumerator import WorkIQPage
+
+        bridge = WorkIQAgencyBridge()
+        capabilities = bridge.probe()
+        if not capabilities.available or not capabilities.has_workiq:
+            typer.echo("ERROR: WorkIQ access unavailable.", err=True)
+            raise typer.Exit(code=2)
+        workiq_client = GraphMailClient(bridge)
+        selected_program = load_program(program, programs_root=programs_root)
+        retrieval = (
+            selected_program.m365.retrieval
+            if selected_program is not None
+            and selected_program.m365 is not None
+            else None
+        )
+        wall_clock = retrieval.max_wall_clock_seconds if retrieval is not None else 600
+        per_call_timeout = min(WorkIQAgencyBridge.WORKIQ_TIMEOUT, wall_clock)
+
+        def query_workiq(
+            retrieval_intent: RetrievalIntent, *, cursor: str | None,
+        ) -> WorkIQPage:
+            page = workiq_client.search_emails(
+                query=workiq_query,
+                limit=retrieval_intent.limit,
+                cursor=cursor,
+                timeout_seconds=per_call_timeout,
+            )
+            return WorkIQPage(
+                records=tuple(
+                    {
+                        "id": record.source_id,
+                        "subject": record.subject,
+                        "sender": record.sender,
+                        "recipients": record.recipients,
+                        "receivedDateTime": record.received_at,
+                        "webUrl": record.web_url,
+                        "bodyPreview": record.preview,
+                        "threadId": record.thread_id,
+                        "conversationId": record.conversation_id,
+                    }
+                    for record in page.records
+                ),
+                next_cursor=page.next_cursor,
+            )
+
+        _enumerator = WorkIQEnumerator(
+            query_workiq,
+            WorkIQContext(
+                tenant_id=tenant_id or "default",
+                principal_mailbox=mailbox,
+                container=container,
+            ),
+            program_id=program,
+            programs_root=programs_root,
+            checkpoint_namespace=workiq_query,
+        )
+        _hydrator = WorkIQHydrator()
+        deps = RevPipelineDeps(
+            enumerator=_enumerator,
+            hydrator=_hydrator,
+            shields=_resolve_shields(),
+            extractor=_extractor,
+            verifier=_verifier,
+        )
+        mailbox_ctx = MailboxContext(
+            tenant_id=tenant_id or "default",
+            principal_mailbox=mailbox,
+            container=container,
+        )
+    elif workiq:
+        bridge = AgencyBridge()
+        capabilities = bridge.probe()
+        if not capabilities.has_workiq and not capabilities.has_workiq_cli:
+            raise typer.BadParameter(
+                "WorkIQ is not available through the configured Agency connector."
+            )
+        terms = tuple(dict.fromkeys((*subject, *body)))
+
+        def query(window: RetrievalIntent) -> WorkIQQueryPage:
+            assert window.from_date is not None and window.to_date is not None
+            request = DiscoveryRequest(
+                lane_name=program,
+                terms=terms,
+                window_start=window.from_date,
+                window_end=window.to_date,
+                limit=min(window.limit, 50),
+                senders=window.senders,
+            )
+            payload = bridge.ask_workiq(
+                build_structured_discovery_question(request),
+                use_cache=False,
+            )
+            validated = validate_structured_discovery_payload_with_diagnostics(
+                payload,
+                window_start=request.window_start,
+                window_end=request.window_end,
+                limit=request.limit,
+                senders=request.senders,
+            )
+            return WorkIQQueryPage(
+                records=tuple(validated.payload.get("emails") or []),
+                rejected_source_time_count=validated.rejected_source_time_count,
+                rejected_identity_count=validated.rejected_identity_count,
+                rejected_invalid_record_count=validated.rejected_invalid_record_count,
+                rejected_outside_window_count=validated.rejected_outside_window_count,
+                response_usable=validated.response_usable,
+            )
+
+        _enumerator = WorkIQEnumerator(
+            query,
+            WorkIQContext(
+                tenant_id=tenant_id or "default",
+                principal_mailbox=mailbox,
+                container=container,
+            ),
+            window_days=workiq_window_days,
+            max_windows=workiq_max_windows,
+        )
+        _hydrator = WorkIQHydrator()
+        deps = RevPipelineDeps(
+            enumerator=_enumerator,
+            hydrator=_hydrator,
+            shields=_resolve_shields(),
+            extractor=_extractor,
+            verifier=_verifier,
+        )
+        mailbox_ctx = MailboxContext(
+            tenant_id=tenant_id or "default",
+            principal_mailbox=mailbox,
+            container=container,
+        )
+    elif sharepoint_fixture is not None:
+        fixture_items = _load_sharepoint_fixture(sharepoint_fixture)
+        knowledge = load_program_knowledge(program, programs_root=programs_root)
+        pages = select_engms_pages(knowledge, program_id=program)
+
+        def resolve(page, _correlation_id):
+            item = fixture_items.get(page.id)
+            if item is None:
+                return Incomplete(
+                    GraphDriveItem(item_id="", drive_id=""),
+                    reason=f"fixture_item_missing:{page.id}",
+                )
+            return Success(item)
+
+        client = FakeRevSharePointClient(tuple(fixture_items.values()))
+        _enumerator = SharePointEnumerator(
+            pages,
+            resolve,
+            tenant_id=tenant_id or "default",
+            principal_mailbox=mailbox,
+        )
+        _hydrator = SharePointHydrator(
+            client,
+            SharePointContext(
+                tenant_id=tenant_id or "default",
+                principal_mailbox=mailbox,
+            ),
+        )
+        deps = RevPipelineDeps(
+            enumerator=_enumerator,
+            hydrator=_hydrator,
+            shields=_resolve_shields(),
+            extractor=_extractor,
+            verifier=_verifier,
+        )
+        mailbox_ctx = MailboxContext(
+            tenant_id=tenant_id or "default",
+            principal_mailbox=mailbox,
+            container=container,
+        )
+    elif eml_inbox is not None:
+        _enumerator = EmlEnumerator(
             inbox_root=eml_inbox,
             mailbox_tenant_id=tenant_id or "default",
             principal_mailbox=mailbox,
             container=container,
             limit=limit,
         )
-        _hydrator: ContentHydrator = EmlHydrator(
+        _hydrator = EmlHydrator(
             mailbox_tenant_id=tenant_id or "default",
             principal_mailbox=mailbox,
             container=container,
@@ -342,7 +652,14 @@ def rev_run(
         + (" (shield degrade: Prompt Shields unavailable — see logs)" if report.shield_degrade else ""),
         err=True,
     )
-    raise typer.Exit(code=0 if report.stop_category == "complete" else 1)
+    raise typer.Exit(
+        code=0
+        if report.stop_category == "complete" and (
+            not (workiq or workiq_query is not None or sharepoint_fixture is not None)
+            or (not report.date_parse_failures and not report.terminal_failures)
+        )
+        else 1
+    )
 
 
 @app.command("init-inbox")

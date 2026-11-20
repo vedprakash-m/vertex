@@ -23,7 +23,7 @@ from src.core.archive_store import ConfirmedIssueArchivePaths
 from src.core.edition_resolver import get_program_output_dir, get_program_output_root, PROGRAMS_ROOT
 from src.core.models import EditionType, ReportData
 from src.m365.adaptive_card_renderer import AdaptiveCardRenderer
-from src.m365.teams_webhook_client import TeamsWebhookClient
+from src.m365.outbound_dispatch import dispatch_teams_card_via_outbox
 
 
 def validate_weekly_summary_card_request(*, bundle, draft_state: dict[str, Any]) -> None:
@@ -99,9 +99,9 @@ def write_confirm_weekly_summary_card(
 
 
 def build_confirm_weekly_summary_teams_sender(webhook_url: str):
-    client = TeamsWebhookClient(webhook_url=webhook_url)
+    del webhook_url
 
     def _sender(payload: dict[str, Any]) -> None:
-        client.post_card(payload)
+        dispatch_teams_card_via_outbox(payload)
 
     return _sender

@@ -1,11 +1,7 @@
-"""RELO-W6.11 characterization: governed typed feedback vs. ungoverned learning paths.
-
-These tests pin current behavior only; D19 decides which ungoverned paths are retired.
-"""
+"""RELO-W6.11 disposition under ratified D19."""
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,6 +9,7 @@ from src.ai.edit_learner import append_edit_patterns, build_edit_patterns, read_
 from src.ai.learning_distiller import LearningDistiller
 from src.core.config_loader import EditorialRules, VerbositySettings
 from src.core.feedback.trust_profile_store import _read_edit_patterns as trust_profile_read_edit_patterns
+from src.core.governed_feedback_lifecycle import FeedbackKind, load_feedback_observations
 from src.core.review_packs import StructuredFeedback, record_structured_feedback
 
 
@@ -33,7 +30,7 @@ def _editorial_rules() -> EditorialRules:
     )
 
 
-def test_governed_structured_feedback_is_typed_jsonl_under_reviews(tmp_path: Path) -> None:
+def test_governed_structured_feedback_uses_approved_hash_only_telemetry(tmp_path: Path) -> None:
     captured_at = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
     feedback = StructuredFeedback(
         kind="risk-fix",
@@ -45,16 +42,13 @@ def test_governed_structured_feedback_is_typed_jsonl_under_reviews(tmp_path: Pat
 
     record_structured_feedback(feedback, "acme", 7, programs_root=tmp_path)
 
-    lines = (tmp_path / "acme" / "reviews" / "feedback_issue_007.jsonl").read_text(encoding="utf-8").splitlines()
-    assert [json.loads(line) for line in lines] == [
-        {
-            "kind": "risk-fix",
-            "target_id": "workstream:deployment",
-            "correction": "Risk is amber, not red.",
-            "captured_at": captured_at.isoformat(),
-            "reviewed_by": "dri@example.com",
-        }
-    ]
+    observations = load_feedback_observations("acme", programs_root=tmp_path)
+    assert len(observations) == 1
+    assert observations[0].kind is FeedbackKind.RISK_OVERRIDE
+    assert observations[0].target_id == "workstream:deployment"
+    assert observations[0].after_value.value_type == "sha256"
+    assert observations[0].approved_by == "dri@example.com"
+    assert not (tmp_path / "acme" / "reviews").exists()
 
 
 def test_learning_distiller_without_client_proposes_nothing_and_leaves_rules_unchanged() -> None:
@@ -66,7 +60,7 @@ def test_learning_distiller_without_client_proposes_nothing_and_leaves_rules_unc
     assert rules == _editorial_rules()
 
 
-def test_edit_patterns_journal_has_two_independent_readers(tmp_path: Path) -> None:
+def test_legacy_edit_patterns_have_forensic_readers_only(tmp_path: Path) -> None:
     patterns = build_edit_patterns(
         program_id="acme",
         edition_id="acme_weekly",

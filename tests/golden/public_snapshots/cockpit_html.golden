@@ -36,7 +36,8 @@
     <h2 id="program-health">Program health</h2>
     <p><span class="risk-badge">RED</span>
        readiness not measured yet · 2 blocker(s)</p>
-    <p>Next action: vertex doctor --edition fixture_weekly</p>
+    <p>Next action (after safe revalidation):
+       vertex doctor --edition fixture_weekly</p>
   </section>
   <section aria-labelledby="source-health">
     <h2 id="source-health">Source health</h2>
@@ -57,10 +58,20 @@
       <dl>
         <dt>Finding ID</dt><dd>program.risk.high_active_count</dd>
         <dt>Area</dt><dd>program</dd>
-        <dt>Owner</dt><dd>unassigned</dd>
-        <dt>Next command</dt><dd><code>vertex doctor --edition fixture_weekly</code></dd>
+        <dt>Owner</dt><dd>not available</dd>
         <dt>Evidence</dt><dd><ul><li>risk-1</li><li>risk-2</li></ul></dd>
         <dt>Observed</dt><dd>2026-07-12T08:00:00+00:00</dd>
+        <dt>Exception class</dt><dd>blocked_draft</dd>
+        <dt>Snapshot</dt><dd>generated 2026-07-12T08:00:00+00:00;
+          input hash <code>1d19eeea6d70eb0f30d1076dd3100f71440c32f5a35d93a34065f0aa3df5482c</code></dd>
+        <dt>Confidence</dt><dd>not available</dd>
+        <dt>Safe options</dt><dd><ul><li>Re-run the read-only finding explanation against current inputs.</li><li>Do not execute a recorded next command until the owning CLI/TUI revalidates payload, authority, target, revision, audience and policy state.</li></ul></dd>
+        <dt>Expected effect</dt><dd>Rechecks the current finding before any operator action. The cockpit view itself performs no mutation or dispatch.</dd>
+        <dt>Diff / preview</dt><dd>not available</dd>
+        <dt>Next command (after safe revalidation)</dt><dd><code>vertex doctor --edition fixture_weekly</code></dd>
+        <dt>Authority required</dt><dd>not available</dd>
+        <dt>Expiry / escalation</dt><dd>not available</dd>
+        <dt>Safe revalidation</dt><dd><code>vertex cockpit explain --program fixture_prog --edition fixture_prog_weekly --finding program.risk.high_active_count</code></dd>
       </dl>
     </li></ul>
   </section>
@@ -95,5 +106,9 @@
     </li></ul>
   </section>
 </main>
+<footer>
+  <p>Automated evidence does not establish independent human accessibility or operator proficiency.
+     Human accessibility and operator proficiency qualification: not established.</p>
+</footer>
 </body>
 </html>

@@ -110,6 +110,86 @@ class _FakeADOClient:
         return rows
 
 
+def test_from_program_wires_isolated_detail_client_and_checkpoint_reader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detail_client = object()
+    primary_client = SimpleNamespace(
+        fork_read_client=lambda: detail_client,
+    )
+    constructed: list[dict[str, Any]] = []
+
+    def build_client(**kwargs: Any) -> object:
+        constructed.append(kwargs)
+        return primary_client
+
+    checkpoint_calls: list[tuple[Path, str, str, tuple[int, ...]]] = []
+    expected = object()
+
+    class CheckpointStore:
+        def __init__(self, path: Path, program_id: str) -> None:
+            self.path = path
+            self.program_id = program_id
+
+        def read_hydration_checkpoints(
+            self,
+            provider_instance_id: str,
+            work_item_ids: tuple[int, ...],
+        ) -> object:
+            checkpoint_calls.append(
+                (self.path, self.program_id, provider_instance_id, work_item_ids)
+            )
+            return expected
+
+    checkpoint_path = tmp_path / "channel-registry.json"
+    monkeypatch.setattr("src.core.ado_hydration.ADOClient", build_client)
+    monkeypatch.setattr(
+        "src.core.channel_registry_store.ChannelRegistryStore",
+        CheckpointStore,
+    )
+    monkeypatch.setattr(
+        "src.core.program_paths.get_channel_registry_path",
+        lambda program_id, *, programs_root: checkpoint_path,
+    )
+    program = SimpleNamespace(
+        id="demo",
+        ado=SimpleNamespace(
+            organization="example",
+            project="One",
+            api_timeout_seconds=17,
+        ),
+    )
+
+    provider, config = ADOHydrationProvider.from_program(
+        program,
+        SimpleNamespace(),
+        (),
+        programs_root=tmp_path,
+    )
+
+    assert constructed == [
+        {"organization": "example", "project": "One", "timeout": 17},
+    ]
+    assert config == ADOHydrationConfig()
+    assert provider._detail_client_factory is not None
+    assert provider._detail_client_factory() is detail_client
+    assert provider._checkpoint_reader is not None
+    assert provider._checkpoint_reader("provider-a", (101,)) is expected
+    assert checkpoint_calls == [
+        (checkpoint_path, "demo", "provider-a", (101,)),
+    ]
+
+
+def test_from_program_refuses_missing_ado_configuration() -> None:
+    with pytest.raises(ValueError, match="has no ADO config"):
+        ADOHydrationProvider.from_program(
+            SimpleNamespace(id="demo", ado=None),
+            SimpleNamespace(),
+            (),
+        )
+
+
 class _IncompleteHistoryClient(_FakeADOClient):
     def __init__(self, failures: dict[str, str]) -> None:
         super().__init__()

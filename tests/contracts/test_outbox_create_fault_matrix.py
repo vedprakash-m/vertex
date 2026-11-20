@@ -11,6 +11,8 @@ items 1-5, against the outbox-backed create-task dispatch primitive
 
 from __future__ import annotations
 
+from dataclasses import replace
+import json
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,11 @@ from src.core.ledger.durable_outbox_store import (
 )
 from src.core.ledger.event_log import read_events
 from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, LeaseHeldByAnotherOwner, acquire_lease
+from src.core.operation_capabilities import OPERATION_CAPABILITIES, OperationCapability
+from tests.support.actuation_reconciliation import (
+    synthetic_authorized_effect_document,
+    synthetic_completed_reconciliation,
+)
 
 _PROGRAM_ID = "fixture_prog"
 _ORG = "contoso"
@@ -38,15 +45,42 @@ _PROJECT = "One"
 
 def _enqueue(programs_root: Path, *, operation_intent_id: str = "intent-1") -> str:
     key = create_task_idempotency_key(program_id=_PROGRAM_ID, org=_ORG, project=_PROJECT, operation_intent_id=operation_intent_id)
+    payload = {
+        "operation": "create_task.v1",
+        "operation_intent_id": operation_intent_id,
+        "org": _ORG,
+        "project": _PROJECT,
+        "title": "t",
+        "authorized_effect": synthetic_authorized_effect_document(
+            program_id=_PROGRAM_ID,
+            intent_id=operation_intent_id,
+            tenant_id=_ORG,
+            project=_PROJECT,
+        ),
+    }
     enqueue_create_task_intent(
         program_id=_PROGRAM_ID,
         idempotency_key=key,
         operation_intent_id=operation_intent_id,
         proposal_id="prop-1",
-        payload_json='{"operation_intent_id": "%s", "org": "%s", "project": "%s", "title": "t"}' % (operation_intent_id, _ORG, _PROJECT),
+        payload_json=json.dumps(payload),
         programs_root=programs_root,
     )
     return key
+
+
+def _successful_dispatch(entry, remote_id: int = 42, *, remote_rev: int = 2) -> DispatchResult:
+    authorized = json.loads(entry.payload_json)["authorized_effect"]
+    return DispatchResult(
+        succeeded=True,
+        remote_id=remote_id,
+        remote_rev=remote_rev,
+        reconciliation=synthetic_completed_reconciliation(
+            authorized,
+            remote_id=remote_id,
+            remote_rev=remote_rev,
+        ),
+    )
 
 
 def test_revision_fields_preserve_legacy_positional_results(tmp_path) -> None:
@@ -67,22 +101,30 @@ def test_dispatch_revision_evidence_survives_or_refuses(tmp_path, monkeypatch, r
 
     programs_root = tmp_path / "programs"
     key = _enqueue(programs_root)
-    result = DispatchResult(succeeded=True, remote_id=42, remote_rev=revision)
+    def dispatch(entry):
+        evidence_revision = revision if type(revision) is int and revision > 0 else 2
+        return replace(
+            _successful_dispatch(entry, 42, remote_rev=evidence_revision),
+            remote_rev=revision,
+        )
     monkeypatch.setattr("src.core.ledger.event_log.write_event",
                         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("secondary ledger")))
     outcome = dispatch_leased_create_task(
         program_id=_PROGRAM_ID, idempotency_key=key, owner="worker",
-        dispatch_fn=lambda entry: result, programs_root=programs_root,
+        dispatch_fn=dispatch, programs_root=programs_root,
     )
     db = outbox_db_path(_PROGRAM_ID, programs_root=programs_root)
-    if revision is None or (type(revision) is int and revision > 0):
+    if type(revision) is int and revision > 0:
         assert outcome.status == "completed"
         assert getattr(outcome, "remote_rev", "unavailable") == revision
         assert json.loads(load_success_receipt(db, key))["remote_rev"] == revision
     else:
         assert outcome.status == "uncertain_remote_state"
         assert load_success_receipt(db, key) is None
-        assert "revision" in outcome.entry.failure_reason.lower()
+        assert (
+            "revision" in outcome.entry.failure_reason.lower()
+            or "reconciliation" in outcome.entry.failure_reason.lower()
+        )
         assert lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="retry") is None
 
 
@@ -94,7 +136,7 @@ def test_success_without_valid_remote_id_is_uncertain_and_never_retried(tmp_path
 
     def dispatch(entry):
         calls.append(entry.outbox_id)
-        return DispatchResult(succeeded=True, remote_id=remote_id)
+        return _successful_dispatch(entry, remote_id)
 
     outcome = dispatch_leased_create_task(
         program_id=_PROGRAM_ID, idempotency_key=key, owner="worker",
@@ -123,7 +165,10 @@ def test_completed_create_keeps_authoritative_receipt_when_secondary_ledger_fail
     )
     result = dispatch_leased_create_task(
         program_id=_PROGRAM_ID, idempotency_key=key, owner="worker",
-        dispatch_fn=lambda entry: DispatchResult(succeeded=True, remote_id=42, remote_response_hash="response"),
+        dispatch_fn=lambda entry: replace(
+            _successful_dispatch(entry, 42),
+            remote_response_hash="response",
+        ),
         programs_root=programs_root,
     )
     assert result.status == "completed"
@@ -165,7 +210,7 @@ def test_receipt_storage_failure_after_provider_acknowledgement_never_completes_
 
     def dispatch(entry):
         calls.append(entry.outbox_id)
-        return DispatchResult(succeeded=True, remote_id=42)
+        return _successful_dispatch(entry, 42)
 
     with pytest.raises(sqlite3.IntegrityError):
         dispatch_leased_create_task(
@@ -196,7 +241,7 @@ def test_create_refuses_completion_when_retained_receipt_readback_changes(tmp_pa
     with pytest.raises(store.OutboxError, match="receipt"):
         dispatch_leased_create_task(
             program_id=_PROGRAM_ID, idempotency_key=key, owner="worker",
-            dispatch_fn=lambda entry: DispatchResult(succeeded=True, remote_id=42),
+            dispatch_fn=lambda entry: _successful_dispatch(entry, 42),
             programs_root=programs_root,
         )
     assert load_entry(db, key).status == "succeeded"
@@ -215,7 +260,7 @@ def test_item1_crash_after_enqueue_before_lease_is_idempotent(tmp_path: Path) ->
 
     def dispatch_fn(entry) -> DispatchResult:
         calls.append(entry.outbox_id)
-        return DispatchResult(succeeded=True, remote_id=9001)
+        return _successful_dispatch(entry, 9001)
 
     outcome = dispatch_leased_create_task(
         program_id=_PROGRAM_ID, idempotency_key=key, owner="worker-a", dispatch_fn=dispatch_fn, programs_root=programs_root,
@@ -334,7 +379,7 @@ def test_item2_crash_after_lease_before_dispatch_is_reclaimed(tmp_path: Path) ->
 
     def dispatch_fn(entry) -> DispatchResult:
         calls.append(entry.outbox_id)
-        return DispatchResult(succeeded=True, remote_id=9002)
+        return _successful_dispatch(entry, 9002)
 
     # A fresh call (different owner) must reclaim the stale-leased row and
     # drive it to completion -- exactly one dispatch_fn call, from the
@@ -344,6 +389,110 @@ def test_item2_crash_after_lease_before_dispatch_is_reclaimed(tmp_path: Path) ->
     )
     assert outcome.status == "completed"
     assert calls == [key]
+
+
+def test_crash_after_success_receipt_resumes_without_provider_callback(
+    tmp_path: Path,
+) -> None:
+    import os
+    import subprocess
+    import sys
+
+    from src.core._db import open_program_db_with_retry
+    from src.core.ledger.durable_outbox_store import load_success_receipt
+    from src.core.workspace_lease import get_workspace_lease_db_path
+
+    programs_root = tmp_path / "programs"
+    key = _enqueue(programs_root)
+    callback_marker = tmp_path / "callback-reached"
+    script = r'''
+import os
+import sys
+from pathlib import Path
+import src.core.actuation_outbox as service
+from src.core.actuation_outbox import DispatchResult
+from tests.support.actuation_reconciliation import synthetic_completed_reconciliation
+transition = service.mark_succeeded
+def crash_after_receipt(*args, **kwargs):
+    transition(*args, **kwargs)
+    if os.environ.get("RVX_GUARD_SUMMARY"):
+        import sitecustomize
+        sitecustomize._finish()
+    os._exit(87)
+service.mark_succeeded = crash_after_receipt
+def dispatch(entry):
+    import json
+    Path(sys.argv[3]).write_text(str(entry.attempt_count), encoding="utf-8")
+    authorized = json.loads(entry.payload_json)["authorized_effect"]
+    return DispatchResult(
+        succeeded=True,
+        remote_id=9006,
+        remote_rev=7,
+        reconciliation=synthetic_completed_reconciliation(
+            authorized, remote_id=9006, remote_rev=7,
+        ),
+    )
+service.dispatch_leased_create_task(
+    program_id="fixture_prog", idempotency_key=sys.argv[2], owner="dead-worker",
+    dispatch_fn=dispatch, programs_root=Path(sys.argv[1]),
+)
+'''
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            script,
+            str(programs_root),
+            key,
+            str(callback_marker),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=os.environ.copy(),
+    )
+    assert process.returncode == 87, process.stderr
+    assert callback_marker.read_text(encoding="utf-8") == "1"
+    db = outbox_db_path(_PROGRAM_ID, programs_root=programs_root)
+    retained = load_entry(db, key)
+    assert retained is not None and retained.status == "succeeded"
+    assert load_success_receipt(db, key) is not None
+    with open_program_db_with_retry(db, durability="strict") as connection:
+        connection.execute(
+            "UPDATE outbox SET lease_expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE outbox_id = ?",
+            (key,),
+        )
+    lease_db = get_workspace_lease_db_path(
+        _PROGRAM_ID,
+        programs_root=programs_root,
+    )
+    with open_program_db_with_retry(lease_db, durability="strict") as connection:
+        connection.execute(
+            "UPDATE workspace_lease SET expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE mutation_domain = ?",
+            (ACTUATION_DISPATCH_DOMAIN,),
+        )
+
+    calls: list[str] = []
+    outcome = dispatch_leased_create_task(
+        program_id=_PROGRAM_ID,
+        idempotency_key=key,
+        owner="replacement",
+        dispatch_fn=lambda entry: (
+            calls.append(entry.outbox_id)
+            or DispatchResult(succeeded=True, remote_id=9999)
+        ),
+        programs_root=programs_root,
+    )
+
+    assert outcome.status == "completed"
+    assert outcome.remote_id == 9006
+    assert outcome.remote_rev == 7
+    assert calls == []
+    assert load_entry(db, key).status == "completed"
 
 
 def test_item3_ambiguous_exception_after_dispatch_goes_uncertain_not_retried(tmp_path: Path) -> None:
@@ -415,7 +564,7 @@ def test_item5_receipt_ledger_write_failure_does_not_block_completion(tmp_path: 
     key = _enqueue(programs_root)
 
     def dispatch_fn(entry) -> DispatchResult:
-        return DispatchResult(succeeded=True, remote_id=9004)
+        return _successful_dispatch(entry, 9004)
 
     def _raise_write_event(*args, **kwargs):
         raise OSError("simulated ledger append failure (SMB contention)")
@@ -454,7 +603,10 @@ def test_late_dispatch_success_cannot_replace_durable_terminal(tmp_path: Path, t
             db, key, owner=entry.lease_owner, fencing_token=entry.lease_fencing_token,
             reason="durable terminal precedes late callback",
         ))
-        return DispatchResult(succeeded=True, remote_id=9005, remote_response_hash="late-response")
+        return replace(
+            _successful_dispatch(entry, 9005),
+            remote_response_hash="late-response",
+        )
 
     with pytest.raises(store.OutboxError, match="terminal"):
         dispatch_leased_create_task(

@@ -89,6 +89,35 @@ def load_ai_model_cost_policy(deployment: str) -> AIModelCostPolicy:
     raw_policy = models.get(deployment_key) if deployment_key else None
     if raw_policy is None:
         raw_policy = models.get("default")
+    return _parse_ai_model_cost_policy(raw_policy, deployment_key=deployment_key)
+
+
+def load_ai_model_cost_policy_exact(deployment: str) -> AIModelCostPolicy:
+    """Load a deployment-specific price without the compatibility default."""
+    models = _required_mapping(
+        _required_mapping(_load_policy_defaults().get("ai"), field_name="ai").get("models"),
+        field_name="ai.models",
+    )
+    deployment_key = str(deployment).strip()
+    matches = [
+        raw
+        for model_name, raw in models.items()
+        if isinstance(model_name, str) and model_name.strip() == deployment_key
+    ] if deployment_key else []
+    if not matches:
+        raise ConfigError(
+            f"ai.models has no explicit price for deployment {deployment_key!r} (missing); "
+            "fallback-chain admission refused."
+        )
+    if len(matches) > 1:
+        raise ConfigError(
+            f"ai.models has ambiguous duplicate prices for deployment {deployment_key!r}."
+        )
+    raw_policy = matches[0]
+    return _parse_ai_model_cost_policy(raw_policy, deployment_key=deployment_key)
+
+
+def _parse_ai_model_cost_policy(raw_policy: object, *, deployment_key: str) -> AIModelCostPolicy:
     model_policy = _required_mapping(raw_policy, field_name=f"ai.models.{deployment_key or 'default'}")
     return AIModelCostPolicy(
         input_cost_per_1k_tokens=_required_model_price(

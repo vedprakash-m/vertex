@@ -6,16 +6,11 @@ five-`AIRunState` + QG-29 release lifecycle (after `program_synthesizer.py`,
 `meeting_action_extractor.py`, `risk_proposal_generator.py`,
 `top_three_candidate_generator.py`).
 
-RELO-W1.3 pilot migration (2026-07-30): ``generate_dependency_blast_radius_
-proposal_via_runner`` is a second implementation of this feature routed
-through ``StructuredFeatureRunner`` (RELO-F1, Sec 8.1) instead of a direct
-``route_through_tiers``/``AIResultCache`` call. It is additive, alongside
-the original ``generate_dependency_blast_radius_proposal`` — no existing
-caller is changed. This is deliberately the first and, for now, only
-pilot: a small, self-contained, single-purpose feature chosen specifically
-to validate the runner's design against a real feature's actual evidence/
-schema/validation/release-audit shape before any other call site is
-touched (RELO-W1.6 remains separate, reviewed, one feature at a time).
+RELO-W1.3/W1.6 migration: ``generate_dependency_blast_radius_proposal_via_runner``
+routes the production proposal command through ``StructuredFeatureRunner``
+(RELO-F1, Sec 8.1). The original direct implementation remains an explicitly
+inventoried compatibility path for parity and historical cache coverage, but
+the existing command now requires a caller-supplied bound ``RunnerContext``.
 """
 
 from __future__ import annotations
@@ -224,7 +219,7 @@ def generate_dependency_blast_radius_proposal_via_runner(
     client: LLMProvider,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> DependencyBlastRadiusProposal | None:
-    """RELO-W1.3 pilot: the same feature as
+    """RELO-W1.3/W1.6 runner path: the same feature as
     ``generate_dependency_blast_radius_proposal``, routed through
     ``StructuredFeatureRunner`` instead of a direct
     ``route_through_tiers``/``AIResultCache`` call. Same external contract
@@ -297,6 +292,13 @@ def generate_dependency_blast_radius_proposal_via_runner(
             validator_finding_count=0, programs_root=programs_root,
         )
         return None
+    if len(request.evidence_refs) != len(request.evidence_texts):
+        record_ai_release_decision(
+            program_id=program_id, ai_run_id=ai_run_id, terminal=ReleaseTerminal.DISCARDED,
+            reason="Dependency evidence references and texts must have equal lengths.",
+            validator_finding_count=0, programs_root=programs_root,
+        )
+        return None
 
     _lifecycle(AIRunState.REQUESTED)
 
@@ -314,12 +316,13 @@ def generate_dependency_blast_radius_proposal_via_runner(
                 "current_status": req.current_status,
             }, sort_keys=True),
             required=True, origin=ContentOrigin.AUTHORED, trust_level="high",
-            verification_state="verified", injection_screen="pass",
+            verification_state="operator_supplied", injection_screen="pass",
         )
         spans = (request_span,) + tuple(
             EvidenceSpan(
                 evidence_id=ref, source_family="dependency_evidence", text=text, required=True,
-                origin=ContentOrigin.AUTHORED, trust_level="high", verification_state="verified",
+                origin=ContentOrigin.AUTHORED, trust_level="operator_supplied",
+                verification_state="unverified",
                 injection_screen="pass",
             )
             for ref, text in zip(req.evidence_refs, req.evidence_texts, strict=True)
@@ -474,7 +477,7 @@ def generate_dependency_blast_radius_proposal_via_runner(
         fallback_handler=fallback_handler, semantic_validator=semantic_validator,
         build_context=build_context, call_provider=call_provider,
         request_hash=lambda req: canonical_input_hash(_build_user_prompt(req)),
-        deployment_fingerprint=_resolve_model_deployment(client),
+        deployment_fingerprint=_resolve_dependency_cache_deployment(client),
         validator_version="dependency_blast_radius_generator.v1",
         serialize_response=serialize_response,
         deserialize_response=deserialize_response,

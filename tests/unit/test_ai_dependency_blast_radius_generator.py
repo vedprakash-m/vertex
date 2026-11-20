@@ -975,7 +975,7 @@ def test_dependency_release_cache_invalid_entry_fails_closed_without_touch_or_di
         ("success", ("planned", "requested", "responded", "schema_validated", "semantically_validated"), "released", 1),
         ("provider-failure", ("planned", "requested"), "discarded", 1),
         ("outbound-bounds", ("planned",), "discarded", 0),
-        ("context-refusal", ("planned", "requested"), "discarded", 0),
+        ("context-refusal", ("planned",), "discarded", 0),
         ("non-object-response", ("planned", "requested", "responded"), "discarded", 1),
         ("inbound-bounds", ("planned", "requested", "responded"), "discarded", 1),
         ("invalid-shape", ("planned", "requested", "responded", "schema_validated"), "rejected", 1),
@@ -1255,18 +1255,20 @@ def test_pilot_release_binding_precedes_cache_write_and_names_ai_run(
     run_id = "synthetic-binding-origin"
     monkeypatch.setattr(blast_radius_generator, "new_ai_run_id", lambda: run_id)
     original_open = structured_feature_runner.open_program_db
-    cache_opens = 0
     released_before_write = False
 
     def observe_open(path: Path, *args: Any, **kwargs: Any) -> Any:
-        nonlocal cache_opens, released_before_write
+        nonlocal released_before_write
         if path == cache_path:
-            cache_opens += 1
-            if cache_opens == 2:
-                decisions = [
-                    event.payload for event in read_events("acme", programs_root=programs_root, repair_corruption=False)
-                    if event.event_type == "ai.release_decision.v1" and event.payload.get("ai_run_id") == run_id
-                ]
+            decisions = [
+                event.payload
+                for event in read_events(
+                    "acme", programs_root=programs_root, repair_corruption=False
+                )
+                if event.event_type == "ai.release_decision.v1"
+                and event.payload.get("ai_run_id") == run_id
+            ]
+            if decisions:
                 released_before_write = len(decisions) == 1 and decisions[0]["terminal"] == "released"
                 assert _pilot_cache_rows(programs_root) == []
         return original_open(path, *args, **kwargs)
@@ -1601,13 +1603,17 @@ def test_pilot_release_binding_cache_write_failure_keeps_release_visible(
     run_id = "synthetic-binding-write-failure"
     monkeypatch.setattr(blast_radius_generator, "new_ai_run_id", lambda: run_id)
     original_open = structured_feature_runner.open_program_db
-    cache_opens = 0
-
     def fail_second_open(path: Path, *args: Any, **kwargs: Any) -> Any:
-        nonlocal cache_opens
         if path == cache_path:
-            cache_opens += 1
-            if cache_opens == 2:
+            decisions = [
+                event.payload
+                for event in read_events(
+                    "acme", programs_root=programs_root, repair_corruption=False
+                )
+                if event.event_type == "ai.release_decision.v1"
+                and event.payload.get("ai_run_id") == run_id
+            ]
+            if len(decisions) == 1 and decisions[0]["terminal"] == "released":
                 raise sqlite3.OperationalError("synthetic-private-cache-detail")
         return original_open(path, *args, **kwargs)
 

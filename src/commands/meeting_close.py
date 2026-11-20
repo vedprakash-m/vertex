@@ -23,17 +23,17 @@ import typer
 
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.commands.ado import apply_ado_proposal
-from src.core.action_extractor_basic import extract_actions_from_signals
 from src.core.action_tracker import ActionJournalReadError, append_action, get_actions_path
 from src.core.action_mapper import MeetingActionMapping, build_meeting_action_proposal, map_actions_to_work_items
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import write_proposal_manifest
 from src.core.edition_resolver import load_program
 from src.core.exceptions import QueryError
-from src.core.models import Confidence
-from src.core.models_v2 import ActionItem, ActionStatus, Program, Signal, Workstream
+from src.core.models import Confidence, RiskLevel, WorkItem
+from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, Program, Signal, Workstream
 from src.core.program_fact_store import load_program_facts, project_action_items, project_workstreams
 from src.core.teams_renderer import TeamsRenderer
+from src.core.work_item_states import TERMINAL_WORK_ITEM_STATES
 from src.m365.agency_bridge import AgencyBridge
 from src.m365.transcript_reader import TranscriptReader, TranscriptRecord
 from src.core.workspace_paths import PROGRAMS_ROOT
@@ -172,6 +172,17 @@ def generate_meeting_close_artifacts(
 
     workstreams = _load_workstreams(program_id, programs_root=programs_root)
     item_rows = _load_work_item_rows(program, actions)
+    terminal_item_ids = tuple(
+        sorted(
+            item_id
+            for item_id, row in item_rows.items()
+            if str((row.get("fields") or {}).get("System.State") or "").strip().lower()
+            in TERMINAL_WORK_ITEM_STATES
+        )
+    )
+    if terminal_item_ids:
+        refs = ", ".join(f"WI:{item_id}" for item_id in terminal_item_ids)
+        raise ValueError(f"Meeting-close actions reference terminal work item(s): {refs}.")
     mappings = map_actions_to_work_items(actions, item_rows_by_id=item_rows, workstreams=workstreams)
     mappings, review_summary = _apply_review_plan(mappings, review_plan=review_plan)
     next_checkpoint_date = _suggest_next_checkpoint(mappings)
@@ -303,16 +314,116 @@ def _build_transcript_reader() -> TranscriptReader:
 
 
 def _extract_actions_from_transcript(program: Program, signal: Signal) -> tuple[tuple[ActionItem, ...], str]:
+    from src.ai.meeting_action_extractor import run_meeting_action_extraction_pipeline
+    from src.core.meeting_action import MeetingAction, extract_deterministic_meeting_actions
+
+    meeting_ref = str((signal.metadata or {}).get("meeting_id") or signal.id)
+    item_ids = tuple(sorted({
+        int(ref.split(":", 1)[1])
+        for ref in signal.entity_refs
+        if ref.upper().startswith("WI:") and ref.split(":", 1)[1].isdigit()
+    }))
+    items = tuple(
+        WorkItem(
+            id=item_id,
+            type="",
+            title="",
+            state="Active",
+            assigned_to=None,
+            assigned_to_email=None,
+            area_path="",
+            iteration_path="",
+            target_date=None,
+            risk_level=RiskLevel.UNKNOWN,
+            tags=[],
+            custom_fields={},
+        )
+        for item_id in item_ids
+    )
+
+    meeting_actions: tuple[MeetingAction, ...] = ()
+    used_structured = False
     if program.ai is not None and program.ai.enabled:
         try:
-            from src.ai.action_extractor import ActionExtractor, ActionExtractorError
+            from src.ai.deployment_fallback import (
+                FallbackAIClient,
+                resolve_ai_deployments_for_feature,
+            )
 
-            extractor = ActionExtractor.from_program(program)
-            extractor_label = "deterministic" if get_ai_mode() == AIMode.DISABLED else "ai"
-            return extractor.extract_actions(program_id=program.id, signals=(signal,)), extractor_label
-        except (ActionExtractorError, RuntimeError):
+            feature = "meeting_action_extractor"
+            deployments = resolve_ai_deployments_for_feature(
+                feature_name=feature,
+                primary_candidates=(
+                    program.ai.exec_summary_deployment,
+                    program.ai.blurb_deployment,
+                ),
+                backup_candidates=(
+                    program.ai.exec_summary_backup_deployment,
+                    program.ai.blurb_backup_deployment,
+                ),
+                primary_fallback_envs=(
+                    "VERTEX_EXEC_DEPLOYMENT",
+                    "VERTEX_AI_DEPLOYMENT",
+                ),
+                backup_fallback_envs=("VERTEX_EXEC_BACKUP_DEPLOYMENT",),
+            )
+            if deployments and get_ai_mode() is not AIMode.DISABLED:
+                client = FallbackAIClient(
+                    deployments=deployments,
+                    temperature=program.ai.temperature or 0.2,
+                    budget_usd=program.ai.budget_usd_per_run,
+                    requests_per_minute=program.ai.requests_per_minute,
+                )
+                meeting_actions = run_meeting_action_extraction_pipeline(
+                    program_id=program.id,
+                    meeting_ref=meeting_ref,
+                    transcript_text=signal.text,
+                    items=items,
+                    client=client,
+                    programs_root=PROGRAMS_ROOT,
+                ).actions
+                used_structured = True
+        except (OSError, RuntimeError, ValueError):
             pass
-    return extract_actions_from_signals((signal,), program.id), "basic"
+    if not used_structured:
+        meeting_actions = extract_deterministic_meeting_actions(
+            program_id=program.id,
+            meeting_ref=meeting_ref,
+            transcript_text=signal.text,
+        )
+    actions = tuple(
+        ActionItem(
+            id=action.id,
+            program_id=action.program_id,
+            text=action.commitment,
+            owner_alias=action.owner_alias or "unknown",
+            due_date=action.due_date,
+            status=ActionStatus.PROPOSED,
+            source_signal_id=signal.id,
+            source_type=ActionSourceType.MEETING_TRANSCRIPT,
+            linked_work_item_ids=(
+                (action.linked_work_item_id,)
+                if action.linked_work_item_id is not None
+                else item_ids
+                if len(item_ids) == 1
+                else ()
+            ),
+            linked_claim_id=None,
+            linked_risk_id=None,
+            workstream_id=signal.workstream_id,
+            created_at=action.proposed_at,
+            resolved_at=None,
+            resolution_note=None,
+        )
+        for action in meeting_actions
+        if action.status != "rejected"
+    )
+    label = (
+        "ai"
+        if any(action.extraction_method == "llm" for action in meeting_actions)
+        else "deterministic"
+    )
+    return actions, label
 
 
 def _build_transcript_signal(program_id: str, *, meeting_id: str, transcript_record: TranscriptRecord) -> Signal:
@@ -339,7 +450,7 @@ def _load_work_item_rows(program: Program, actions: tuple[ActionItem, ...]) -> d
     client = _build_ado_client(program)
     rows = client.query_work_items_batch(
         work_item_ids,
-        fields=("System.Id", "System.Title", "System.AreaPath", "System.AssignedTo", "System.Rev"),
+        fields=("System.Id", "System.Title", "System.AreaPath", "System.AssignedTo", "System.State", "System.Rev"),
     )
     return {
         int(row.get("id") or row.get("fields", {}).get("System.Id") or 0): row

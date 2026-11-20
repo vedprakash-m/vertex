@@ -2597,24 +2597,15 @@ def test_generate_report_draft_v2_ai_seeds_empty_continuity_narratives_from_roll
     exec_context = "\n".join(exec_calls[0]["supplemental_context"])
     assert exec_calls and "Rolling summary [acme]" in exec_context
     assert exec_calls and "Rolling summary [diagnostics_surface]" in exec_context
-    assert exec_calls and "Recent calibration [exec_summary]: score=" in exec_context
-    assert exec_calls and "Recent confidence calibration [exec_summary/high]: score=" in exec_context
-    assert exec_calls and "Recent prompt confidence [exec_summary_drafter.v2/high]: score=" in exec_context
-    assert exec_calls and "Recent prompt performance [exec_summary_drafter.v2]: score=" in exec_context
-    assert exec_calls and "Prompt leaderboard [exec_summary] #1: exec_summary_drafter.v2; score=" in exec_context
-    assert exec_calls and "Prompt leaderboard [exec_summary] #2: exec_summary_drafter.v1; score=" in exec_context
-    assert exec_calls and "Recent prompt model [exec_summary_drafter.v2/gpt-4.1]: score=" in exec_context
-    assert exec_calls and "Recent model performance [gpt-4.1]: score=" in exec_context
+    assert exec_calls and "Recent calibration [" not in exec_context
+    assert exec_calls and "Recent prompt " not in exec_context
+    assert exec_calls and "Model leaderboard [" not in exec_context
     deployment_call = next(call for call in blurb_calls if call["workstream_name"] == "Deployment Readiness")
     deployment_context = "\n".join(deployment_call["supplemental_context"])
-    assert "Recent calibration [workstream_blurb]: score=" in deployment_context
-    assert "Recent confidence calibration [workstream_blurb/medium]: score=" in deployment_context
-    assert "Recent prompt confidence [workstream_blurb.v2/medium]: score=" in deployment_context
-    assert "Recent prompt performance [workstream_blurb.v2]: score=" in deployment_context
-    assert "Prompt leaderboard [workstream_blurb] #1: workstream_blurb.v2; score=" in deployment_context
-    assert "Prompt leaderboard [workstream_blurb] #2: workstream_blurb.v1; score=" in deployment_context
-    assert "Recent prompt model [workstream_blurb.v2/gpt-4.1-mini]: score=" in deployment_context
-    assert "Recent model performance [gpt-4.1-mini]: score=" in deployment_context
+    assert "Recent calibration [" not in deployment_context
+    assert "Recent confidence calibration [" not in deployment_context
+    assert "Recent prompt " not in deployment_context
+    assert "Recent model performance [" not in deployment_context
     assert "Rolling summary [acme]" in deployment_context
     assert "Approved signal 2026-05-05T17:30:00+00:00 [icm]: IcM 12345: Fleet capacity alert; status=Active" in deployment_context
     assert "Rolling summary [diagnostics_surface]" not in deployment_context

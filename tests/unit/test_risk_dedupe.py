@@ -129,6 +129,28 @@ def test_detect_supersede_cycle_entered_by_multiple_chains() -> None:
     assert detect_risk_duplicates(tuple(reversed(risks))) == findings
 
 
+def test_detect_supersede_merge_and_fork_without_mutating_edges() -> None:
+    risks = (
+        _risk("old-a", title="old-a", superseded_by="new"),
+        _risk("old-b", title="old-b", superseded_by="new"),
+        _risk("forked", title="forked", superseded_by="replacement-a"),
+        _risk("new", title="new"),
+        _risk("replacement-a", title="replacement-a"),
+        _risk("replacement-b", title="replacement-b", supersedes="forked"),
+    )
+
+    findings = detect_risk_duplicates(risks)
+
+    assert RiskDedupeFinding(
+        kind="supersede_merge", risk_ids=("new", "old-a", "old-b"),
+    ) in findings
+    assert RiskDedupeFinding(
+        kind="supersede_fork",
+        risk_ids=("forked", "replacement-a", "replacement-b"),
+    ) in findings
+    assert detect_risk_duplicates(tuple(reversed(risks))) == findings
+
+
 def test_detect_supersede_self_cycle_after_chain() -> None:
     risks = (
         _risk("a", title="a", superseded_by="b"),

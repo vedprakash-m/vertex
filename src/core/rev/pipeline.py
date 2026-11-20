@@ -48,7 +48,7 @@ from src.core.ledger.rev_evidence import (
     build_metadata_defaults,
     store_admitted_excerpt,
 )
-from src.core.ledger.source_refs import EmailRef
+from src.core.ledger.source_refs import EmailRef, SharePointDocRef, SourceRef, WorkIQRef
 from src.core.rev.entity_types import EntityType
 from src.core.rev.governor import BudgetLimits, Governor, GovernorDecision
 from src.core.rev.normalizer import dedupe_core_hash_for
@@ -391,6 +391,7 @@ def run_rev_cycle(
             break
         if (
             hydrated.identity.source_type is EntityType.MESSAGE
+            and hydrated.route_metadata.get("route") != "workiq"
             and _parse_mail_source_time(hydrated.route_metadata.get("received_at")) is None
         ):
             counts["quarantined"] += 1
@@ -588,6 +589,11 @@ def run_rev_cycle(
             counts["explicitly_skipped"] += len(sorted_candidates) - (idx + 1)
             break
 
+    if counts["explicitly_skipped"] == 0 and counts["terminal_failures"] == 0:
+        checkpoint = getattr(deps.enumerator, "commit_enumeration_checkpoint", None)
+        if callable(checkpoint):
+            checkpoint()
+
     # P2-14 / OA-4: rotate stale/surplus files out of processed/ → processed/archive/.
     # Best-effort housekeeping at cycle end so the 3-dir atomicity model stays
     # bounded (raw .eml purged from the hot path after 90d / 500 files).
@@ -677,32 +683,71 @@ def _stage_candidates(
     """
     if not claims:
         return [], 0
-    if hydrated.identity.source_type is EntityType.MESSAGE:
-        received_at = _parse_mail_source_time(hydrated.route_metadata.get("received_at"))
-        if received_at is None:
+    route = hydrated.route_metadata.get("route")
+    if hydrated.identity.source_type is EntityType.DRIVE_ITEM:
+        occurred_at = _parse_mail_source_time(
+            hydrated.route_metadata.get("received_at")
+            or hydrated.route_metadata.get("last_modified")
+        )
+        if occurred_at is None:
             return [], 1
-        iso_failed = False
+    elif hydrated.identity.source_type is EntityType.MESSAGE:
+        occurred_at = _parse_mail_source_time(hydrated.route_metadata.get("received_at"))
+        if occurred_at is None:
+            return [], 1
     else:
-        received_at, iso_failed = _parse_iso(str(hydrated.route_metadata.get("received_at", "")))
+        occurred_at, _ = _parse_iso(str(hydrated.route_metadata.get("received_at", "")))
     vault_hash = evidence_refs[0].vault_hash if evidence_refs else None
     from src.core.ledger.source_refs import source_document_key
-    source_ref = EmailRef(
-        subject=str(hydrated.route_metadata.get("subject", "")),
-        sent_at=received_at,
-        sender=str(hydrated.route_metadata.get("sender", "")),
-        message_id=hydrated.identity.resource_id,
-        folder=hydrated.identity.container,
-        vault_hash=vault_hash,
-        # activation.md §6.12 / O-21 — thread-aware dedup: thread the RFC-2822
-        # conversation index into the EmailRef so replies in the same thread
-        # that re-assert the same fact dedupe at the candidate store.
-        thread_id=_optional_thread_id(hydrated.route_metadata.get("conversation_id")),
-    )
-    doc_key = source_document_key(source_ref)
+    source_ref: SourceRef
+    if route == "workiq":
+        identity_kind = str(hydrated.route_metadata.get("identity_kind") or "native_message")
+        source_ref = WorkIQRef(
+            artifact_id=hydrated.identity.resource_id,
+            artifact_kind=identity_kind,
+            retrieved_at=set_at,
+            vault_hash=vault_hash,
+        )
+        doc_key = f"workiq:{identity_kind}:{hydrated.identity.resource_id}"
+        pipeline_name = "rev_workiq"
+    elif hydrated.identity.source_type is EntityType.DRIVE_ITEM:
+        site = str(hydrated.route_metadata.get("site_id") or "").strip()
+        doc_path = str(
+            hydrated.route_metadata.get("page_url")
+            or hydrated.route_metadata.get("web_url")
+            or hydrated.route_metadata.get("page_id")
+            or ""
+        ).strip()
+        if not site or not doc_path:
+            return [], 0
+        source_ref = SharePointDocRef(
+            site=site,
+            doc_path=doc_path,
+            version=str(hydrated.route_metadata.get("etag") or "") or None,
+            modified_at=occurred_at,
+            vault_hash=vault_hash,
+        )
+        doc_key = source_document_key(source_ref)
+        pipeline_name = "rev_sharepoint"
+    else:
+        source_ref = EmailRef(
+            subject=str(hydrated.route_metadata.get("subject", "")),
+            sent_at=occurred_at,
+            sender=str(hydrated.route_metadata.get("sender", "")),
+            message_id=hydrated.identity.resource_id,
+            folder=hydrated.identity.container,
+            vault_hash=vault_hash,
+            # activation.md §6.12 / O-21 — thread-aware dedup: thread the RFC-2822
+            # conversation index into the EmailRef so replies in the same thread
+            # that re-assert the same fact dedupe at the candidate store.
+            thread_id=_optional_thread_id(hydrated.route_metadata.get("conversation_id")),
+        )
+        doc_key = source_document_key(source_ref)
+        pipeline_name = "rev_mail"
     batch_id = f"rev:{set_at.strftime('%Y%m%d%H%M%S')}"
     staged: list[CandidateEvent] = []
     for claim in claims:
-        shaped = _shape_ledger_event(claim, hydrated, received_at)
+        shaped = _shape_ledger_event(claim, hydrated, occurred_at)
         if shaped is None:
             continue  # unrecognised event type — no false-fact staging (W1-3)
         event_type, payload = shaped
@@ -724,11 +769,11 @@ def _stage_candidates(
             program_id=program_id,
             proposed_event_type=event_type,
             proposed_payload=payload,
-            proposed_occurred_at=received_at,
+            proposed_occurred_at=occurred_at,
             proposed_temporal_confidence="exact",
             proposed_confidence="medium",
             source_ref=source_ref,
-            pipeline="rev_mail",
+            pipeline=pipeline_name,
             extraction_confidence=claim.extraction_confidence,
             entity_resolution=entity_resolution,
             dedupe_key=candidate_id,
@@ -747,7 +792,7 @@ def _stage_candidates(
         # so the run-state transition and verifier call still fire on resume.
         append_candidate(candidate, programs_root=programs_root)
         staged.append(candidate)
-    return staged, (1 if iso_failed else 0)
+    return staged, 0
 
 
 # REV claim classification → registered ledger event type (§5.8). The claim's
@@ -1493,6 +1538,9 @@ def _write_cycle_checkpoint(program_id: str, report: RevCycleReport, programs_ro
         "cycle_integrity_ok": report.cycle_integrity_ok,
         "candidates_staged": report.candidates_staged,
         "enumerated": report.enumerated,
+        "hydrated": report.hydrated,
+        "quarantined": report.quarantined,
+        "metadata_only": report.metadata_only,
         "processed_successfully": report.processed_successfully,
         "policy_denied": report.policy_denied,
         "explicitly_skipped": report.explicitly_skipped,
@@ -1502,6 +1550,9 @@ def _write_cycle_checkpoint(program_id: str, report: RevCycleReport, programs_ro
         "source_unreachable": report.source_unreachable,
         "extraction_degraded": report.extraction_degraded,
         "wall_clock_seconds": report.wall_clock_seconds,
+        "stop_reason": report.stop_reason,
+        "breached_budget": report.breached_budget,
+        "date_parse_failures": report.date_parse_failures,
     }
     last_path = rev_dir / "last_cycle.json"
     tmp_path = rev_dir / "last_cycle.json.tmp"
@@ -1525,6 +1576,9 @@ def _write_cycle_checkpoint(program_id: str, report: RevCycleReport, programs_ro
             "cycle_integrity_ok": report.cycle_integrity_ok,
             "candidates_staged": report.candidates_staged,
             "enumerated": report.enumerated,
+            "hydrated": report.hydrated,
+            "quarantined": report.quarantined,
+            "metadata_only": report.metadata_only,
             "processed_successfully": report.processed_successfully,
             "policy_denied": report.policy_denied,
             "explicitly_skipped": report.explicitly_skipped,
@@ -1533,6 +1587,9 @@ def _write_cycle_checkpoint(program_id: str, report: RevCycleReport, programs_ro
             "source_unreachable": report.source_unreachable,
             "extraction_degraded": report.extraction_degraded,
             "wall_clock_seconds": report.wall_clock_seconds,
+            "stop_reason": report.stop_reason,
+            "breached_budget": report.breached_budget,
+            "date_parse_failures": report.date_parse_failures,
         })
         # Bound to the last _CYCLE_HISTORY_MAX_ENTRIES cycles (oldest dropped).
         if len(existing) > _CYCLE_HISTORY_MAX_ENTRIES:

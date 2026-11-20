@@ -13,9 +13,18 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+from uuid import NAMESPACE_URL, uuid5
 
 import yaml
 
+from src.core.governed_feedback_lifecycle import (
+    FeedbackKind as GovernedFeedbackKind,
+    FeedbackPrivacyClass,
+    FeedbackRetentionClass,
+    FeedbackTelemetry,
+    FeedbackValue,
+    record_feedback_observation,
+)
 from src.core.journal import PROGRAMS_ROOT
 
 FeedbackKind = Literal["source-fix", "claim-fix", "risk-fix", "owner-fix", "taxonomy-fix"]
@@ -186,34 +195,46 @@ def record_structured_feedback(
     issue_number: int,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> None:
-    """Append a DRI's structured correction to the review feedback log."""
-    import json
-    import os
-    import portalocker
-
-    path = (
-        programs_root
-        / program_id
-        / "reviews"
-        / f"feedback_issue_{issue_number:03d}.jsonl"
+    """Persist a typed DRI correction through the governed feedback seam."""
+    kind = {
+        "source-fix": GovernedFeedbackKind.BINDING_CORRECTION,
+        "claim-fix": GovernedFeedbackKind.BINDING_CORRECTION,
+        "risk-fix": GovernedFeedbackKind.RISK_OVERRIDE,
+        "owner-fix": GovernedFeedbackKind.OWNER_CORRECTION,
+        "taxonomy-fix": GovernedFeedbackKind.CATEGORY_CORRECTION,
+    }.get(feedback.kind)
+    if kind is None:
+        raise ValueError(f"Unknown structured feedback kind {feedback.kind!r}.")
+    if not feedback.reviewed_by.strip():
+        raise ValueError("Structured feedback requires an approving reviewer.")
+    approval_ref = f"review:{program_id}:issue:{issue_number:03d}"
+    record_feedback_observation(
+        FeedbackTelemetry(
+            observation_id=str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"{approval_ref}:{feedback.kind}:{feedback.target_id}:{feedback.captured_at.isoformat()}",
+                )
+            ),
+            program_id=program_id,
+            kind=kind,
+            target_type="review_target",
+            target_id=feedback.target_id,
+            evidence_refs=(feedback.target_id, approval_ref),
+            before_value=FeedbackValue.redacted(),
+            after_value=FeedbackValue.text_hash(feedback.correction),
+            reason=f"approved structured {feedback.kind} correction",
+            actor_role="reviewer",
+            snapshot_ref=approval_ref,
+            privacy_class=FeedbackPrivacyClass.RESTRICTED,
+            retention_class=FeedbackRetentionClass.GOVERNED,
+            approved_by=feedback.reviewed_by,
+            approved_at=feedback.captured_at,
+            approval_ref=approval_ref,
+            observed_at=feedback.captured_at,
+        ),
+        programs_root=programs_root,
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "kind": feedback.kind,
-        "target_id": feedback.target_id,
-        "correction": feedback.correction,
-        "captured_at": feedback.captured_at.isoformat(),
-        "reviewed_by": feedback.reviewed_by,
-    }
-    payload = json.dumps(record, ensure_ascii=False) + "\n"
-    with path.open("a", encoding="utf-8") as handle:
-        portalocker.lock(handle, portalocker.LOCK_EX)
-        try:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        finally:
-            portalocker.unlock(handle)
 
 
 @dataclass(frozen=True, slots=True)

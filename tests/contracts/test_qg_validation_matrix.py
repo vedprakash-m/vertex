@@ -84,6 +84,7 @@ QG_REGISTRY: list[tuple[str, bool, str]] = [
     ("QG-B3", True, "QG-B3"),  # Bridge seeded-narrative revision
     # Claim-extraction calibration (renamed from QG-18)
     ("QG-CE1", True, "QG-CE1"),
+    ("RELO-QG-05", False, "RELO-QG-05"),  # Claim evidence is release-blocking
     # Persona signal gate (persona governance spec)
     ("QG-P", False, "QG-P"),   # Persona signal compliance (hard block)
     # Context integrity gates (program-context-maturity §5)

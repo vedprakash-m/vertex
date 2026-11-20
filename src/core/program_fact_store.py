@@ -400,6 +400,11 @@ class ProgramFactSnapshot:
     # queryable axis rather than merely stored-but-inert columns.
     valid_at: datetime | None = None
     source_diagnostics: tuple[FactSourceDiagnostic, ...] = ()
+    recovered_from_snapshot_id: str | None = None
+
+
+class _PinnedSnapshotMembershipUnavailable(ConfigError):
+    """The retained pin exists, but its member revisions are no longer present."""
 
 
 class ProgramFactEnvelope(TypedDict, total=False):
@@ -1566,6 +1571,56 @@ class ProgramFactStore:
         return pin
 
     def load_pinned_snapshot(self, snapshot_id: str) -> ProgramFactSnapshot:
+        try:
+            return self._load_pinned_snapshot_exact(snapshot_id)
+        except _PinnedSnapshotMembershipUnavailable:
+            pass
+        with self._connect() as connection:
+            requested = connection.execute(
+                """
+                SELECT snapshot_id, created_at, snapshot_as_of, snapshot_valid_at,
+                       pinned_revision_count, content_sha256
+                FROM program_fact_snapshot_pins
+                WHERE snapshot_id = ? AND program_id = ?
+                """,
+                (snapshot_id, self._program_id),
+            ).fetchone()
+            candidates = () if requested is None else connection.execute(
+                """
+                SELECT snapshot_id
+                FROM program_fact_snapshot_pins
+                WHERE program_id = ? AND snapshot_id != ? AND created_at < ?
+                  AND membership_version = 2
+                  AND pinned_revision_count = ?
+                  AND content_sha256 = ?
+                  AND snapshot_as_of = ?
+                  AND snapshot_valid_at = ?
+                ORDER BY created_at DESC, snapshot_id DESC
+                """,
+                (
+                    self._program_id,
+                    snapshot_id,
+                    requested["created_at"],
+                    requested["pinned_revision_count"],
+                    requested["content_sha256"],
+                    requested["snapshot_as_of"],
+                    requested["snapshot_valid_at"],
+                ),
+            ).fetchall()
+        if requested is None:
+            raise ConfigError("Unknown fact snapshot pin.")
+        for row in candidates:
+            predecessor_id = row["snapshot_id"]
+            try:
+                predecessor = self._load_pinned_snapshot_exact(predecessor_id)
+            except ConfigError:
+                continue
+            return replace(predecessor, recovered_from_snapshot_id=predecessor_id)
+        raise ConfigError(
+            "Fact snapshot membership is unavailable and no compatible committed predecessor is retained."
+        )
+
+    def _load_pinned_snapshot_exact(self, snapshot_id: str) -> ProgramFactSnapshot:
         with self._connect() as connection:
             pin = connection.execute(
                 "SELECT * FROM program_fact_snapshot_pins WHERE snapshot_id = ? AND program_id = ?",
@@ -1590,7 +1645,7 @@ class ProgramFactStore:
             valid_at = _snapshot_datetime(pin["snapshot_valid_at"], required=True)
             assert as_of is not None and valid_at is not None
             count = pin["pinned_revision_count"]
-            if not isinstance(count, int) or count < 0 or len(rows) != count:
+            if not isinstance(count, int) or count < 0:
                 raise ConfigError("Invalid fact snapshot membership.")
             digest = pin["content_sha256"]
             if (
@@ -1598,6 +1653,12 @@ class ProgramFactStore:
                 or any(character not in "0123456789abcdef" for character in digest)
             ):
                 raise ValueError("invalid content digest")
+            if len(rows) < count or any(
+                row["revision_id"] is None or row["member_revision_id"] is None for row in rows
+            ):
+                raise _PinnedSnapshotMembershipUnavailable("Retained fact snapshot members are unavailable.")
+            if len(rows) != count:
+                raise ConfigError("Invalid fact snapshot membership.")
             facts = []
             for row in rows:
                 recorded_at = _snapshot_datetime(row["recorded_at"], required=True)
@@ -1619,7 +1680,9 @@ class ProgramFactStore:
             if fact_snapshot_content_sha256(revisions) != digest:
                 raise ValueError("content changed")
         except (KeyError, TypeError, ValueError) as exc:
-            raise ConfigError("Invalid or non-reconstructible fact snapshot capture.") from exc
+            raise ConfigError(
+                "Invalid, content-changed or non-reconstructible fact snapshot capture."
+            ) from exc
         return ProgramFactSnapshot(self._program_id, as_of, revisions, valid_at)
 
     def load_snapshot_pin(self, snapshot_id: str) -> FactSnapshotPin | None:
