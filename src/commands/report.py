@@ -191,7 +191,7 @@ from src.commands.report_detail import _normalize_workstream_blurb
 from src.commands.report_detail import _resolve_workstream_blurb
 from src.commands.report_detail import _slice_contract_map
 from src.commands.report_detail import _visible_detail_section_ids as _visible_detail_section_ids_impl
-from src.commands.report_email import _build_draft_email_message, _build_draft_email_sender, _build_email_preheader, _build_email_subject, _build_preview_eml_bytes, _distribution_to, _resolve_email_subject
+from src.commands.report_email import _build_draft_email_message, _build_draft_email_sender, _build_email_preheader, _build_email_subject, _build_preview_eml_bytes, _distribution_to, _resolve_email_subject, format_communication_budget_observations, observe_report_email_communication_budget
 from src.commands.report_continuity import _continuity_chapter_title
 from src.commands.report_continuity import _build_continuity_deltas
 from src.commands.report_continuity import _active_chapter_notes, _build_chapter_templates, _build_continuity_exec_summary_template as _build_continuity_exec_summary_template_impl
@@ -745,6 +745,8 @@ def report_command(
         else:
             bundle = load_bundle(edition, reports_root=reports_root, programs_root=programs_root)
             try:
+                for msg in format_communication_budget_observations(observe_report_email_communication_budget(bundle=bundle, edition_name=edition, top_items=artifacts.report.top_items if hasattr(artifacts.report, "top_items") else (), archive_root=archive_root, manifest_metadata=artifacts.manifest.metadata, now=artifacts.report.ado_data_as_of)):
+                    typer.echo(msg)
                 _build_draft_email_sender()(_build_draft_email_message(bundle, artifacts))
                 typer.echo(f"Draft email sent to {bundle.config.author.email}.")
             except (AuthError, QueryError) as error:
@@ -1463,6 +1465,7 @@ class _OutputStage:
             programs_root=ctx.programs_root,
             report_html_path=html_path,
         )
+        observe_report_email_communication_budget(bundle=ctx.bundle, edition_name=ctx.edition_name, top_items=getattr(render_state.health, "top_items", None) or getattr(ctx, "top_items", None) or (), archive_root=ctx.archive_root, manifest_metadata=validation_state.manifest.metadata, now=ctx.data_as_of)
         manifest_path = write_run_manifest(
             ctx.edition_name,
             ctx.resolved_issue_number,
