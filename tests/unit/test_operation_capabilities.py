@@ -52,7 +52,7 @@ def test_mutation_capabilities_are_compensable_with_hidden_marker() -> None:
         assert capability.compensable is True
         assert capability.supports_remote_marker is True
         assert capability.marker_strategy == "hidden_comment"
-        assert capability.reconcilable is False
+        assert capability.reconcilable is True
     assert lookup_capability("add_comment.v1").effect_class is EffectClass.APPEND  # type: ignore[union-attr]
     assert lookup_capability("set_field.v1").effect_class is EffectClass.MUTATE  # type: ignore[union-attr]
 

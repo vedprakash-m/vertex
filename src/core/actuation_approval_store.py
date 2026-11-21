@@ -13,13 +13,16 @@ from typing import Mapping
 from src.core._db import open_program_db_with_retry as open_program_db
 from src.core.ledger.durable_outbox_store import (
     _SCHEMA_SQL,
+    _append_state_receipt,
     _entry_from_row,
+    _state_receipt,
     OutboxEntry,
     OutboxError,
 )
 from src.core.operation_capabilities import (
     CapabilityRefusal,
     EffectClass,
+    approved_remote_marker,
     create_target_identity,
     desired_effect_hash,
     lookup_capability,
@@ -87,6 +90,12 @@ CREATE TABLE IF NOT EXISTS outbox_rate_reservations (
 );
 CREATE INDEX IF NOT EXISTS ix_outbox_rate_reservations_key
     ON outbox_rate_reservations(rate_key);
+CREATE TABLE IF NOT EXISTS outbox_marker_reservations (
+    marker_value TEXT PRIMARY KEY,
+    outbox_id TEXT NOT NULL,
+    semantic_effect_key TEXT NOT NULL,
+    reserved_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS outbox_effects (
     effect_id TEXT PRIMARY KEY,
     outbox_id TEXT NOT NULL
@@ -98,7 +107,16 @@ _OUTBOX_SELECT = (
     "lease_fencing_token, lease_expires_at, attempt_count, next_attempt_at, "
     "remote_request_hash, remote_response_hash, failure_reason, created_at, updated_at"
 )
-_ACTIVE_STATUSES = ("pending", "leased", "dispatched")
+_ACTIVE_STATUSES = (
+    "pending",
+    "failed_retryable",
+    "leased",
+    "dispatched",
+    "succeeded",
+    "audited",
+    "uncertain_remote_state",
+    "compensation_required",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +242,34 @@ def _request_semantic_key(request: ActuationAdmissionRequest) -> str:
         raise OutboxError(str(error)) from error
 
 
+def _request_marker(request: ActuationAdmissionRequest) -> str | None:
+    semantic = _request_semantic_key(request)
+    try:
+        return approved_remote_marker(
+            operation=request.operation,
+            semantic_effect_key=semantic,
+        )
+    except ValueError as error:
+        raise OutboxError(str(error)) from error
+
+
+def load_marker_outbox_id(db_path: Path, marker: str) -> str | None:
+    if not db_path.exists():
+        return None
+    with open_program_db(db_path, read_only=True) as connection:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'outbox_marker_reservations'"
+        ).fetchone()
+        if table is None:
+            return None
+        row = connection.execute(
+            "SELECT outbox_id FROM outbox_marker_reservations WHERE marker_value = ?",
+            (marker,),
+        ).fetchone()
+    return None if row is None else str(row[0])
+
+
 def _validate_request(request: ActuationAdmissionRequest) -> None:
     for name, value in (
         ("intent_id", request.intent_id),
@@ -276,6 +322,12 @@ def _validate_request(request: ActuationAdmissionRequest) -> None:
         or payload.get("desired_effect") != request.desired_effect
     ):
         raise OutboxError("Retained payload identity does not match the approved request")
+    expected_marker = _request_marker(request)
+    if (
+        expected_marker is not None
+        and payload.get("approved_remote_marker") != expected_marker
+    ):
+        raise OutboxError("Retained payload does not contain the approved remote marker")
     _request_semantic_key(request)
 
 
@@ -377,6 +429,49 @@ def _approval_matches_row(
     )
 
 
+def _authorized_payload_failure(
+    *,
+    request: ActuationAdmissionRequest,
+    payload_json: str,
+    approval_id: str,
+    approval_principal: str,
+    approval_policy_version: str,
+    evidence_snapshot_id: str,
+) -> str | None:
+    try:
+        payload = _canonical_payload(payload_json)
+    except OutboxError as error:
+        return str(error)
+    raw = payload.get("authorized_effect")
+    if not isinstance(raw, Mapping):
+        return "Retained payload has no authorized-effect binding"
+    expected_values = {
+        "program_id": request.program_id,
+        "intent_id": request.intent_id,
+        "approval_id": approval_id,
+        "provider": request.provider,
+        "tenant_id": request.tenant,
+        "project": request.project,
+        "operation": request.operation,
+        "target_identity": request.target_identity,
+        "execution_principal": approval_principal,
+        "evidence_version": evidence_snapshot_id,
+        "policy_version": approval_policy_version,
+    }
+    for field, expected in expected_values.items():
+        if raw.get(field) != expected:
+            return f"Authorized-effect {field} does not match the approval admission"
+    desired = raw.get("desired_value")
+    if not isinstance(desired, Mapping):
+        return "Authorized-effect desired value is invalid"
+    try:
+        if desired_effect_hash(desired) != desired_effect_hash(request.desired_effect):
+            return "Authorized-effect desired value does not match the approved payload"
+    except ValueError:
+        return "Authorized-effect desired value is not canonical JSON"
+    return None
+
+
 def enqueue_approved_actuation_intent(
     db_path: Path,
     *,
@@ -393,6 +488,7 @@ def enqueue_approved_actuation_intent(
         raise OutboxError("Approval revision must be a positive integer")
     if approval.payload_sha256 != _payload_hash(request.payload_json):
         raise OutboxError("Approval payload hash does not match the retained payload")
+    marker = _request_marker(request)
 
     with open_program_db(db_path, durability="strict") as connection:
         connection.executescript(_SCHEMA_SQL + _APPROVAL_SCHEMA_SQL)
@@ -424,6 +520,18 @@ def enqueue_approved_actuation_intent(
             ).fetchone()
             if existing is None:
                 raise OutboxError("Semantic effect is bound to a missing outbox row")
+            if marker is not None:
+                marker_row = connection.execute(
+                    "SELECT outbox_id, semantic_effect_key "
+                    "FROM outbox_marker_reservations WHERE marker_value = ?",
+                    (marker,),
+                ).fetchone()
+                if (
+                    marker_row is None
+                    or marker_row["outbox_id"] != existing_id
+                    or marker_row["semantic_effect_key"] != approval.semantic_effect_key
+                ):
+                    raise OutboxError("Approved marker reservation is missing or changed")
             return _entry_from_row(tuple(existing))
 
         existing = connection.execute(
@@ -447,6 +555,20 @@ def enqueue_approved_actuation_intent(
                 raise OutboxError("Existing provider request has different approval or payload identity")
             return _entry_from_row(tuple(existing))
 
+        approval_principal = approval.approver.principal
+        if not isinstance(approval_principal, str) or not approval_principal.strip():
+            raise OutboxError("Approved payload has no durable approval principal")
+        binding_failure = _authorized_payload_failure(
+            request=request,
+            payload_json=request.payload_json,
+            approval_id=approval.approval_id,
+            approval_principal=approval_principal,
+            approval_policy_version=approval.approval_policy_version,
+            evidence_snapshot_id=approval.evidence_snapshot_id,
+        )
+        if binding_failure is not None:
+            raise OutboxError(binding_failure)
+
         conflict = connection.execute(
             f"""
             SELECT a.outbox_id
@@ -463,6 +585,14 @@ def enqueue_approved_actuation_intent(
         ).fetchone()
         if conflict is not None:
             raise OutboxError("A conflicting active intent is already reserved for this target")
+
+        if marker is not None:
+            marker_conflict = connection.execute(
+                "SELECT outbox_id FROM outbox_marker_reservations WHERE marker_value = ?",
+                (marker,),
+            ).fetchone()
+            if marker_conflict is not None and marker_conflict["outbox_id"] != outbox_id:
+                raise OutboxError("Approved marker is reserved by a different outbox effect")
 
         reservation_count = int(connection.execute(
             "SELECT COUNT(*) FROM outbox_rate_reservations WHERE rate_key = ?",
@@ -507,6 +637,15 @@ def enqueue_approved_actuation_intent(
             "INSERT INTO outbox_effects (effect_id, outbox_id) VALUES (?, ?)",
             (approval.semantic_effect_key, outbox_id),
         )
+        if marker is not None:
+            connection.execute(
+                """
+                INSERT INTO outbox_marker_reservations (
+                    marker_value, outbox_id, semantic_effect_key, reserved_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (marker, outbox_id, approval.semantic_effect_key, now_wire),
+            )
         connection.execute(
             "INSERT INTO outbox_rate_reservations (outbox_id, rate_key, reserved_at) VALUES (?, ?, ?)",
             (outbox_id, request.rate_scope, now_wire),
@@ -561,7 +700,8 @@ def revoke_actuation_approval(
         )
         rows = connection.execute(
             """
-            SELECT o.outbox_id, o.status
+            SELECT o.outbox_id, o.status, o.domain, o.correlation_id, o.payload_json,
+                   o.lease_fencing_token, o.attempt_count
             FROM outbox_admissions a JOIN outbox o ON o.outbox_id = a.outbox_id
             WHERE a.approval_id = ? ORDER BY o.created_at
             """,
@@ -569,7 +709,7 @@ def revoke_actuation_approval(
         ).fetchall()
         for row in rows:
             outbox_id = str(row["outbox_id"])
-            if row["status"] in {"pending", "leased"}:
+            if row["status"] in {"pending", "leased", "failed_retryable"}:
                 connection.execute(
                     """
                     UPDATE outbox
@@ -582,6 +722,31 @@ def revoke_actuation_approval(
                 connection.execute(
                     "DELETE FROM outbox_rate_reservations WHERE outbox_id = ?",
                     (outbox_id,),
+                )
+                connection.execute(
+                    "DELETE FROM outbox_marker_reservations WHERE outbox_id = ?",
+                    (outbox_id,),
+                )
+                receipt_at = _wire(revoked_at)
+                assert receipt_at is not None
+                receipt_json = _state_receipt(
+                    outbox_id=outbox_id,
+                    domain=str(row["domain"]),
+                    correlation_id=str(row["correlation_id"]),
+                    payload_json=str(row["payload_json"]),
+                    terminal_status="cancelled",
+                    owner=revoked_by.principal or revoked_by.actor,
+                    fencing_token=int(row["lease_fencing_token"]),
+                    attempt_count=int(row["attempt_count"]),
+                    reason=f"Approval revoked: {reason}",
+                    recorded_at=receipt_at,
+                )
+                _append_state_receipt(
+                    connection,
+                    outbox_id,
+                    "cancelled",
+                    receipt_at,
+                    receipt_json,
                 )
                 cancelled.append(outbox_id)
             elif row["status"] not in {"cancelled", "failed_terminal", "manually_resolved", "completed"}:
@@ -759,6 +924,28 @@ def _verify_in_transaction(
             connection, entry, "Current effect reservation is missing or changed", cancelled=False,
             now=now,
         )
+    marker = approved_remote_marker(
+        operation=str(admission["operation"]),
+        semantic_effect_key=str(admission["semantic_effect_key"]),
+    )
+    if marker is not None:
+        marker_reservation = connection.execute(
+            "SELECT outbox_id, semantic_effect_key "
+            "FROM outbox_marker_reservations WHERE marker_value = ?",
+            (marker,),
+        ).fetchone()
+        if (
+            marker_reservation is None
+            or marker_reservation["outbox_id"] != outbox_id
+            or marker_reservation["semantic_effect_key"] != admission["semantic_effect_key"]
+        ):
+            return _block_in_transaction(
+                connection,
+                entry,
+                "Approved marker reservation is missing or changed",
+                cancelled=False,
+                now=now,
+            )
     conflict = connection.execute(
         f"""
         SELECT a.outbox_id
@@ -818,6 +1005,40 @@ def _admission_failure(
         return "Approval payload identity changed", "cancelled"
     if approval["semantic_effect_key"] != admission["semantic_effect_key"]:
         return "Approval semantic effect changed", "cancelled"
+    payload = _canonical_payload(entry.payload_json)
+    desired = payload.get("desired_effect")
+    program_id = payload.get("program_id")
+    if not isinstance(desired, Mapping):
+        return "Retained authorized desired effect is missing", "failed_terminal"
+    if not isinstance(program_id, str) or not program_id.strip():
+        return "Retained approval program identity is missing", "failed_terminal"
+    request = ActuationAdmissionRequest(
+        program_id=program_id,
+        intent_id=str(admission["intent_id"]),
+        proposal_id="retained-admission",
+        provider=str(admission["provider"]),
+        tenant=str(admission["tenant"]),
+        project=str(admission["project"]),
+        operation=str(admission["operation"]),
+        target_identity=str(admission["target_identity"]),
+        causal_occurrence_id=str(admission["causal_occurrence_id"]),
+        desired_effect=desired,
+        payload_json=entry.payload_json,
+        approval_policy_version=str(approval["approval_policy_version"]),
+        rate_scope=str(admission["rate_key"]),
+        rate_limit=int(admission["rate_limit"]),
+        blast_radius=int(admission["blast_radius"]),
+        scope_enabled=True,
+        rule_enabled=True,
+        expected_revision=(
+            int(admission["expected_revision"])
+            if admission["expected_revision"] is not None
+            else None
+        ),
+        expected_state=admission["expected_state"],
+        evidence_snapshot_id=str(approval["evidence_snapshot_id"]),
+        evidence_expires_at=_parse(approval["evidence_expires_at"]),
+    )
     if (
         not isinstance(observation.evidence_snapshot_id, str)
         or not observation.evidence_snapshot_id.strip()
@@ -840,6 +1061,16 @@ def _admission_failure(
         return "Operation capability is not qualified", "failed_terminal"
     if int(admission["blast_radius"]) > capability.max_blast_radius:
         return "Blast radius exceeds operation capability", "failed_terminal"
+    binding_failure = _authorized_payload_failure(
+        request=request,
+        payload_json=entry.payload_json,
+        approval_id=str(admission["approval_id"]),
+        approval_principal=str(approval["approver_principal"]),
+        approval_policy_version=str(approval["approval_policy_version"]),
+        evidence_snapshot_id=str(approval["evidence_snapshot_id"]),
+    )
+    if binding_failure is not None:
+        return binding_failure, "failed_terminal"
     expected_target_count = 0 if capability.effect_class is EffectClass.CREATE else 1
     if observation.target_count != expected_target_count:
         return "Target identity is not unique", "cancelled"
@@ -869,11 +1100,37 @@ def _block_in_transaction(
             "DELETE FROM outbox_rate_reservations WHERE outbox_id = ?",
             (entry.outbox_id,),
         )
+        connection.execute(
+            "DELETE FROM outbox_marker_reservations WHERE outbox_id = ?",
+            (entry.outbox_id,),
+        )
     row = connection.execute(
         f"SELECT {_OUTBOX_SELECT} FROM outbox WHERE outbox_id = ?",
         (entry.outbox_id,),
     ).fetchone()
-    return QualifiedDispatchAdmission(False, _entry_from_row(tuple(row)), reason)
+    blocked = _entry_from_row(tuple(row))
+    recorded_at = _wire(now)
+    assert recorded_at is not None
+    receipt_json = _state_receipt(
+        outbox_id=blocked.outbox_id,
+        domain=blocked.domain,
+        correlation_id=blocked.correlation_id,
+        payload_json=blocked.payload_json,
+        terminal_status=blocked.status,
+        owner=blocked.lease_owner or "admission",
+        fencing_token=blocked.lease_fencing_token,
+        attempt_count=blocked.attempt_count,
+        reason=reason,
+        recorded_at=recorded_at,
+    )
+    _append_state_receipt(
+        connection,
+        blocked.outbox_id,
+        blocked.status,
+        recorded_at,
+        receipt_json,
+    )
+    return QualifiedDispatchAdmission(False, blocked, reason)
 
 
 __all__ = [
@@ -884,6 +1141,7 @@ __all__ = [
     "QualifiedDispatchAdmission",
     "create_actuation_approval",
     "enqueue_approved_actuation_intent",
+    "load_marker_outbox_id",
     "mark_qualified_dispatched_with_workspace_lease",
     "revoke_actuation_approval",
     "verify_qualified_admission",
