@@ -13,6 +13,7 @@ from threading import Barrier, Event
 import pytest
 
 from src.ai.client import BudgetExceeded
+from src.ai import cost_guard as cost_guard_module
 from src.ai.cost_guard import CostGuard, CostReservation, load_latest_run_state, load_run_states
 from src.core.exceptions import StateError
 
@@ -573,6 +574,160 @@ def test_cost_guard_chain_draw_refuses_changed_scope(tmp_path: Path) -> None:
         assert connection.execute(
             "SELECT COUNT(*) FROM ai_cost_reservations"
         ).fetchone() == (1,)
+
+
+def test_cost_guard_recovery_preserves_reservation_identity(tmp_path: Path) -> None:
+    guard = CostGuard(
+        edition=EDITION_NAME,
+        run_id="identity-recovery",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+        feature_id="risk_proposal_generator",
+        policy_version="policy-v2",
+        principal="operator@example.invalid",
+        snapshot_id="snapshot-123",
+    )
+    reservation = guard.reserve_call(0.25)
+
+    recovery = guard.recovery_snapshot()
+
+    assert recovery.reservations[0].reservation_id == reservation.reservation_id
+    assert (
+        recovery.reservations[0].feature_id,
+        recovery.reservations[0].policy_version,
+        recovery.reservations[0].principal,
+        recovery.reservations[0].snapshot_id,
+    ) == (
+        "risk_proposal_generator",
+        "policy-v2",
+        "operator@example.invalid",
+        "snapshot-123",
+    )
+
+
+@pytest.mark.parametrize("field", ["feature_id", "policy_version", "principal", "snapshot_id"])
+@pytest.mark.parametrize("value", ["", "   ", 7, False])
+def test_cost_guard_rejects_invalid_reservation_identity(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    arguments = {
+        "edition": EDITION_NAME,
+        "run_id": "invalid-identity",
+        "budget_usd": 1.0,
+        "programs_root": tmp_path,
+        field: value,
+    }
+
+    with pytest.raises(StateError, match="Invalid cost guard reservation"):
+        CostGuard(**arguments)  # type: ignore[arg-type]
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cost_guard_recovery_empty_and_nonchain_reservation_paths(tmp_path: Path) -> None:
+    guard = CostGuard(
+        edition=EDITION_NAME,
+        run_id="empty-recovery",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+    assert not guard.recovery_snapshot().has_open_holds
+
+    reservation = guard.reserve_call(0.25)
+    recovery = guard.recovery_snapshot()
+    assert recovery.has_open_holds
+    assert recovery.chains == ()
+    with pytest.raises(StateError, match="not associated with a cost chain"):
+        guard.reconcile_chain_remainder(reservation.reservation_id)
+
+
+def test_cost_guard_chain_schema_migrates_legacy_scope(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE ai_cost_chains (chain_id INTEGER PRIMARY KEY, edition TEXT, "
+            "run_id TEXT, reserved_usd REAL, status TEXT, created_at TEXT, released_at TEXT)"
+        )
+        cost_guard_module._ensure_chain_schema(connection)
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(ai_cost_chains)")
+        }
+    assert "scope_key" in columns
+
+
+def test_cost_guard_reservation_schema_migrates_legacy_identity(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "legacy-reservations.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE ai_cost_reservations "
+            "(reservation_id INTEGER PRIMARY KEY, edition TEXT, run_id TEXT, "
+            "reserved_usd REAL, actual_usd REAL, status TEXT, created_at TEXT, settled_at TEXT)"
+        )
+        cost_guard_module._ensure_sqlite_schema(connection)
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(ai_cost_reservations)")
+        }
+    assert {"feature_id", "policy_version", "principal", "snapshot_id"} <= columns
+
+
+@pytest.mark.parametrize("scope", ["", "   ", 7])
+def test_cost_guard_rejects_invalid_chain_scope(tmp_path: Path, scope: object) -> None:
+    guard = CostGuard(
+        edition=EDITION_NAME,
+        run_id="invalid-scope",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+    with pytest.raises(StateError, match="scope"):
+        guard.reserve_call(0.25, chain_total_usd=0.5, chain_scope_key=scope)  # type: ignore[arg-type]
+
+
+def test_cost_guard_refuses_replaced_chain_scope(tmp_path: Path) -> None:
+    guard = CostGuard(
+        edition=EDITION_NAME,
+        run_id="replaced-scope",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+    reservation = guard.reserve_call(
+        0.25,
+        chain_total_usd=0.5,
+        chain_scope_key="scope-a",
+    )
+    with sqlite3.connect(guard.ledger_path) as connection:
+        connection.execute(
+            "UPDATE ai_cost_chains SET scope_key = 'scope-b' WHERE chain_id = ?",
+            (reservation.chain_id,),
+        )
+
+    with pytest.raises(StateError, match="scope has changed"):
+        guard.reserve_call(0.25, chain=reservation)
+
+
+@pytest.mark.parametrize("error_type", [sqlite3.OperationalError, sqlite3.DatabaseError])
+def test_cost_guard_recovery_surfaces_database_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]
+) -> None:
+    guard = CostGuard(
+        edition=EDITION_NAME,
+        run_id="recovery-failure",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+    guard.reserve_call(0.25)
+
+    def fail_open(*_args: object, **_kwargs: object) -> object:
+        raise error_type("private ledger detail")
+
+    monkeypatch.setattr(cost_guard_module, "open_program_db", fail_open)
+    with pytest.raises(StateError, match="recovery ledger"):
+        guard.recovery_snapshot()
 
 
 def test_reservation_handle_refuses_same_path_ledger_replacement(tmp_path: Path) -> None:

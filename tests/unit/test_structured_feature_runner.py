@@ -1368,6 +1368,80 @@ def test_released_cache_post_verification_change_is_refused(tmp_path: Path) -> N
         cache.get(identity, deserialize=lambda payload: payload)
 
 
+@pytest.mark.parametrize("failure", [PermissionError, sqlite3.DatabaseError])
+def test_released_cache_post_verification_storage_failure_is_contained(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: type[Exception],
+) -> None:
+    identity = _identity()
+    path = tmp_path / "released.sqlite3"
+    cache = _release_bound_cache(path)
+    cache.put(
+        identity,
+        "original",
+        serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"original").hexdigest(),
+        release_run_id="ignored",
+    )
+    original = runner_module.open_program_db
+    opens = 0
+
+    def fail_fence_open(*args: object, **kwargs: object):
+        nonlocal opens
+        opens += 1
+        if opens == 2:
+            raise failure("private storage detail")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "open_program_db", fail_fence_open)
+    with pytest.raises(StateError, match="Unable to verify retained"):
+        cache.get(identity, deserialize=lambda payload: payload)
+
+
+def test_released_cache_revocation_after_verification_is_refused(
+    tmp_path: Path,
+) -> None:
+    identity = _identity()
+    path = tmp_path / "released.sqlite3"
+    cache: ReleasedResultCache | None = None
+
+    def verify(_identity: CacheIdentity, _payload: str, _origin_run_id: str) -> bool:
+        assert cache is not None
+        cache.revoke_principal(identity.principal)
+        return True
+
+    cache = ReleasedResultCache(
+        path,
+        record_release=lambda _identity, _payload: "origin-run",
+        verify_release=verify,
+    )
+    cache.put(
+        identity,
+        "value",
+        serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"value").hexdigest(),
+        release_run_id="ignored",
+    )
+
+    with pytest.raises(StateError, match="revoked"):
+        cache.get(identity, deserialize=lambda payload: payload)
+
+
+def test_released_cache_evict_surfaces_storage_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identity = _identity()
+    cache = _release_bound_cache(tmp_path / "released.sqlite3")
+
+    def fail_open(*_args: object, **_kwargs: object) -> object:
+        raise sqlite3.DatabaseError("private storage detail")
+
+    monkeypatch.setattr(runner_module, "open_program_db", fail_open)
+    with pytest.raises(StateError, match="Unable to evict"):
+        cache.evict(identity)
+
+
 def test_released_cache_principal_revocation_is_durable_and_blocks_rewrite(
     tmp_path: Path,
 ) -> None:
@@ -1404,6 +1478,129 @@ def test_released_cache_principal_revocation_is_durable_and_blocks_rewrite(
             "SELECT COUNT(*) FROM released_result_cache WHERE cache_key = ?",
             (identity.cache_key(),),
         ).fetchone() == (0,)
+
+
+def test_released_cache_revocation_methods_cover_exact_and_feature_scopes(
+    tmp_path: Path,
+) -> None:
+    identity = _identity()
+    path = tmp_path / "released.sqlite3"
+    cache = _release_bound_cache(path)
+    cache.put(
+        identity,
+        "value",
+        serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"value").hexdigest(),
+        release_run_id="ignored",
+    )
+    assert cache.revoke_identity(identity) == 1
+
+    second_identity = replace(identity, request_hash="second-request")
+    cache.put(
+        second_identity,
+        "second",
+        serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"second").hexdigest(),
+        release_run_id="ignored",
+    )
+    assert cache.revoke_feature(identity.feature) == 1
+
+    with pytest.raises(StateError, match="revoked"):
+        cache.get(second_identity, deserialize=lambda payload: payload)
+
+
+@pytest.mark.parametrize("kind,value", [("unknown", "scope"), ("feature", ""), ("feature", 7)])
+def test_released_cache_rejects_invalid_revocation_scope(
+    tmp_path: Path, kind: str, value: object
+) -> None:
+    cache = _release_bound_cache(tmp_path / "released.sqlite3")
+    with pytest.raises(StateError, match="revocation"):
+        cache._revoke_scope(kind, value)  # type: ignore[arg-type]
+
+
+def test_released_cache_revocation_during_release_blocks_write(tmp_path: Path) -> None:
+    identity = _identity()
+    path = tmp_path / "released.sqlite3"
+    cache: ReleasedResultCache | None = None
+
+    def record_release(_identity: CacheIdentity, _payload: str) -> str:
+        assert cache is not None
+        cache.revoke_feature(identity.feature)
+        return "new-release"
+
+    cache = ReleasedResultCache(
+        path,
+        record_release=record_release,
+        verify_release=lambda _identity, _payload, _run_id: True,
+    )
+    with pytest.raises(StateError, match="revoked"):
+        cache.put(
+            identity,
+            "value",
+            serialize=lambda value: value,
+            released_content_hash=hashlib.sha256(b"value").hexdigest(),
+            release_run_id="ignored",
+        )
+
+
+def test_released_cache_sweep_removes_row_inserted_after_revocation(
+    tmp_path: Path,
+) -> None:
+    identity = _identity()
+    path = tmp_path / "released.sqlite3"
+    cache = _release_bound_cache(path)
+    cache.put(
+        identity,
+        "value",
+        serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"value").hexdigest(),
+        release_run_id="ignored",
+    )
+    cache.revoke_feature(identity.feature)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO released_result_cache "
+            "(cache_key, feature, principal, classification, payload, released_content_hash, "
+            "release_run_id, cached_at, selection_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                identity.cache_key(),
+                identity.feature,
+                identity.principal,
+                identity.classification,
+                "value",
+                hashlib.sha256(b"value").hexdigest(),
+                "stale-release",
+                datetime.now(timezone.utc).isoformat(),
+                identity.selection_json(),
+            ),
+        )
+
+    assert cache.sweep() == 1
+
+
+@pytest.mark.parametrize("failure", [PermissionError, sqlite3.DatabaseError])
+def test_released_cache_revocation_surfaces_storage_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: type[Exception]
+) -> None:
+    identity = _identity()
+    path = tmp_path / "released.sqlite3"
+    cache = _release_bound_cache(path)
+    cache.put(
+        identity,
+        "value",
+        serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"value").hexdigest(),
+        release_run_id="ignored",
+    )
+    original = runner_module.open_program_db
+
+    def fail_open(*_args: object, **kwargs: object):
+        raise failure("private storage detail")
+
+    monkeypatch.setattr(runner_module, "open_program_db", fail_open)
+    with pytest.raises(StateError, match="Unable to revoke"):
+        cache.revoke_feature(identity.feature)
+    monkeypatch.setattr(runner_module, "open_program_db", original)
 
 
 def test_runner_bypasses_unbound_released_cache(tmp_path: Path) -> None:

@@ -708,7 +708,7 @@ class ReleasedResultCache:
                             raise StateError(
                                 "Released-result cache row changed after release verification."
                             )
-                except sqlite3.DatabaseError as error:
+                except (sqlite3.DatabaseError, OSError) as error:
                     raise StateError(
                         f"Unable to verify retained released-result cache at {self._db_path}"
                     ) from error
@@ -928,7 +928,7 @@ class ReleasedResultCache:
                 )
                 connection.commit()
                 return cursor.rowcount
-        except sqlite3.DatabaseError as error:
+        except (sqlite3.DatabaseError, OSError) as error:
             raise StateError(
                 f"Unable to revoke released-result cache scope at {self._db_path}"
             ) from error
