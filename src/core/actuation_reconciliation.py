@@ -625,7 +625,8 @@ def _authorized_effect_for_entry(entry: OutboxEntry) -> AuthorizedEffect:
     except ValueError as error:
         raise OutboxError("Retained authorized-effect evidence is invalid") from error
     if (
-        authorized.operation != operation
+        authorized.program_id != payload.get("program_id")
+        or authorized.operation != operation
         or payload.get("operation_intent_id") != authorized.intent_id
         or payload.get("org") != authorized.tenant_id
         or payload.get("project") != authorized.project

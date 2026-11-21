@@ -44,6 +44,7 @@ def _uncertain_create(programs_root: Path) -> tuple[str, Path]:
         operation_intent_id="intent-1",
     )
     payload = {
+        "program_id": "fixture",
         "operation": "create_task.v1",
         "operation_intent_id": "intent-1",
         "proposal_id": "proposal-1",

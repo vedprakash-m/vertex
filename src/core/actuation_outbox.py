@@ -323,6 +323,7 @@ def enqueue_create_task_intent(
         program_id=program_id,
         operation=operation,
         target_identity=target_identity,
+        fallback_causal_occurrence_id=operation_intent_id,
         payload_json=payload_json,
     )
     if semantic_effect_id is not None:
@@ -381,6 +382,7 @@ def _semantic_effect_id(
     program_id: str,
     operation: str,
     target_identity: str,
+    fallback_causal_occurrence_id: str,
     payload_json: str,
 ) -> str | None:
     try:
@@ -405,7 +407,7 @@ def _semantic_effect_id(
             causal_occurrence_id=str(
                 payload.get("causal_occurrence_id")
                 or payload.get("operation_intent_id")
-                or f"{operation}:{target_identity}"
+                or fallback_causal_occurrence_id
             ),
             payload=normalize_semantic_payload(operation, payload),
         )
