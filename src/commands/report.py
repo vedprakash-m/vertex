@@ -479,6 +479,8 @@ def report_command(
         raise typer.BadParameter("--reseed requires --dry-run.")
     if reseed and no_seed:
         raise typer.BadParameter("--reseed cannot be combined with --no-seed.")
+    resolved_option_type = EditionType.from_string(edition_type) if edition_type is not None else None
+    if projector_preview and (not dry_run or resolved_option_type in {EditionType.DECK, EditionType.LOOKBACK}): raise typer.BadParameter("--projector-preview requires a newsletter --dry-run.")
     programs_root, reports_root, archive_root = _preflight_report_workspace()
     load_result = load_bundle_with_mode(edition, reports_root=reports_root, programs_root=programs_root)
     if str(load_result.bundle.config.edition.type).strip().lower() == "nudge":
@@ -489,9 +491,8 @@ def report_command(
     if issue is not None and issue < _HISTORICAL_ISSUE_CUTOFF:
         typer.echo(_HISTORICAL_ISSUE_GUARD_MESSAGE)
         return
-    resolved_option_type = EditionType.from_string(edition_type) if edition_type is not None else None
     effective_edition_type = resolved_option_type or EditionType.from_string(load_result.bundle.config.edition.type)
-    if projector_preview and (not dry_run or effective_edition_type in {EditionType.DECK, EditionType.LOOKBACK}):
+    if projector_preview and effective_edition_type in {EditionType.DECK, EditionType.LOOKBACK}:
         raise typer.BadParameter("--projector-preview requires a newsletter --dry-run.")
     section_filter_ids = _normalize_section_filter_ids(sections)
     if lookback_range is not None and effective_edition_type != EditionType.LOOKBACK:

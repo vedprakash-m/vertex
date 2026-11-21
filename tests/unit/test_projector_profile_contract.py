@@ -4,6 +4,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+from typer.testing import CliRunner
+
+from cli import app
 from src.core.ban_list_validator import find_ban_list_violations
 from src.core.config_loader import load_bundle
 from src.core.html_renderer import (
@@ -27,6 +31,31 @@ from tests.support.synthetic_report_source import EDITION_NAME, build_synthetic_
 
 
 NOW = datetime(2026, 11, 15, 18, 0, tzinfo=timezone.utc)
+
+
+def test_projector_option_validation_precedes_workspace_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_preflight():
+        pytest.fail("incompatible projector options must fail before workspace resolution")
+
+    monkeypatch.setattr("src.commands.report._preflight_report_workspace", unexpected_preflight)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "report",
+            "--edition",
+            "missing",
+            "--dry-run",
+            "--edition-type",
+            "deck",
+            "--projector-preview",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--projector-preview requires a newsletter --dry-run" in result.output
 
 
 def _sample_render_context(tmp_path: Path) -> tuple[Path, Path, RenderContext]:
