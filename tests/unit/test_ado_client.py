@@ -260,7 +260,11 @@ def test_list_work_item_revisions_pages_across_multiple_requests() -> None:
 def test_list_work_item_revisions_rejects_invalid_incremental_checkpoint(
     checkpoint: object,
 ) -> None:
-    client = ADOClient(organization="your-org", project="One")
+    class _NoAuthClient(ADOClient):
+        def __init__(self) -> None:
+            self._rest_base_url = "https://dev.azure.com/your-org/One/_apis/wit/"
+
+    client = _NoAuthClient()
     with pytest.raises(ValueError, match="non-negative integer"):
         client.list_work_item_revisions(
             101,
