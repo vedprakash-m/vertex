@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-21
+
+| Feature | Change |
+|---|---|
+| RELO W1 cost recovery and cache revocation, partial | Persist canonical fallback-chain scope and expose read-only restart recovery evidence for retained reservations and undrawn chain holds. Add durable exact-identity, feature and principal released-cache revocations, plus a post-verification row fence, while preserving ordinary one-key eviction and conservative refusal of uncertain provider spend. Live/provider qualification, operator authorization and cross-store transaction atomicity remain external or separately qualified. |
+
+Modified files: `src/ai/client.py`, `src/ai/cost_guard.py`, `src/ai/structured_feature_runner.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_ai_cost_guard.py`, `tests/unit/test_structured_feature_runner.py`.
+
 ## 2026-11-20
 
 | Feature | Change |

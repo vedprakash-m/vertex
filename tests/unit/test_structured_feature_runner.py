@@ -1328,6 +1328,84 @@ def test_released_result_cache_round_trips(tmp_path: Path) -> None:
     assert cache.get(identity, deserialize=lambda v: v) == "the-value"
 
 
+def test_released_cache_post_verification_change_is_refused(tmp_path: Path) -> None:
+    identity = _identity()
+    path = tmp_path / "released.sqlite3"
+    replacement: dict[str, str] = {}
+
+    def verify(_identity: CacheIdentity, _payload: str, _origin_run_id: str) -> bool:
+        if not replacement:
+            replacement_payload = "replacement"
+            replacement["payload"] = replacement_payload
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "UPDATE released_result_cache SET payload = ?, released_content_hash = ?, "
+                    "release_run_id = ?, cached_at = ? WHERE cache_key = ?",
+                    (
+                        replacement_payload,
+                        hashlib.sha256(replacement_payload.encode("utf-8")).hexdigest(),
+                        "replacement-run",
+                        datetime.now(timezone.utc).isoformat(),
+                        identity.cache_key(),
+                    ),
+                )
+        return True
+
+    cache = ReleasedResultCache(
+        path,
+        record_release=lambda _identity, _payload: "origin-run",
+        verify_release=verify,
+    )
+    cache.put(
+        identity,
+        "original",
+        serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"original").hexdigest(),
+        release_run_id="ignored",
+    )
+
+    with pytest.raises(StateError, match="changed after release verification"):
+        cache.get(identity, deserialize=lambda payload: payload)
+
+
+def test_released_cache_principal_revocation_is_durable_and_blocks_rewrite(
+    tmp_path: Path,
+) -> None:
+    identity = _identity()
+    path = tmp_path / "released.sqlite3"
+    cache = _release_bound_cache(path)
+    cache.put(
+        identity,
+        "value",
+        serialize=lambda value: value,
+        released_content_hash=hashlib.sha256(b"value").hexdigest(),
+        release_run_id="ignored",
+    )
+
+    assert cache.revoke_principal("operator") == 1
+    restarted = ReleasedResultCache(
+        path,
+        record_release=lambda _identity, _payload: "new-release",
+        verify_release=lambda _identity, _payload, _run_id: True,
+    )
+    with pytest.raises(StateError, match="revoked"):
+        restarted.get(identity, deserialize=lambda payload: payload)
+    with pytest.raises(StateError, match="revoked"):
+        restarted.put(
+            identity,
+            "replacement",
+            serialize=lambda value: value,
+            released_content_hash=hashlib.sha256(b"replacement").hexdigest(),
+            release_run_id="ignored",
+        )
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM released_result_cache WHERE cache_key = ?",
+            (identity.cache_key(),),
+        ).fetchone() == (0,)
+
+
 def test_runner_bypasses_unbound_released_cache(tmp_path: Path) -> None:
     cache = ReleasedResultCache(tmp_path / "cache.sqlite3")
     provider = Mock(side_effect=["first", "second"])

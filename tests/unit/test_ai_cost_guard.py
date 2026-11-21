@@ -423,6 +423,10 @@ def test_uncertain_reservation_reconciles_from_another_guard(tmp_path: Path) -> 
         run_id="cross-process-reconcile",
         budget_usd=1.0,
         programs_root=tmp_path,
+        feature_id="risk_proposal_generator",
+        policy_version="v1",
+        principal="operator",
+        snapshot_id="snapshot-12",
     )
     uncertain = first.reserve_call(0.4)
     second = CostGuard(
@@ -493,6 +497,82 @@ def test_cross_process_chain_reconciliation_retains_drawn_uncertain_attempt(
     assert (final.spent_usd, final.reserved_usd, final.ai_calls) == pytest.approx(
         (0.3, 0.0, 2)
     )
+
+
+def test_cost_guard_recovery_snapshot_survives_process_restart(tmp_path: Path) -> None:
+    first = CostGuard(
+        edition=EDITION_NAME,
+        run_id="restart-recovery",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+        feature_id="risk_proposal_generator",
+        policy_version="v1",
+        principal="operator",
+        snapshot_id="snapshot-12",
+    )
+    opening = first.reserve_call(
+        0.3,
+        chain_total_usd=0.9,
+        chain_scope_key="acme_weekly|restart-recovery|risk_proposal_generator|v1|chain-a",
+    )
+    drawn = first.reserve_call(0.3, chain=opening)
+    first.settle_call(opening, 0.1)
+
+    restarted = CostGuard(
+        edition=EDITION_NAME,
+        run_id="restart-recovery",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+    recovery = restarted.recovery_snapshot()
+
+    assert recovery.has_open_holds
+    assert [(row.chain_id, row.scope_key, row.status) for row in recovery.chains] == [
+        (opening.chain_id, opening.chain_scope_key, "reserved")
+    ]
+    assert [
+        (row.reservation_id, row.chain_id, row.status, row.reserved_usd)
+        for row in recovery.reservations
+    ] == [
+        (opening.reservation_id, opening.chain_id, "settled", 0.3),
+        (drawn.reservation_id, opening.chain_id, "reserved", 0.3),
+    ]
+    assert {
+        (row.feature_id, row.policy_version, row.principal, row.snapshot_id)
+        for row in recovery.reservations
+    } == {("risk_proposal_generator", "v1", "operator", "snapshot-12")}
+
+    released = restarted.reconcile_chain_remainder(drawn.reservation_id)
+    assert (released.spent_usd, released.reserved_usd, released.ai_calls) == pytest.approx(
+        (0.1, 0.3, 1)
+    )
+
+
+def test_cost_guard_chain_draw_refuses_changed_scope(tmp_path: Path) -> None:
+    guard = CostGuard(
+        edition=EDITION_NAME,
+        run_id="chain-scope",
+        budget_usd=1.0,
+        programs_root=tmp_path,
+    )
+    opening = guard.reserve_call(
+        0.3,
+        chain_total_usd=0.9,
+        chain_scope_key="program|feature-a|v1|deployment-a",
+    )
+
+    with pytest.raises(StateError, match="scope"):
+        guard.reserve_call(
+            0.3,
+            chain=opening,
+            chain_scope_key="program|feature-b|v1|deployment-a",
+        )
+
+    assert guard.current_state().reserved_usd == pytest.approx(0.9)
+    with sqlite3.connect(guard.ledger_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM ai_cost_reservations"
+        ).fetchone() == (1,)
 
 
 def test_reservation_handle_refuses_same_path_ledger_replacement(tmp_path: Path) -> None:
