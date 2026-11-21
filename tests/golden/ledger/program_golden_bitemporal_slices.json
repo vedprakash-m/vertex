@@ -56,10 +56,11 @@
           "as_of": "2021-12-31T00:00:00+00:00",
           "coverage_earliest": "2021-06-01T00:00:00+00:00",
           "coverage_latest": "2021-06-01T00:00:00+00:00",
+          "derived_state_sha256": "sha256:162ee8e28f1f12efa488da5a335c0d0a1d59d415e49ac36a440e01524c47561d",
           "event_input_digest": "8a318643c2e397ad474c37d25a01a4c6b6ff649a8196abedca95f673ed386957",
           "event_watermark": "01KEJK7S00PD2FTBGTMJ6NYCY3",
           "knowledge_as_of": "2026-12-31T00:00:00+00:00",
-          "projector_version": "5",
+          "projector_version": "6",
           "schema_version": "2"
         }
       ]
@@ -122,10 +123,11 @@
           "as_of": "2021-12-31T00:00:00+00:00",
           "coverage_earliest": "2021-06-01T00:00:00+00:00",
           "coverage_latest": "2021-06-01T00:00:00+00:00",
+          "derived_state_sha256": "sha256:e3a070b6a91b214a2065a351a2a6d0523a35ffab947230492b5fef37de49a121",
           "event_input_digest": "51ad7b9f495cc76d6437751127e08dd9036f8481ae0d154c87a9cacaa9a72f94",
           "event_watermark": "01JKS4WE00ME4ER37QHZAF5TYY",
           "knowledge_as_of": "2025-12-31T00:00:00+00:00",
-          "projector_version": "5",
+          "projector_version": "6",
           "schema_version": "2"
         }
       ]
@@ -247,10 +249,11 @@
           "as_of": "2025-03-31T00:00:00+00:00",
           "coverage_earliest": "2021-06-01T00:00:00+00:00",
           "coverage_latest": "2025-03-20T00:00:00+00:00",
+          "derived_state_sha256": "sha256:b203afb3bb9b97d7443a461752785dff354caf2f77d9153b87cd531e4f760720",
           "event_input_digest": "def206849973abe256db67e7bbb4214dddeeb4e0237bfb8f22ed8d664b6d23dd",
           "event_watermark": "01KEJK7S00PD2FTBGTMJ6NYCY5",
           "knowledge_as_of": "2025-03-31T00:00:00+00:00",
-          "projector_version": "5",
+          "projector_version": "6",
           "schema_version": "2"
         }
       ]

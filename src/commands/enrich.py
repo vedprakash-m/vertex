@@ -524,7 +524,17 @@ def _extract_per_thread_evidence(
         )
     if not retrieval.response_usable:
         typer.echo(" [WorkIQ: structured discovery response unavailable or invalid]", err=True)
-    empty_unverified = retrieval.response_usable and retrieval.enumeration_count == 0
+    enumeration_count = getattr(
+        retrieval, "enumeration_count", len(retrieval.enrichments),
+    )
+    empty_unverified = (
+        retrieval.response_usable
+        and enumeration_count == 0
+        and not retrieval.rejected_identity_count
+        and not retrieval.rejected_source_time_count
+        and not retrieval.rejected_invalid_record_count
+        and not getattr(retrieval, "budget_exhausted", False)
+    )
     if empty_unverified:
         typer.echo(
             " [WorkIQ: bounded discovery returned no records; coverage was not verified]",

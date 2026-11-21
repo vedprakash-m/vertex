@@ -1011,6 +1011,7 @@ commands:
       - --lt-deck
       - --pipelines
       - --probe
+      - --scheduled
       - --sharepoint
       - --sprints
       - --verbose

@@ -63,7 +63,12 @@ def _evidence_dedup_key(evidence: WorkstreamEvidence) -> str:
                 "source_type": r.source_type,
                 "description": r.description,
                 "source_date": r.source_date.isoformat() if r.source_date else None,
-                "source_time": r.source_time.isoformat() if r.source_time else None,
+                "source_time": (
+                    r.source_time.isoformat()
+                    if r.source_time
+                    and not (r.canonical_id or "").startswith("enrich:")
+                    else None
+                ),
                 "author": r.author,
                 "permalink": r.permalink,
                 "extraction_method": r.extraction_method,

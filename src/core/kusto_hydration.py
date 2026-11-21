@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.core.config_loader import PROGRAMS_ROOT
+from src.core.exceptions import AuthError, QueryError
 from src.core.integration_types import (
     ChannelConfig,
     ChannelRegistration,
@@ -315,8 +316,6 @@ class KustoHydrationProvider:
                 token,
                 cancellation_incomplete=not cancellation_completed,
             )
-        except Exception as error:  # pragma: no cover - _run_one already catches provider errors
-            return _QueryExecution(rows=None, error=str(error))
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
@@ -374,8 +373,6 @@ class KustoHydrationProvider:
                         token,
                         cancellation_incomplete=not cancellation_completed,
                     )
-                except Exception as error:  # pragma: no cover - _run_one already catches provider errors
-                    executions[ref_id] = _QueryExecution(rows=None, error=str(error))
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
         return executions
@@ -439,9 +436,7 @@ class KustoHydrationProvider:
                 expected_cardinality=rendered_query.expected_cardinality,
                 result_limits=rendered_query.result_limits,
             )
-        except Exception as error:
-            from src.core.exceptions import QueryError
-
+        except (QueryError, RuntimeError, ValueError, AuthError) as error:
             return _QueryExecution(
                 rows=None,
                 error=str(error),
