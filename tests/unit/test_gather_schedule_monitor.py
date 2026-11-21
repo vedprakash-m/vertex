@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -21,9 +22,12 @@ from src.core.gather_schedule_monitor import (
     evaluate_scheduled_gather_attempt,
     evaluate_scheduled_gather_readiness,
     latest_gather_attempt_at,
+    load_scheduled_acquisition_policy,
+    resolve_scheduled_process_principal,
 )
 from src.core.gather_schedule_monitor import require_scheduled_gather_authorized
 from src.core.gather_schedule_monitor import ScheduledGatherAuthorizationError
+from src.core.exceptions import ConfigError
 
 
 def _manifest(*, run_id: str, attempted_at: datetime) -> GatherRunManifest:
@@ -257,3 +261,134 @@ def test_principal_comes_from_resolver_not_configuration_or_caller_string(
 
     assert readiness.ready is True
     assert calls == 1
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ("- item\n", "must be a mapping"),
+        ("scheduled_acquisition: []\n", "must be a mapping"),
+    ],
+)
+def test_scheduled_policy_rejects_non_mapping_shapes(
+    tmp_path: Path,
+    document: str,
+    message: str,
+) -> None:
+    program_root = tmp_path / "sample"
+    program_root.mkdir()
+    (program_root / "program.yaml").write_text(document, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=message):
+        load_scheduled_acquisition_policy("sample", programs_root=tmp_path)
+
+
+def test_scheduled_policy_surfaces_unreadable_yaml(tmp_path: Path) -> None:
+    program_root = tmp_path / "sample"
+    program_root.mkdir()
+    (program_root / "program.yaml").write_text("scheduled_acquisition: [\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="Could not load"):
+        load_scheduled_acquisition_policy("sample", programs_root=tmp_path)
+
+    assert load_scheduled_acquisition_policy("missing", programs_root=tmp_path) is None
+
+
+def test_scheduled_readiness_reports_every_missing_authorization(
+    tmp_path: Path,
+) -> None:
+    program_root = tmp_path / "sample"
+    program_root.mkdir()
+    (program_root / "program.yaml").write_text(
+        yaml.safe_dump({
+            "scheduled_acquisition": {
+                "mode": "write",
+                "authorized_principal": "expected",
+                "approval_ref": "",
+                "alert_delivery_ref": "",
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    readiness = evaluate_scheduled_gather_readiness(
+        "sample",
+        principal_resolver=lambda: (_ for _ in ()).throw(RuntimeError("not available")),
+        programs_root=tmp_path,
+    )
+
+    assert readiness.ready is False
+    assert "scheduled principal authorization missing" in readiness.blockers
+    assert "owner approval reference missing" in readiness.blockers
+    assert "scheduled acquisition is not explicitly read-only" in readiness.blockers
+    assert "alert delivery authorization missing" in readiness.blockers
+
+
+def test_scheduled_policy_treats_non_string_fields_as_missing(tmp_path: Path) -> None:
+    program_root = tmp_path / "sample"
+    program_root.mkdir()
+    (program_root / "program.yaml").write_text(
+        yaml.safe_dump({
+            "scheduled_acquisition": {
+                "mode": 7,
+                "authorized_principal": None,
+                "approval_ref": False,
+                "alert_delivery_ref": [],
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    policy = load_scheduled_acquisition_policy("sample", programs_root=tmp_path)
+
+    assert policy is not None
+    assert (policy.mode, policy.authorized_principal, policy.approval_ref, policy.alert_delivery_ref) == (
+        "", "", "", "",
+    )
+
+
+def test_windows_principal_resolution_is_os_bound_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core import gather_schedule_monitor
+
+    windows_os = SimpleNamespace(name="nt", environ={})
+    monkeypatch.setattr(gather_schedule_monitor, "os", windows_os)
+    with pytest.raises(RuntimeError, match="SystemRoot|could not be resolved"):
+        resolve_scheduled_process_principal()
+
+    windows_os.environ["SystemRoot"] = r"C:\Windows"
+
+    class Completed:
+        returncode = 0
+        stdout = "domain\\scheduler\n"
+
+    monkeypatch.setattr(gather_schedule_monitor.subprocess, "run", lambda *args, **kwargs: Completed())
+    assert resolve_scheduled_process_principal() == "domain\\scheduler"
+
+    Completed.returncode = 1
+    with pytest.raises(RuntimeError, match="could not be resolved"):
+        resolve_scheduled_process_principal()
+
+
+def test_posix_principal_resolution_rejects_provider_and_result_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core import gather_schedule_monitor
+
+    monkeypatch.setattr(gather_schedule_monitor, "os", SimpleNamespace(name="posix", environ={}))
+
+    class Failed:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(gather_schedule_monitor.subprocess, "run", lambda *args, **kwargs: Failed())
+    with pytest.raises(RuntimeError, match="could not be resolved"):
+        resolve_scheduled_process_principal()
+
+    def unavailable(*args, **kwargs):
+        raise OSError("unavailable")
+
+    monkeypatch.setattr(gather_schedule_monitor.subprocess, "run", unavailable)
+    with pytest.raises(RuntimeError, match="could not be resolved"):
+        resolve_scheduled_process_principal()

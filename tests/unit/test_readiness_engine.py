@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 import hashlib
 import json
@@ -540,3 +541,178 @@ def test_offline_readiness_never_passes_without_every_qualification(
   assert result.status == "red"
   assert result.observed_value == "blocked"
   assert expected_blocker in result.details["blockers"]
+
+
+@pytest.mark.parametrize(
+  ("field", "value", "message"),
+  [
+    ("source_scopes", {}, "source_scopes must be a list"),
+    ("source_scopes", ["bad"], r"source_scopes\[0\] must be a mapping"),
+    ("deployment_references", {}, "deployment_references must be a list"),
+    ("deployment_references", ["bad"], r"deployment_references\[0\] must be a mapping"),
+  ],
+)
+def test_offline_readiness_parser_rejects_invalid_collection_shapes(
+  tmp_path: Path,
+  field: str,
+  value: object,
+  message: str,
+) -> None:
+  program_dir = tmp_path / "programs" / "sample"
+  program_dir.mkdir(parents=True)
+  document = {
+    "schema_version": "1.0",
+    "dimensions": {
+      "offline": {
+        "source": {
+          "type": "offline_readiness",
+          field: value,
+        },
+        "pass_condition": {"kind": "offline_readiness_complete"},
+      },
+    },
+  }
+  (program_dir / "readiness.yaml").write_text(
+    __import__("yaml").safe_dump(document, sort_keys=False),
+    encoding="utf-8",
+  )
+
+  with pytest.raises(readiness_engine.ConfigError, match=message):
+    load_readiness_config("sample", programs_root=tmp_path / "programs")
+
+
+def test_offline_readiness_parser_requires_nonempty_scope_fields(tmp_path: Path) -> None:
+  program_dir = tmp_path / "programs" / "sample"
+  program_dir.mkdir(parents=True)
+  (program_dir / "readiness.yaml").write_text(
+    """schema_version: "1.0"
+dimensions:
+  offline:
+    source:
+      type: offline_readiness
+      source_scopes:
+        - source: ado
+          scope_id: ""
+          query_id: q
+          query_hash: h
+          evidence_ref: e
+          evidence_sha256: d
+    pass_condition:
+      kind: offline_readiness_complete
+""",
+    encoding="utf-8",
+  )
+
+  with pytest.raises(readiness_engine.ConfigError, match="entry 0 is missing scope_id"):
+    load_readiness_config("sample", programs_root=tmp_path / "programs")
+
+
+def test_offline_readiness_reports_missing_duplicate_unavailable_and_unapproved(
+  tmp_path: Path,
+) -> None:
+  program_dir = tmp_path / "programs" / "sample"
+  program_dir.mkdir(parents=True)
+  _write_offline_readiness_case(program_dir)
+  config = load_readiness_config("sample", programs_root=program_dir.parent)
+  original = config.dimensions[0]
+
+  missing = replace(
+    config,
+    dimensions=(
+      replace(
+        original,
+        source=replace(original.source, source_scopes=(), deployment_references=()),
+      ),
+    ),
+  )
+  missing_result = build_readiness_snapshot(
+    "sample", missing, loaders=ReadinessFetchLoaders(),
+    fetched_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+  ).dimensions[0]
+  assert "source scopes missing" in missing_result.details["blockers"]
+  assert "deployment references missing" in missing_result.details["blockers"]
+
+  duplicate = replace(
+    config,
+    dimensions=(
+      replace(
+        original,
+        source=replace(
+          original.source,
+          source_scopes=(original.source.source_scopes[0], original.source.source_scopes[0]),
+        ),
+      ),
+    ),
+  )
+  duplicate_result = build_readiness_snapshot(
+    "sample", duplicate, loaders=ReadinessFetchLoaders(),
+    fetched_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+  ).dimensions[0]
+  assert "duplicate source scopes" in duplicate_result.details["blockers"]
+
+  scope_payload = {
+    "source": "ado",
+    "scope_id": "sample_delivery",
+    "query_id": "query-17",
+    "query_hash": "sha256:scope17",
+    "available": False,
+  }
+  scope_hash = _write_readiness_artifact(program_dir, "evidence/scope-ado.json", scope_payload)
+  scope = replace(original.source.source_scopes[0], evidence_sha256=scope_hash)
+  approval_payload = {
+    "feature": "summary",
+    "model_id": "vertex-model-1",
+    "deployment_id": "vertex-summary-1",
+    "approved": False,
+  }
+  approval_hash = _write_readiness_artifact(program_dir, "approvals/summary.json", approval_payload)
+  approval = replace(original.source.deployment_references[0], approval_sha256=approval_hash)
+  unavailable = replace(
+    config,
+    dimensions=(
+      replace(
+        original,
+        source=replace(
+          original.source,
+          source_scopes=(scope, original.source.source_scopes[1]),
+          deployment_references=(approval,),
+        ),
+      ),
+    ),
+  )
+  unavailable_result = build_readiness_snapshot(
+    "sample", unavailable, loaders=ReadinessFetchLoaders(),
+    fetched_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+  ).dimensions[0]
+  assert "unavailable source scopes" in unavailable_result.details["blockers"]
+  assert "unapproved deployment references" in unavailable_result.details["blockers"]
+
+
+@pytest.mark.parametrize(
+  ("artifact_ref", "digest", "content"),
+  [
+    ("../outside.json", "sha256:" + "0" * 64, b"{}"),
+    ("missing.json", "not-sha256", b"{}"),
+    ("missing.json", "sha256:" + "0" * 64, None),
+    ("evidence.json", "sha256:" + "0" * 64, b"{}"),
+    ("invalid.json", "sha256:" + hashlib.sha256(b"[not-json]").hexdigest(), b"[not-json]"),
+    ("list.json", "sha256:" + hashlib.sha256(b"[]").hexdigest(), b"[]"),
+  ],
+)
+def test_verified_readiness_artifact_rejects_unsafe_or_invalid_inputs(
+  tmp_path: Path,
+  artifact_ref: str,
+  digest: str,
+  content: bytes | None,
+) -> None:
+  if content is not None and artifact_ref in {"evidence.json", "invalid.json", "list.json"}:
+    (tmp_path / artifact_ref).write_bytes(content)
+
+  payload, valid = readiness_engine._load_verified_readiness_artifact(
+    program_root=tmp_path,
+    artifact_ref=artifact_ref,
+    expected_sha256=digest,
+  )
+
+  assert payload is None
+  assert valid is False

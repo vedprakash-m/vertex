@@ -370,6 +370,13 @@ def test_unsupported_template_is_refused() -> None:
         build_w6_evidence_template("RELO-W9.1")
 
 
+def test_packet_verifier_refuses_non_mapping_and_unknown_card_inputs() -> None:
+    assert verify_w6_packet(object()).classification == "not_qualified"
+    packet = _passing_packets()["RELO-W6.3"]
+    packet["card_id"] = "RELO-W9.1"
+    assert verify_w6_packet(packet).classification == "not_qualified"
+
+
 @pytest.mark.parametrize("card_id", W6_CARD_IDS[:-1])
 def test_mechanically_complete_packets_require_owner_review(card_id: str) -> None:
     result = verify_w6_packet(_passing_packets()[card_id])
@@ -830,6 +837,145 @@ def test_owner_disposition_is_explicit(status: str) -> None:
     packet["owner_disposition"]["approved_at"] = "bad" if status == "approved" else None
     if status == "approved":
         assert verify_w6_packet(packet).classification == "not_qualified"
+
+
+def test_w6_failure_paths_preserve_exact_evidence_diagnostics() -> None:
+    w62 = _passing_packets()["RELO-W6.2"]
+    w62["cycles"][0].pop("quality_adjusted_minutes_saved")
+    w62["cycles"][0]["quality_passed"] = False
+    w62["cycles"][0]["workflow_classes"] = "weekly_portfolio_review"
+    result = verify_w6_packet(w62)
+    assert "quality_gate" in " ".join(result.failed_gates)
+    assert "cycles[0].workflow_classes" in result.invalid_fields
+
+    w63 = _passing_packets()["RELO-W6.3"]
+    w63["completed_routine_tasks"] = w63["eligible_routine_tasks"] + 1
+    assert "completed_routine_tasks" in verify_w6_packet(w63).invalid_fields
+
+    w66 = _passing_packets()["RELO-W6.6"]
+    w66["canonical_mappings"][0]["card_id"] = w66["canonical_mappings"][1]["card_id"]
+    assert "canonical_mappings[1].card_id" in verify_w6_packet(w66).invalid_fields
+
+    w67 = _passing_packets()["RELO-W6.7"]
+    w67["transitions"][0].pop("owner")
+    assert "transitions[0].owner" in verify_w6_packet(w67).missing_fields
+
+    w611 = _passing_packets()["RELO-W6.11"]
+    w611["paths"][0]["disposition"] = "unknown"
+    w611["paths"][0]["callers_inventoried"] = False
+    learning = verify_w6_packet(w611)
+    assert "paths[0].disposition" in learning.invalid_fields
+    assert f"{w611['paths'][0]['path']}:caller_inventory" in learning.failed_gates
+
+
+@pytest.mark.parametrize(
+    ("state", "mutation", "expected_gate"),
+    [
+        ("ADVISORY_OPERATIONAL", lambda p: p["evidence"].update(engineering_passed=False), "advisory_operational_base"),
+        ("ADVISORY_OPERATIONAL", lambda p: p["evidence"].update(
+            independent_labeling_available=True,
+            mandatory_vision_sources_available=True,
+            scheduled_identity_available=True,
+            autonomy_evidence_available=True,
+        ), "advisory_requires_unavailable_full_authority_gate"),
+        ("RELO_PROFILE_COMPLETE", lambda p: p["evidence"].update(fixed_targets_passed=False), "profile_complete_predicates"),
+        ("RELO_PROFILE_COMPLETE", lambda p: p.update(profile_id=""), "profile_id"),
+        ("HALTED", lambda p: p.pop("halt_reason", None), "halt_reason"),
+        ("HALTED", lambda p: p["evidence"].update(containment_survives=False), "halt_disposition_predicates"),
+    ],
+)
+def test_terminal_state_failure_predicates_are_explicit(
+    state: str,
+    mutation,
+    expected_gate: str,
+) -> None:
+    packet = _passing_packets()["RELO-W6.12"]
+    packet["requested_terminal_state"] = state
+    if state == "ADVISORY_OPERATIONAL":
+        packet["evidence"].update(
+            engineering_passed=True,
+            safety_passed=True,
+            source_workflows_passed=True,
+            operator_workflows_passed=True,
+        )
+    elif state == "RELO_PROFILE_COMPLETE":
+        packet["profile_id"] = "profile-1"
+        for field in (
+            "fixed_targets_passed",
+            "ratified_budgets_passed",
+            "non_forceable_gates_passed",
+            "mandatory_sources_no_waiver",
+            "scheduled_recoverable_operation",
+            "operators_proficient",
+            "closed_loop_functions_certified",
+            "quality_adjusted_human_impact_lcb_above_080",
+            "engineering_passed",
+            "safety_passed",
+            "source_workflows_passed",
+            "operator_workflows_passed",
+            "independent_labeling_available",
+        ):
+            packet["evidence"][field] = True
+    elif state == "HALTED":
+        packet["halt_reason"] = "capacity unavailable"
+        packet["evidence"]["inflight_state_drained"] = True
+    mutation(packet)
+
+    result = verify_w6_packet(packet)
+
+    assert expected_gate in result.failed_gates or expected_gate in result.missing_fields
+
+
+def test_packet_artifact_and_repository_link_failures_are_individualized(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path.parent / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    packet = _passing_packets()["RELO-W6.3"]
+    packet["artifacts"] = [
+        "bad",
+        {
+            "artifact_id": "escape",
+            "sha256": "0" * 64,
+            "path": "../outside.json",
+        },
+        {
+            "artifact_id": "missing",
+            "sha256": "0" * 64,
+            "path": "missing.json",
+        },
+    ]
+    result = verify_w6_packet(packet, repo_root=tmp_path)
+    assert "artifacts[0]" in result.invalid_fields
+    assert "artifacts[1].path" in result.invalid_fields
+    assert "artifacts[2].path" in result.invalid_fields
+
+    w65 = _passing_packets()["RELO-W6.5"]
+    w65["candidates"].extend(["bad"])
+    w65_result = verify_w6_packet(w65, repo_root=tmp_path)
+    assert "candidates[0].path" in w65_result.invalid_fields
+
+    w66 = _passing_packets()["RELO-W6.6"]
+    w66["canonical_mappings"].append("bad")
+    w66["canonical_mappings"][0]["evidence_ref"] = "missing"
+    w66_result = verify_w6_packet(w66, repo_root=tmp_path)
+    assert any("evidence_artifact" in gate for gate in w66_result.failed_gates)
+
+    w611 = _passing_packets()["RELO-W6.11"]
+    w611["paths"].append("bad")
+    assert verify_w6_packet(w611, repo_root=tmp_path).classification != "owner_review"
+
+
+def test_owner_and_nested_mapping_fields_are_fail_closed() -> None:
+    packet = _passing_packets()["RELO-W6.3"]
+    packet["owner_disposition"] = {"status": "approved"}
+    result = verify_w6_packet(packet)
+    assert "owner_disposition.approved_by" in result.missing_fields
+
+    packet = _passing_packets()["RELO-W6.2"]
+    packet["protocol"] = None
+    result = verify_w6_packet(packet)
+    assert "protocol" in result.missing_fields
 
 
 def test_routing_evidence_counts_cache_separately_and_preserves_missing_population() -> None:
