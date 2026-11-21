@@ -150,6 +150,7 @@ Rules:
                 permalink=e.permalink,
                 extraction_method="transcript" if e.source == "transcript" else "two_hop",
                 canonical_id=e.source_id,
+                source_time=e.timestamp,
             )
             for e in ctx.enrichments
             if e.body_text

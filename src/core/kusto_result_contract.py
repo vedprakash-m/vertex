@@ -61,6 +61,9 @@ def build_kusto_result_schema(
     )
     if expected_cardinality != "scalar_required" and time_column and value_columns:
         kind = KustoResultKind.TIME_SERIES
+    if kind is not KustoResultKind.TIME_SERIES:
+        time_column = None
+        value_columns = ()
     return KustoResultSchema(
         kind=kind,
         columns=resolved_columns,
@@ -93,22 +96,57 @@ def admit_kusto_execution(
         raise QueryError("Kusto executor returned an unsupported result type.")
 
     rows = admit_kusto_rows(raw_rows, result_limits)
-    inferred_schema = build_kusto_result_schema(
-        rows,
-        columns=supplied_schema.columns if supplied_schema is not None else (),
-        expected_cardinality=expected_cardinality,
-        strict_rows=supplied_schema is not None,
-    )
+    if expected_cardinality == "scalar_required" and len(rows) != 1:
+        raise QueryError(
+            f"Kusto query {query_id} expected scalar_required (exactly 1 row); "
+            f"actual {len(rows)} row(s)."
+        )
     if supplied_schema is not None:
-        if supplied_schema.row_count != len(rows):
-            raise QueryError("Kusto typed result schema row count does not match its rows.")
-        if supplied_schema.kind is not inferred_schema.kind:
-            raise QueryError("Kusto typed result schema kind does not match its rows.")
-        if supplied_schema.time_column != inferred_schema.time_column:
-            raise QueryError("Kusto typed result schema time column does not match its rows.")
-        if supplied_schema.value_columns != inferred_schema.value_columns:
-            raise QueryError("Kusto typed result schema value columns do not match its rows.")
-    return [dict(row) for row in rows], inferred_schema
+        validate_kusto_result_schema(rows, supplied_schema)
+        if expected_cardinality == "scalar_required" and supplied_schema.kind is not KustoResultKind.SCALAR:
+            raise QueryError("Kusto scalar_required result requires a scalar typed schema.")
+        return [dict(row) for row in rows], supplied_schema
+    return [dict(row) for row in rows], build_kusto_result_schema(
+        rows,
+        expected_cardinality=expected_cardinality,
+        strict_rows=False,
+    )
+
+
+def validate_kusto_result_schema(
+    rows: Sequence[Mapping[str, Any]],
+    schema: KustoResultSchema,
+) -> None:
+    names = tuple(column.name for column in schema.columns)
+    if len(names) != len(set(names)) or any(not name.strip() for name in names):
+        raise QueryError("Kusto result schema contains invalid or duplicate column names.")
+    if schema.row_count != len(rows):
+        raise QueryError("Kusto typed result schema row count does not match its rows.")
+    if any(tuple(row) != names for row in rows):
+        raise QueryError("Kusto result rows do not match the admitted schema.")
+
+    if schema.kind is KustoResultKind.SCALAR:
+        if len(rows) != 1 or schema.time_column is not None or schema.value_columns:
+            raise QueryError("Kusto scalar result schema must contain exactly one row and no series axes.")
+        return
+
+    if schema.kind is KustoResultKind.TABLE:
+        if schema.time_column is not None or schema.value_columns:
+            raise QueryError("Kusto typed result schema kind does not match its declared axes.")
+        return
+
+    if schema.kind is KustoResultKind.TIME_SERIES:
+        if schema.time_column not in names:
+            raise QueryError("Kusto typed result schema time column is invalid.")
+        if (
+            not schema.value_columns
+            or any(column not in names for column in schema.value_columns)
+            or schema.time_column in schema.value_columns
+        ):
+            raise QueryError("Kusto typed result schema value columns are invalid.")
+        return
+
+    raise QueryError("Kusto result schema has an unsupported result kind.")
 
 
 def _infer_columns(rows: Sequence[Mapping[str, Any]]) -> tuple[KustoResultColumn, ...]:
@@ -155,4 +193,8 @@ def _is_numeric_column(column: KustoResultColumn) -> bool:
     return (column.type_name or "").lower() in _NUMERIC_TYPE_NAMES
 
 
-__all__ = ["admit_kusto_execution", "build_kusto_result_schema"]
+__all__ = [
+    "admit_kusto_execution",
+    "build_kusto_result_schema",
+    "validate_kusto_result_schema",
+]

@@ -43,10 +43,11 @@ ENUMERATOR_LABEL = "workiq"
 RUNG_WORKIQ_PREVIEW = "workiq_preview"
 
 _TIMESTAMP_KEYS = ("receivedDateTime", "sentDateTime", "createdDateTime", "timestamp", "startDateTime")
-_ID_KEYS = ("id", "messageId", "emailId", "eventId", "transcriptId")
+_ID_KEYS = ("id", "messageId", "emailId", "eventId", "occurrenceId", "transcriptId")
 _THREAD_KEYS = ("conversationId", "threadId")
 _TRANSIENT_ID_RE = re.compile(r"^turn\d+(?:search|result)\d+$", re.IGNORECASE)
 _COMPLETE_MARKER = "workiq_window_complete"
+_EMPTY_COMPLETE_MARKER = "workiq_window_complete_empty"
 _CURSOR_MAX_CHARS = 2048
 
 
@@ -90,6 +91,24 @@ def _native_id(value: str) -> str:
     if _TRANSIENT_ID_RE.match(value):
         return ""
     return value
+
+
+def _first_native_id(record: Mapping[str, Any], keys: Sequence[str]) -> str:
+    for key in keys:
+        value = _native_id(_text(record, key))
+        if value:
+            return value
+    return ""
+
+
+def _is_tombstone(record: Mapping[str, Any]) -> bool:
+    return (
+        isinstance(record.get("@removed"), Mapping)
+        or record.get("@removed") is True
+        or record.get("deleted") is True
+        or record.get("changeType") in ("deleted", "removed")
+        or record.get("status") in ("deleted", "cancelled", "canceled")
+    )
 
 
 def _utc_timestamp(record: Mapping[str, Any]) -> tuple[datetime | None, str]:
@@ -169,6 +188,7 @@ class WorkIQEnumerator:
         self._checkpoint_state: SyncState | None = None
         self._pending_cursor: str | None = None
         self._pending_complete = False
+        self._pending_empty_complete = False
 
     def enumerate(
         self, intent: RetrievalIntent, *, correlation_id: str
@@ -217,13 +237,22 @@ class WorkIQEnumerator:
 
         by_id: dict[str, EnumeratedCandidate] = {}
         unidentified = rejected_identity
+        mismatched_identity = 0
         outside_window = rejected_outside_window
         unqualified_source_time = rejected_source_time
         invalid_records = rejected_invalid_record
         for record in records:
+            if isinstance(record, Mapping) and _is_tombstone(record):
+                tombstone_id = _first_native_id(record, _ID_KEYS)
+                if tombstone_id:
+                    by_id.pop(tombstone_id, None)
+                continue
             candidate = self._candidate(record, correlation_id)
             if candidate is None:
                 unidentified += 1
+                continue
+            if intent.entity_ids and not _candidate_matches_exact_ids(candidate, intent.entity_ids):
+                mismatched_identity += 1
                 continue
             received_at = candidate.received_at
             if candidate.partial_metadata.get("source_time_state") == "invalid":
@@ -236,7 +265,7 @@ class WorkIQEnumerator:
             ):
                 outside_window += 1
                 continue
-            by_id.setdefault(candidate.locator.resource_id, candidate)
+            by_id[candidate.locator.resource_id] = candidate
 
         ordered = sorted(
             by_id.values(),
@@ -262,6 +291,7 @@ class WorkIQEnumerator:
                 ("unqualified_source_time", unqualified_source_time),
                 ("outside_window", outside_window),
                 ("invalid_records", invalid_records),
+                ("mismatched_identity", mismatched_identity),
             )
             if count
         )
@@ -271,6 +301,8 @@ class WorkIQEnumerator:
         if admission_errors:
             detail = ",".join(f"{label}={count}" for label, count in admission_errors)
             return Incomplete(value=page, reason=f"admission_rejected:{detail}")
+        if not records:
+            return Incomplete(value=page, reason="coverage_unverified:empty")
         return Success(page)
 
     def _enumerate_checkpoint_page(
@@ -281,6 +313,11 @@ class WorkIQEnumerator:
             self._checkpoint_state is not None
             and self._checkpoint_state.program_watermarks.get(_COMPLETE_MARKER) == "true"
         ):
+            if (
+                self._checkpoint_state.program_watermarks.get(_EMPTY_COMPLETE_MARKER)
+                == "true"
+            ):
+                return Incomplete(value=(), reason="coverage_unverified:empty")
             return Success(())
         try:
             result = self._query_page(intent)
@@ -289,19 +326,30 @@ class WorkIQEnumerator:
         by_id: dict[str, EnumeratedCandidate] = {}
         unidentified = 0
         rejected = 0
+        outside_window = 0
+        mismatched_identity = 0
         for record in result.records:
-            if isinstance(record, Mapping) and (
-                isinstance(record.get("@removed"), Mapping)
-                or record.get("@removed") is True
-                or record.get("deleted") is True
-            ):
+            if isinstance(record, Mapping) and _is_tombstone(record):
+                tombstone_id = _first_native_id(record, _ID_KEYS)
+                if tombstone_id:
+                    by_id.pop(tombstone_id, None)
                 continue
             candidate = self._candidate(record, correlation_id)
             if candidate is None:
                 unidentified += 1
                 continue
-            if candidate.partial_metadata.get("source_time_state") == "invalid":
+            if intent.entity_ids and not _candidate_matches_exact_ids(candidate, intent.entity_ids):
+                mismatched_identity += 1
+                continue
+            if not candidate.partial_metadata.get("source_time_qualified"):
                 rejected += 1
+            elif (
+                intent.from_date is not None
+                and intent.to_date is not None
+                and candidate.received_at is not None
+                and not intent.from_date <= candidate.received_at.date() <= intent.to_date
+            ):
+                outside_window += 1
                 continue
             by_id[candidate.locator.resource_id] = candidate
         ordered = sorted(
@@ -314,16 +362,26 @@ class WorkIQEnumerator:
         )
         page = tuple(ordered[:intent.limit])
         if result.next_cursor is not None:
-            self._stage_checkpoint(next_cursor=result.next_cursor)
+            self._stage_checkpoint(next_cursor=result.next_cursor, empty_page=False)
             return Incomplete(value=page, reason="page_cut")
         if len(ordered) > len(page):
-            self._stage_checkpoint(next_cursor=None)
+            self._discard_staged_checkpoint()
             return Incomplete(value=page, reason="page_cut")
-        self._stage_checkpoint(next_cursor=None)
+        initial_empty_page = not result.records and self._checkpoint_cursor() is None
+        self._stage_checkpoint(
+            next_cursor=None,
+            empty_page=not result.records,
+        )
         if rejected:
             return Incomplete(value=page, reason=f"unqualified_source_time:{rejected}")
+        if outside_window:
+            return Incomplete(value=page, reason=f"outside_window:{outside_window}")
+        if mismatched_identity:
+            return Incomplete(value=page, reason=f"mismatched_identity:{mismatched_identity}")
         if unidentified:
             return Incomplete(value=page, reason=f"unidentified_records:{unidentified}")
+        if initial_empty_page:
+            return Incomplete(value=page, reason="coverage_unverified:empty")
         return Success(page)
 
     def commit_enumeration_checkpoint(self) -> None:
@@ -336,8 +394,13 @@ class WorkIQEnumerator:
         self._checkpoint_state.last_page_token = self._pending_cursor
         if self._pending_complete:
             self._checkpoint_state.program_watermarks[_COMPLETE_MARKER] = "true"
+            if self._pending_empty_complete:
+                self._checkpoint_state.program_watermarks[_EMPTY_COMPLETE_MARKER] = "true"
+            else:
+                self._checkpoint_state.program_watermarks.pop(_EMPTY_COMPLETE_MARKER, None)
         else:
             self._checkpoint_state.program_watermarks.pop(_COMPLETE_MARKER, None)
+            self._checkpoint_state.program_watermarks.pop(_EMPTY_COMPLETE_MARKER, None)
         self._checkpoint_state.touch()
         self._checkpoint_store.upsert(self._checkpoint_state)
         if self._program_id is not None:
@@ -346,6 +409,7 @@ class WorkIQEnumerator:
             )
         self._pending_cursor = None
         self._pending_complete = False
+        self._pending_empty_complete = False
 
     def _query_page(self, intent: RetrievalIntent) -> WorkIQPage:
         cursor = self._checkpoint_cursor()
@@ -410,13 +474,24 @@ class WorkIQEnumerator:
     def _checkpoint_cursor(self) -> str | None:
         if self._checkpoint_state is None:
             return None
-        return self._checkpoint_state.last_page_token
+        return _validated_cursor(self._checkpoint_state.last_page_token)
 
-    def _stage_checkpoint(self, *, next_cursor: str | None) -> None:
+    def _stage_checkpoint(
+        self, *, next_cursor: str | None, empty_page: bool = False,
+    ) -> None:
         if self._checkpoint_state is None:
             return
+        had_prior_page = self._checkpoint_state.last_page_token is not None
         self._pending_cursor = next_cursor
         self._pending_complete = next_cursor is None
+        self._pending_empty_complete = (
+            self._pending_complete and empty_page and not had_prior_page
+        )
+
+    def _discard_staged_checkpoint(self) -> None:
+        self._pending_cursor = None
+        self._pending_complete = False
+        self._pending_empty_complete = False
 
     def _windowed_intents(
         self, intent: RetrievalIntent
@@ -441,8 +516,8 @@ class WorkIQEnumerator:
     def _candidate(self, record: Mapping[str, Any], correlation_id: str) -> EnumeratedCandidate | None:
         if not isinstance(record, Mapping):
             return None
-        thread_id = _native_id(_text(record, *_THREAD_KEYS))
-        resource_id = _native_id(_text(record, *_ID_KEYS))
+        thread_id = _first_native_id(record, _THREAD_KEYS)
+        resource_id = _first_native_id(record, _ID_KEYS)
         identity_kind = "native_message"
         if not resource_id:
             resource_id, identity_kind = thread_id, "native_thread"
@@ -464,6 +539,8 @@ class WorkIQEnumerator:
                 "preview": _text(record, "preview", "bodyPreview", "summary"),
                 "received_at": received_at.isoformat() if received_at else None,
                 "conversation_id": thread_id or None,
+                "series_master_id": _text(record, "seriesMasterId") or None,
+                "occurrence_id": _text(record, "occurrenceId") or None,
                 "identity_kind": identity_kind,
                 "web_link": _text(record, "webLink", "url") or None,
                 "enumerator": ENUMERATOR_LABEL,
@@ -475,6 +552,17 @@ class WorkIQEnumerator:
             enumerator=ENUMERATOR_LABEL,
             received_at=received_at,
         )
+
+
+def _candidate_matches_exact_ids(
+    candidate: EnumeratedCandidate,
+    entity_ids: tuple[str, ...],
+) -> bool:
+    accepted = {value.strip() for value in entity_ids if value.strip()}
+    conversation_id = str(candidate.partial_metadata.get("conversation_id") or "").strip()
+    return bool(accepted) and (
+        candidate.locator.resource_id in accepted or conversation_id in accepted
+    )
 
 
 class WorkIQHydrator:
@@ -518,6 +606,8 @@ class WorkIQHydrator:
                 route_metadata={
                     "route": ENUMERATOR_LABEL,
                     "conversation_id": meta.get("conversation_id"),
+                    "series_master_id": meta.get("series_master_id"),
+                    "occurrence_id": meta.get("occurrence_id"),
                     "identity_kind": meta.get("identity_kind"),
                     "received_at": meta.get("received_at"),
                     "subject": subject,

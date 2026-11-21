@@ -24,6 +24,7 @@ class EvidenceProvenanceRecord:
     confidence: float
     fields_populated: tuple[str, ...]
     operator: str           # "auto" for pipeline runs, alias for manual
+    source_time: str | None = None  # full UTC source timestamp, when supplied by provider
 
 
 def record_provenance(
@@ -52,6 +53,7 @@ def make_provenance_record(
     fields_populated: tuple[str, ...],
     operator: str = "auto",
     run_at: datetime | None = None,
+    source_time: datetime | None = None,
 ) -> EvidenceProvenanceRecord:
     """Convenience constructor that fills run_at from current UTC time if not provided."""
     ts = (run_at or datetime.now(timezone.utc)).isoformat()
@@ -64,4 +66,5 @@ def make_provenance_record(
         confidence=confidence,
         fields_populated=fields_populated,
         operator=operator,
+        source_time=source_time.isoformat() if source_time is not None else None,
     )

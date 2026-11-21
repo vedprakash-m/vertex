@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -336,3 +338,205 @@ def test_build_readiness_snapshot_dependency_health_highlights_cross_org_failure
     "failing_dependency_ids": ["dep-cross-org"],
     "cross_org_failing_dependency_ids": ["dep-cross-org"],
   }
+
+
+def _write_readiness_artifact(program_dir: Path, ref: str, payload: dict[str, object]) -> str:
+  path = program_dir / ref
+  path.parent.mkdir(parents=True, exist_ok=True)
+  content = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+  path.write_bytes(content)
+  return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
+def _write_offline_readiness_case(program_dir: Path) -> None:
+  scope_hashes = (
+    _write_readiness_artifact(
+      program_dir,
+      "evidence/scope-ado.json",
+      {
+        "source": "ado",
+        "scope_id": "sample_delivery",
+        "query_id": "query-17",
+        "query_hash": "sha256:scope17",
+        "available": True,
+      },
+    ),
+    _write_readiness_artifact(
+      program_dir,
+      "evidence/scope-kusto.json",
+      {
+        "source": "kusto",
+        "scope_id": "sample_release",
+        "query_id": "query-kpi",
+        "query_hash": "sha256:kpi17",
+        "available": True,
+      },
+    ),
+  )
+  approval_hash = _write_readiness_artifact(
+    program_dir,
+    "approvals/summary.json",
+    {
+      "feature": "summary",
+      "model_id": "vertex-model-1",
+      "deployment_id": "vertex-summary-1",
+      "approved": True,
+    },
+  )
+  shadow_hash = _write_readiness_artifact(
+    program_dir,
+    "shadow/cycle-7.json",
+    {
+      "artifact_type": "ai_shadow",
+      "mode": "shadow",
+      "released": True,
+      "ai_run_id": "run-7",
+      "content_sha256": "sha256:shadow7",
+      "deployment_ids": ["vertex-summary-1"],
+    },
+  )
+  cycle_hash = _write_readiness_artifact(
+    program_dir,
+    "evidence/cycle-7.json",
+    {
+      "status": "complete",
+      "shadow_artifact_ref": "shadow/cycle-7.json",
+      "measured_cycle_seconds": 12.5,
+    },
+  )
+  (program_dir / "readiness.yaml").write_text(
+    f"""
+schema_version: "1.0"
+dimensions:
+  sample_offline_readiness:
+    name: Optional source offline readiness
+    gate_id: QG-RELO-W3.8
+    source:
+      type: offline_readiness
+      source_scopes:
+        - source: ado
+          scope_id: sample_delivery
+          query_id: query-17
+          query_hash: sha256:scope17
+          evidence_ref: evidence/scope-ado.json
+          evidence_sha256: {scope_hashes[0]}
+        - source: kusto
+          scope_id: sample_release
+          query_id: query-kpi
+          query_hash: sha256:kpi17
+          evidence_ref: evidence/scope-kusto.json
+          evidence_sha256: {scope_hashes[1]}
+      deployment_references:
+        - feature: summary
+          model_id: vertex-model-1
+          deployment_id: vertex-summary-1
+          approval_ref: approvals/summary.json
+          approval_sha256: {approval_hash}
+      shadow_artifact_ref: shadow/cycle-7.json
+      shadow_artifact_sha256: {shadow_hash}
+      measured_cycle_ref: evidence/cycle-7.json
+      measured_cycle_sha256: {cycle_hash}
+    pass_condition:
+      kind: offline_readiness_complete
+""".lstrip(),
+    encoding="utf-8",
+  )
+
+
+def test_offline_readiness_requires_exact_approved_shadow_cycle_evidence(tmp_path: Path) -> None:
+  programs_root = tmp_path / "programs"
+  program_dir = programs_root / "sample"
+  program_dir.mkdir(parents=True)
+  _write_offline_readiness_case(program_dir)
+
+  config = load_readiness_config("sample", programs_root=programs_root)
+  snapshot = build_readiness_snapshot(
+    "sample",
+    config,
+    loaders=ReadinessFetchLoaders(),
+    fetched_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+  )
+
+  result = snapshot.dimensions[0]
+  assert result.passed is True
+  assert result.status == "green"
+  assert [
+    {
+      key: value
+      for key, value in scope.items()
+      if key != "evidence_sha256"
+    }
+    for scope in result.details["source_scopes"]
+  ] == [
+    {
+      "source": "ado",
+      "scope_id": "sample_delivery",
+      "query_id": "query-17",
+      "query_hash": "sha256:scope17",
+      "evidence_ref": "evidence/scope-ado.json",
+    },
+    {
+      "source": "kusto",
+      "scope_id": "sample_release",
+      "query_id": "query-kpi",
+      "query_hash": "sha256:kpi17",
+      "evidence_ref": "evidence/scope-kusto.json",
+    },
+  ]
+  assert result.details["deployment_references"][0]["approval_ref"] == "approvals/summary.json"
+  assert result.evidence_refs == (
+    "ado:sample_delivery",
+    "kusto:sample_release",
+    "shadow/cycle-7.json",
+    "evidence/cycle-7.json",
+  )
+
+
+@pytest.mark.parametrize(
+  ("artifact_ref", "payload", "expected_blocker"),
+  (
+    (
+      "evidence/scope-ado.json",
+      {"source": "ado", "scope_id": "wrong", "query_id": "query-17", "query_hash": "sha256:scope17", "available": True},
+      "source scope evidence invalid",
+    ),
+    (
+      "approvals/summary.json",
+      {"feature": "summary", "model_id": "vertex-model-1", "deployment_id": "vertex-summary-1", "approved": False},
+      "deployment approval evidence invalid",
+    ),
+    (
+      "shadow/cycle-7.json",
+      {"artifact_type": "ai_shadow", "mode": "shadow", "released": False, "ai_run_id": "run-7", "content_sha256": "sha256:x"},
+      "shadow artifact unavailable",
+    ),
+    (
+      "evidence/cycle-7.json",
+      {"status": "complete", "shadow_artifact_ref": "shadow/wrong.json", "measured_cycle_seconds": 12.5},
+      "measured cycle evidence missing",
+    ),
+  ),
+)
+def test_offline_readiness_never_passes_without_every_qualification(
+  tmp_path: Path, artifact_ref: str, payload: dict[str, object], expected_blocker: str,
+) -> None:
+  programs_root = tmp_path / "programs"
+  program_dir = programs_root / "sample"
+  program_dir.mkdir(parents=True)
+  _write_offline_readiness_case(program_dir)
+  (program_dir / artifact_ref).write_text(
+    json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+  )
+
+  snapshot = build_readiness_snapshot(
+    "sample",
+    load_readiness_config("sample", programs_root=programs_root),
+    loaders=ReadinessFetchLoaders(),
+    fetched_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+  )
+
+  result = snapshot.dimensions[0]
+  assert result.passed is False
+  assert result.status == "red"
+  assert result.observed_value == "blocked"
+  assert expected_blocker in result.details["blockers"]

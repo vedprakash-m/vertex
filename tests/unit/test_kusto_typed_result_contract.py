@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+from unittest.mock import MagicMock
 
 from src.core.config_loader import KustoQuerySettings, KustoSettings
 from src.core.exceptions import QueryError
@@ -128,6 +129,17 @@ def test_legacy_row_lists_remain_admitted_as_table_results() -> None:
 
     assert rows == [{"Name": "East", "Count": 4}]
     assert schema.kind is KustoResultKind.TABLE
+
+
+@pytest.mark.parametrize("rows", [[], [{"Value": 1}, {"Value": 2}]])
+def test_execution_admission_enforces_scalar_cardinality(rows: list[dict[str, int]]) -> None:
+    with pytest.raises(QueryError, match="scalar_required"):
+        admit_kusto_execution(
+            rows,
+            query_id="scalar",
+            expected_cardinality="scalar_required",
+            result_limits=None,
+        )
 
 
 @pytest.mark.parametrize(
@@ -326,3 +338,53 @@ def test_rendering_preserves_result_kind_for_typed_time_series(
     assert observations[0].execution_state == "success"
     assert sections[0].result_kind == KustoResultKind.TIME_SERIES.value
     assert sections[0].columns == ("Timestamp", "Count")
+
+
+def test_registry_chart_preserves_typed_result_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.core import kusto_rendering
+
+    rows = (
+        {"Timestamp": "2026-11-17T00:00:00Z", "Count": 4},
+        {"Timestamp": "2026-11-18T00:00:00Z", "Count": 5},
+    )
+    schema = build_kusto_result_schema(
+        rows,
+        columns=(KustoResultColumn("Timestamp", "datetime"), KustoResultColumn("Count", "long")),
+    )
+    query = KustoQuerySettings(
+        id="trend",
+        cluster="https://cluster",
+        database="db",
+        kql="trend",
+        section="Trend",
+        render_as="chart_image",
+        confidence="high",
+        kusto_section_validates_slice=False,
+        caveats=(),
+        reference_url=None,
+        chart_config={"type": "line"},
+        chart_renderer_id="synthetic::line",
+    )
+    registry = MagicMock()
+    registry.get_renderer.return_value.build.return_value = (b"image", {})
+    monkeypatch.setattr(kusto_rendering, "_VERTEX_CHARTS_ENABLED", True)
+
+    sections, _, _ = build_kusto_sections(
+        KustoSettings(enabled=True, queries=(query,)),
+        lambda _: KustoResultSet(
+            query_id="trend",
+            rows=rows,
+            observed_at=NOW,
+            schema=schema,
+            row_count=2,
+        ),
+        chart_registry=registry,
+        chart_rows_scrubber=lambda value: value,
+        observed_at=NOW,
+        programs_root=tmp_path,
+    )
+
+    assert sections[0].render_mode == "chart"
+    assert sections[0].result_kind == KustoResultKind.TIME_SERIES.value

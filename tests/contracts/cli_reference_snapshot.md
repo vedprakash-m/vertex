@@ -546,6 +546,7 @@ Extract structured evidence from emails and transcripts via WorkIQ.
 | --verbose | boolean | No | False | Write structured gather traces under publications/<program>/observability/. |
 | --facts-only | boolean | No | False | Skip full gather; only mirror current program facts into the fact store (FR-SG-61). |
 | --extract-evidence | boolean | No | False | Run ContentExtractionAgent on transcript signals to populate WorkstreamEvidence. Requires --workiq. Off by default until validated. |
+| --scheduled | boolean | No | False | Mark this as scheduler-driven read-only acquisition; the process principal is resolved from the OS. |
 | --force-discovery | boolean | No | False | Sec 4.4: bypass the discovery-staleness check for UIL-backed channels (ado/kusto/teams/icm) and force discovery even if not yet due. Required after changing query bindings. |
 | --accept-shrinkage | boolean | No | False | Sec 4.4: accept a guarded registry shrinkage (>=30% removed, >=5 items) for UIL-backed channels this run instead of blocking the registry update; classified removals are printed. |
 | --source-export TEXT | text | No |  | D-19/AG-2.12: record an operator-verified ADO source-export/UI membership count for a scope, as '<scope_id>=<count>'. Repeatable. Reconciles that scope's committed query_results entry beyond the weak same-endpoint rerun. |

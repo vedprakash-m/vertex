@@ -50,6 +50,7 @@ from src.m365.rev.graph_client import (
 from src.m365.rev.sharepoint_hydrator import (
     FakeRevSharePointClient,
     GraphDriveItem,
+    GraphDriveItemContent,
     LiveSharePointHydrator,
     SharePointContext,
     SharePointHydrator,
@@ -78,6 +79,7 @@ __all__ = [
     "LiveCalendarHydrator",
     # SharePoint (P2)
     "GraphDriveItem",
+    "GraphDriveItemContent",
     "FakeRevSharePointClient",
     "SharePointContext",
     "SharePointHydrator",

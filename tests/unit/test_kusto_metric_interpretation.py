@@ -714,7 +714,7 @@ def test_real_loader_comparison_admission_and_boundaries(
             assert "query or data gap" in signals[0].text
         else:
             assert signals[0].text == (
-                "Kusto query rate [kind=table, interpretation=unqualified]: "
+                "Kusto query rate [kind=scalar, interpretation=unqualified]: "
                 'admitted_rows=1; columns=[Rate]; facts=[{"Rate":0}]; '
                 "no qualified trend or SLO verdict."
             )

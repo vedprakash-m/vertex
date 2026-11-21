@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.commands.doctor_checks.models import DoctorCheck, DoctorReport
+from src.core.exceptions import ConfigError
+from src.core.gather_schedule_monitor import evaluate_scheduled_gather_readiness
 from src.core.schedule_health import (
     ScheduleHealthFinding,
     evaluate_schedule_health,
@@ -79,7 +81,7 @@ def run_schedule_health_doctor(
     resolved_now = now or datetime.now(timezone.utc)
     try:
         findings = evaluator(program_id, programs_root=programs_root, now=resolved_now)
-    except (OSError, ValueError) as error:
+    except (ConfigError, OSError, ValueError) as error:
         return DoctorReport(
             edition=program_id,
             checks=(
@@ -125,11 +127,55 @@ def run_schedule_health_doctor(
         checks.append(_finding_to_check(finding))
         worst = _worst_status(worst, finding.status)
 
+    readiness_status = "fail"
+    try:
+        scheduled_readiness = evaluate_scheduled_gather_readiness(
+            program_id,
+            programs_root=programs_root,
+        )
+        readiness_status = "ok" if scheduled_readiness.ready else "info"
+        readiness_detail = (
+            "Authorized read-only principal and alert route are ready; overlap, crash, and missed-job "
+            "resume are bounded."
+            if scheduled_readiness.ready
+            else "Scheduled acquisition unavailable: " + "; ".join(scheduled_readiness.blockers) + "."
+        )
+        checks.append(
+            DoctorCheck(
+                "Scheduled Acquisition Readiness",
+                readiness_status,
+                readiness_detail,
+                metadata={
+                    "authorized_principal": scheduled_readiness.principal_authorized,
+                    "read_only": scheduled_readiness.read_only,
+                    "overlap_bounded_seconds": scheduled_readiness.overlap_bounded_seconds,
+                    "crash_resume": scheduled_readiness.crash_resume,
+                    "missed_job_resume": scheduled_readiness.missed_job_resume,
+                    "alert_ready": scheduled_readiness.alert_ready,
+                },
+            )
+        )
+        if readiness_status == "info":
+            worst = _worst_status(worst, "inactive")
+    except (ConfigError, OSError, ValueError) as error:
+        checks.append(
+            DoctorCheck(
+                "Scheduled Acquisition Readiness",
+                "fail",
+                f"Could not evaluate scheduled acquisition readiness for {program_id}: {error}",
+            )
+        )
+        worst = "fail"
+
     # A summary row lets a human scan one line per program; the per-artifact
     # rows above carry the actionable detail and next command.
     detail_parts: list[str] = []
     for finding in findings:
         detail_parts.append(f"{finding.artifact}={finding.status}")
+    detail_parts.append(
+        "scheduled_acquisition="
+        + ("ready" if readiness_status == "ok" else "unavailable")
+    )
     summary = DoctorCheck(
         "Schedule Health",
         worst,

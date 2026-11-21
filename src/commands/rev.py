@@ -254,6 +254,22 @@ def _load_sharepoint_fixture(path: Path) -> dict[str, GraphDriveItem]:
             raise typer.BadParameter(
                 f"SharePoint fixture item {position} content_text must be a string."
             )
+        version = row.get("version") or ""
+        acl = row.get("acl", row.get("permissions", []))
+        deleted = row.get("deleted", False)
+        inaccessible = row.get("inaccessible", False)
+        if not isinstance(version, str):
+            raise typer.BadParameter(
+                f"SharePoint fixture item {position} version must be a string."
+            )
+        if not isinstance(acl, list) or not all(isinstance(entry, dict) for entry in acl):
+            raise typer.BadParameter(
+                f"SharePoint fixture item {position} acl must be an array of objects."
+            )
+        if not isinstance(deleted, bool) or not isinstance(inaccessible, bool):
+            raise typer.BadParameter(
+                f"SharePoint fixture item {position} deleted/inaccessible must be booleans."
+            )
         content = content_text.encode("utf-8")
         items[page_id.strip()] = GraphDriveItem(
             item_id=item_id.strip(),
@@ -267,6 +283,10 @@ def _load_sharepoint_fixture(path: Path) -> dict[str, GraphDriveItem]:
             last_modified=str(row.get("last_modified") or ""),
             site_id=str(row.get("site_id") or ""),
             parent_path=str(row.get("parent_path") or ""),
+            version=version,
+            acl=tuple(acl),
+            deleted=deleted,
+            inaccessible=inaccessible,
         )
     return items
 
@@ -422,6 +442,10 @@ def rev_run(
                         "bodyPreview": record.preview,
                         "threadId": record.thread_id,
                         "conversationId": record.conversation_id,
+                        "deleted": record.deleted,
+                        "changeType": record.change_type,
+                        "lastModifiedDateTime": record.last_modified_at,
+                        "changeKey": record.change_key,
                     }
                     for record in page.records
                 ),

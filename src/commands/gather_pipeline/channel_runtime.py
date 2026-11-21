@@ -20,7 +20,7 @@ from src.core.channel_registry_store import (
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.gather_channel_support import append_integration_error_once, binding_provider_instance_id
 from src.core.exceptions import QueryError
-from src.core.failure_taxonomy import safe_failure_suffix
+from src.core.failure_taxonomy import FailureCategory, safe_failure_suffix
 from src.core.integration_types import DiscoveryCompleteness, HydrationMode, HydrationResult, RunContext, ScopeStatusKind
 from src.core.models_v2 import IntegrationError
 from src.core.gather_run_manifest import ChannelOutcomeEntry
@@ -203,7 +203,16 @@ def run_channel(
     delta = None
     discovery_degrade_reason: str | None = None
 
-    def _record_outcome(*, degraded: bool, reason: str | None, api_calls: int = 0) -> None:
+    def _record_outcome(
+        *,
+        degraded: bool,
+        reason: str | None,
+        api_calls: int = 0,
+        source_permission_status: str = "unknown",
+        exact_target_status: str = "unknown",
+        quarantine_status: str = "none",
+        checkpoint_status: str = "unknown",
+    ) -> None:
         if channel_outcome_sink is None:
             return
         channel_outcome_sink.append(
@@ -213,6 +222,10 @@ def run_channel(
                 degrade_reason=reason,
                 elapsed_seconds=perf_counter() - channel_started_at,
                 ado_call_count=api_calls if channel == "ado" else 0,
+                source_permission_status=source_permission_status,
+                exact_target_status=exact_target_status,
+                quarantine_status=quarantine_status,
+                checkpoint_status=checkpoint_status,
             )
         )
     # ADF-W1.4 (Section 8.3.1): bounded, non-blocking channel execution. An
@@ -523,6 +536,39 @@ def run_channel(
         degraded=is_degraded,
         reason=first_hydration_error.message if first_hydration_error is not None else discovery_degrade_reason,
         api_calls=hydration_result.api_call_count,
+        source_permission_status=(
+            "denied"
+            if any(
+                error.failure_category is FailureCategory.TRANSIENT_AUTH
+                for error in hydration_result.errors
+            )
+            else "verified"
+        ),
+        exact_target_status=(
+            "verified"
+            if not hydration_result.failed_ref_ids
+            and set(hydration_result.hydrated_ref_ids)
+            == {
+                (registration.ref_id, registration.ref_kind)
+                for registration in registrations
+            }
+            else "partial"
+        ),
+        quarantine_status=(
+            "present"
+            if any(
+                "quarantin" in error.message.lower()
+                for error in hydration_result.errors
+            )
+            else "none"
+        ),
+        checkpoint_status=(
+            "partial"
+            if checkpoint_advances and hydration_result.failed_ref_ids
+            else "current"
+            if checkpoint_advances
+            else "unchanged"
+        ),
     )
     return hydration_result, delta
 

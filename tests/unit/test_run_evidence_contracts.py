@@ -80,10 +80,13 @@ def _wire(capture):
 
 def test_minimal_capture_round_trip_and_integrity():
     capture = _capture()
-    assert sum(len(fields(model)) for model in (SourceScopeContract, EvidenceBinding, RunEvidenceSnapshot)) == 22
+    assert sum(len(fields(model)) for model in (SourceScopeContract, EvidenceBinding, RunEvidenceSnapshot)) == 25
     assert capture.capture_state == "unqualified_capture"
-    assert capture.schema_version == "run-evidence-capture.v2"
+    assert capture.schema_version == "run-evidence-capture.v3"
     assert capture.effective_family_modes == (("judgment", "primary"), ("workitem.state", "shadow"))
+    assert capture.source_scope_sha256.startswith("sha256:")
+    assert capture.binding_set_sha256.startswith("sha256:")
+    assert capture.selector_sha256.startswith("sha256:")
     assert capture.fetched_item_ids == (1, 2)
     payload, draft = _wire(capture)
     assert load_run_evidence_snapshot(payload, draft) == capture
@@ -215,6 +218,8 @@ def test_v1_capture_remains_readable_without_selector_identity():
     capture = _capture()
     payload, draft = _wire(capture)
     raw = payload["metadata"]["run_evidence_snapshot"]
+    for key in ("source_scope_sha256", "binding_set_sha256", "selector_sha256"):
+        raw.pop(key)
     raw.pop("effective_family_modes")
     raw["schema_version"] = "run-evidence-capture.v1"
     raw.pop("sha256")
@@ -229,6 +234,9 @@ def test_v1_capture_remains_readable_without_selector_identity():
 def test_v2_capture_without_observed_selectors_remains_readable_unbound():
     payload, draft = _wire(_capture())
     raw = payload["metadata"]["run_evidence_snapshot"]
+    for key in ("source_scope_sha256", "binding_set_sha256", "selector_sha256"):
+        raw.pop(key)
+    raw["schema_version"] = "run-evidence-capture.v2"
     raw["effective_family_modes"] = []
     raw.pop("sha256")
     raw["sha256"] = hash_jsonable(raw)
@@ -239,6 +247,54 @@ def test_v2_capture_without_observed_selectors_remains_readable_unbound():
     assert loaded is not None
     assert loaded.schema_version == "run-evidence-capture.v2"
     assert loaded.effective_family_modes == ()
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("source_scope_sha256", "binding_set_sha256", "selector_sha256"),
+)
+def test_v3_selector_identity_refuses_rebound_substitution(field):
+    payload, draft = _wire(_capture(queries=(
+        SimpleNamespace(query_id="q", scope_id="s", wiql_hash="query", membership_ids=("1",)),
+    ), facts=(_fact(),)))
+    raw = payload["metadata"]["run_evidence_snapshot"]
+    raw[field] = "sha256:" + "0" * 64
+    raw.pop("sha256")
+    raw["sha256"] = hash_jsonable(raw)
+    draft["run_evidence_snapshot_sha256"] = raw["sha256"]
+
+    with pytest.raises(ConfigError, match="capture is invalid"):
+        load_run_evidence_snapshot(payload, draft)
+
+
+@pytest.mark.parametrize(
+    "wrong_ref",
+    ("PROGRAM:other", "program:other"),
+)
+def test_builder_rejects_fact_binding_for_wrong_program_entity(wrong_ref):
+    with pytest.raises(ConfigError, match="entity"):
+        _capture(facts=(_fact("wrong", (wrong_ref,)),))
+
+
+def test_selector_identities_are_order_independent_and_set_separated():
+    first_query = SimpleNamespace(
+        query_id="q1", scope_id="s1", wiql_hash="h1", membership_ids=("1",)
+    )
+    second_query = SimpleNamespace(
+        query_id="q2", scope_id="s2", wiql_hash="h2", membership_ids=("2",)
+    )
+    first_fact, second_fact = _fact("first"), _fact("second")
+    left = _capture(queries=(first_query, second_query), facts=(first_fact, second_fact))
+    right = _capture(queries=(second_query, first_query), facts=(second_fact, first_fact))
+
+    assert left.source_scope_sha256 == right.source_scope_sha256
+    assert left.binding_set_sha256 == right.binding_set_sha256
+    assert left.selector_sha256 == right.selector_sha256
+    assert len({
+        left.source_scope_sha256,
+        left.binding_set_sha256,
+        left.selector_sha256,
+    }) == 3
 
 
 @pytest.mark.parametrize("modes", [

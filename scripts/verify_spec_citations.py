@@ -130,7 +130,7 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="PS-3: incremental-projection function already exists (Track D is a wiring task)",
         path="src/core/ledger/program_views.py",
-        line=262,
+        line=293,
         must_contain="def project_events_incremental_to_sqlite",
     ),
     Citation(

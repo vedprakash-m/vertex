@@ -185,7 +185,16 @@ def aggregate_approved_sources(evidences: tuple[WorkstreamEvidence, ...]) -> Wor
     ref_keys: set[tuple] = set()
     for evidence in ordered:
         for ref in evidence.source_refs:
-            ref_key = (ref.source_type, ref.canonical_id, ref.description, ref.source_date, ref.author, ref.permalink, ref.extraction_method)
+            ref_key = (
+                ref.source_type,
+                ref.canonical_id,
+                ref.description,
+                ref.source_date,
+                ref.source_time,
+                ref.author,
+                ref.permalink,
+                ref.extraction_method,
+            )
             if ref_key not in ref_keys:
                 ref_keys.add(ref_key)
                 refs.append(ref)
@@ -242,6 +251,11 @@ def _decode_evidence_record(payload: dict) -> EvidenceRecord | None:
                 permalink=r.get("permalink"),
                 extraction_method=r.get("extraction_method"),
                 canonical_id=r.get("canonical_id"),
+                source_time=(
+                    datetime.fromisoformat(r["source_time"])
+                    if r.get("source_time")
+                    else None
+                ),
             )
             for r in (payload.get("source_refs") or [])
             if isinstance(r, dict)

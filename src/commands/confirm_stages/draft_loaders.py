@@ -76,7 +76,7 @@ class ConfirmDraftManifest:
             and draft_state.get("edition_type") != "lookback"
             and (
                 self.run_evidence_snapshot is None
-                or self.run_evidence_snapshot.schema_version != "run-evidence-capture.v2"
+                or self.run_evidence_snapshot.schema_version != "run-evidence-capture.v3"
                 or {family for family, _ in self.run_evidence_snapshot.effective_family_modes}
                 != {"judgment", "workitem.state"}
             )
@@ -145,7 +145,7 @@ def load_confirm_draft_manifest(
         and draft_state.get("edition_type") != "lookback"
         and (
             capture is None
-            or capture.schema_version != "run-evidence-capture.v2"
+            or capture.schema_version != "run-evidence-capture.v3"
             or {family for family, _ in capture.effective_family_modes}
             != {"judgment", "workitem.state"}
         )

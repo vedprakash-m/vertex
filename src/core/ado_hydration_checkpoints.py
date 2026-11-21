@@ -59,6 +59,7 @@ class HydrationCheckpoint:
     provider_instance_id: str = "default"
     updated_at: datetime | None = None
     reseed_reason: str | None = None
+    evidence_json: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +173,7 @@ def read_checkpoints(
                 cursor=str(cursor),
                 provider_instance_id=provider_instance_id,
                 updated_at=parsed_at,
+                evidence_json=payload_json,
             )
     return result
 

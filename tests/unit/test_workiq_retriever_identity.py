@@ -114,6 +114,129 @@ def test_mixed_results_preserve_native_evidence_and_freshness_success(tmp_path: 
     assert second.calls_made == 1
 
 
+@pytest.mark.parametrize("source_time", [None, "private-invalid-time"])
+def test_unqualified_source_time_never_enters_rich_extraction_or_cache(
+    source_time: str | None, tmp_path: Path,
+) -> None:
+    record = _record(id="native-message")
+    record["receivedDateTime"] = source_time
+    bridge = Bridge([record])
+
+    result = _retrieve(bridge, cache_path=tmp_path / "freshness.json")
+
+    assert result.rejected_source_time_count == 1
+    assert result.enrichments == ()
+    assert result.calls_made == 1
+    assert result.enumeration_count == 0
+    assert bridge.questions == [bridge.questions[0]]
+    assert json.loads((tmp_path / "freshness.json").read_text(encoding="utf-8")) == {}
+
+
+def test_valid_rich_source_time_reaches_evidence_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.commands.enrich import _extract_per_thread_evidence
+
+    source_time = "2026-06-20T10:00:00Z"
+    bridge = Bridge([_record(id="native-message")])
+    monkeypatch.setattr(
+        "src.commands.enrich._workiq_thread_freshness_path",
+        lambda **_: tmp_path / "freshness.json",
+    )
+
+    evidences, incomplete = _extract_per_thread_evidence(
+        bridge=bridge,
+        entry={"id": "synthetic", "name": "Synthetic lane"},
+        since_dt=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        as_of=datetime(2026, 6, 21, tzinfo=timezone.utc),
+        retrieval_config=SimpleNamespace(
+            per_thread_top_k=8,
+            max_calls_per_cycle=10,
+            max_wall_clock_seconds=30,
+            per_thread_one_hop=False,
+        ),
+        edition="synthetic",
+        programs_root=tmp_path,
+    )
+
+    assert incomplete is False
+    assert evidences[0].source_refs[0].source_time == datetime.fromisoformat(
+        source_time.replace("Z", "+00:00")
+    )
+
+
+def test_nullable_rich_source_time_round_trips_evidence_store(tmp_path: Path) -> None:
+    from src.commands.gather_pipeline.evidence_extraction_stage import persist_evidence
+    from src.core.evidence_models import SourceRef
+    from src.core.evidence_store import load_latest_evidence_by_lane
+    from src.core.evidence_models import VerificationState, WorkstreamEvidence
+    from src.core.models import RiskLevel
+
+    source_ref = SourceRef(
+        source_type="workiq_email",
+        description="Synthetic update",
+        source_date=None,
+        author="fixture@example.net",
+        canonical_id="native-message",
+        source_time=None,
+    )
+    evidence = WorkstreamEvidence(
+        lane_id="synthetic",
+        synthesized_at=datetime(2026, 6, 21, tzinfo=timezone.utc),
+        risk_level=RiskLevel.LOW,
+        etas=(),
+        blocking_items=(),
+        owners=(),
+        source_refs=(source_ref,),
+        raw_excerpts=(),
+        confidence=0.8,
+        narrative_summary="Synthetic update",
+        verification_state=VerificationState.MODEL_SELF_ATTESTED,
+    )
+
+    assert persist_evidence(
+        evidence,
+        program_id="synthetic",
+        programs_root=tmp_path,
+        workiq_origin=True,
+    )
+    stored = load_latest_evidence_by_lane(
+        "synthetic", programs_root=tmp_path,
+    )["synthetic"]
+    assert stored.source_refs[0].source_time is None
+
+
+def test_empty_rich_discovery_is_reported_as_unverified_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from src.commands.enrich import _extract_per_thread_evidence
+
+    bridge = Bridge([])
+    monkeypatch.setattr(
+        "src.commands.enrich._workiq_thread_freshness_path",
+        lambda **_: tmp_path / "freshness.json",
+    )
+
+    evidences, incomplete = _extract_per_thread_evidence(
+        bridge=bridge,
+        entry={"id": "synthetic", "name": "Synthetic lane"},
+        since_dt=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        as_of=datetime(2026, 6, 21, tzinfo=timezone.utc),
+        retrieval_config=SimpleNamespace(
+            per_thread_top_k=8,
+            max_calls_per_cycle=10,
+            max_wall_clock_seconds=30,
+            per_thread_one_hop=False,
+        ),
+        edition="synthetic",
+        programs_root=tmp_path,
+    )
+
+    assert evidences == ()
+    assert incomplete is True
+    assert "coverage was not verified" in capsys.readouterr().err
+
+
 def test_preview_semantic_identity_remains_available() -> None:
     result = validate_structured_discovery_payload(
         {"emails": [_record()]}, window_start=REQUEST.window_start,
@@ -519,8 +642,13 @@ def test_rich_retrieval_preserves_time_rejections_and_valid_partial_results(
     assert result.enumeration_count == 1
     assert result.calls_made == (1 if max_calls == 1 else 2)
     assert len(result.enrichments) == (0 if max_calls == 1 else 1)
-    assert set(json.loads(cache.read_text(encoding="utf-8"))) == (set() if max_calls == 1 else {"valid-thread"})
-    assert all("private-missing" not in question and "private-invalid" not in question for question in bridge.questions)
+    assert set(json.loads(cache.read_text(encoding="utf-8"))) == (
+        set() if max_calls == 1 else {"valid-thread"}
+    )
+    assert all(
+        "private-missing" not in question and "private-invalid" not in question
+        for question in bridge.questions
+    )
 
 
 @pytest.mark.parametrize("invalid_time", [None, "private-invalid-time", 123, "0001-01-01T00:00:00+14:00"])
@@ -560,7 +688,7 @@ def test_rich_retrieval_rejects_unqualified_source_time() -> None:
 
     result = _retrieve(bridge)
 
-    assert not result.enrichments
+    assert result.enrichments == ()
     assert result.rejected_source_time_count == 1
 
 
@@ -748,7 +876,10 @@ def test_enrich_cli_does_not_record_rejected_only_results_as_zero_yield(
     result = CliRunner().invoke(app, args)
 
     assert result.exit_code == 0, result.output
+    unqualified_time = kind in {"missing_time", "invalid_time"}
     if dry_run or (not include_native and kind in {
+        "empty", "outside",
+    }) or (not include_native and kind in {
         "missing_time", "invalid_time", "identity", "identity_missing", "unavailable", "malformed",
         "invalid_shape", "unsafe_control", "unsafe_url",
     }):
@@ -756,7 +887,7 @@ def test_enrich_cli_does_not_record_rejected_only_results_as_zero_yield(
     else:
         state = json.loads(state_path.read_text(encoding="utf-8"))["lanes"]["synthetic"]
         assert state["last_observed_yield"] == int(include_native)
-    assert persist.call_count == int(include_native and not dry_run)
+    assert persist.call_count == (int(include_native) if not dry_run else 0)
     preview_warning = (
         "(dry-run: enrich does not save evidence; WorkIQ budget and circuit-breaker state may be written; "
         "CLI startup may also write state)\n"
@@ -767,7 +898,7 @@ def test_enrich_cli_does_not_record_rejected_only_results_as_zero_yield(
     else:
         assert preview_warning not in result.stderr
         diagnostics = result.stderr
-    if kind in {"missing_time", "invalid_time"}:
+    if unqualified_time:
         assert "missing or invalid source time" in diagnostics
     elif kind in {"identity", "identity_missing"}:
         assert "stable source identity" in diagnostics
@@ -775,6 +906,8 @@ def test_enrich_cli_does_not_record_rejected_only_results_as_zero_yield(
         assert "structured discovery response unavailable or invalid" in diagnostics
     elif kind in {"invalid_shape", "unsafe_control", "unsafe_url"}:
         assert "1 inspected record occurrence(s) rejected for malformed or unsafe content" in diagnostics
+    elif kind in {"empty", "outside"} and not include_native:
+        assert "coverage was not verified" in diagnostics
     else:
         assert diagnostics == ""
     assert f"sources={int(include_native)}" in result.stdout

@@ -241,7 +241,10 @@ def test_valid_scalar_zero_and_numeric_strings_keep_existing_interpretation(valu
     assert kusto_query_helpers.extract_kusto_query_numeric_value(query, rows) == float(value)
     signal = gather._build_kusto_kpi_signal(query=query, rows=rows, program_id="synthetic", as_of=NOW)
     assert signal is not None
-    assert signal.text == f"KPI Synthetic: {value}"
+    assert signal.text == (
+        f"synthetic.metric = {float(value):g} against SLO >=2: "
+        f"{'OK' if float(value) >= 2 else 'BREACH'}."
+    )
     result = _hydrate(query, rows, tmp_path)
     assert result.errors == ()
     assert result.resources.result_sets[0].observed_value == float(value)
@@ -297,3 +300,15 @@ def test_scalar_contract_does_not_change_formatted_kpi_projection_parsing() -> N
     assert signal is not None
     assert signal.metadata["result_value"] == "1,200%"
     assert coerce_metric_value(signal.metadata["result_value"]) == 1200.0
+
+
+def test_bound_kpi_signal_preserves_metric_value_unit_and_slo_state() -> None:
+    signal = gather._build_kusto_kpi_signal(
+        query=_query(),
+        rows=_rows(1, "3.25"),
+        program_id="synthetic",
+        as_of=NOW,
+    )
+
+    assert signal is not None
+    assert signal.text == "synthetic.metric = 3.25 against SLO >=2: OK."

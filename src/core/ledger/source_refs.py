@@ -180,6 +180,7 @@ class WorkIQRef:
     artifact_id: str
     artifact_kind: str
     retrieved_at: datetime
+    source_time: datetime | None = None
     query: str | None = None
     vault_hash: str | None = None
     ref_type: str = field(init=False, default="workiq")
@@ -414,10 +415,16 @@ def source_ref_from_dict(payload: dict[str, Any]) -> SourceRef:
             vault_hash=_optional_str(payload, "vault_hash"),
         )
     if ref_type == "workiq":
+        source_time = payload.get("source_time")
         return WorkIQRef(
             artifact_id=_required_str(payload, "artifact_id"),
             artifact_kind=_required_str(payload, "artifact_kind"),
             retrieved_at=_parse_datetime(payload.get("retrieved_at"), "retrieved_at"),
+            source_time=(
+                _parse_datetime(source_time, "source_time")
+                if source_time is not None
+                else None
+            ),
             query=_optional_str(payload, "query"),
             vault_hash=_optional_str(payload, "vault_hash"),
         )
