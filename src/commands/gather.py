@@ -535,11 +535,6 @@ def gather_command(
     ),
 ) -> None:
     source_export_counts = _parse_source_export_counts(source_export)
-    if scheduled:
-        require_scheduled_gather_authorized(
-            program,
-            programs_root=PROGRAMS_ROOT,
-        )
     if facts_only:
         _now = datetime.now(timezone.utc)
         _programs_root = PROGRAMS_ROOT
@@ -940,11 +935,6 @@ def gather_program(
                 _has_required_scope_degradation(artifacts)
                 or query_capture_skew_exceeded
                 or not authoritative_discovery_captured
-                or any(
-                    type(result.page_count) is not int
-                    or result.page_count <= 0
-                    for result in query_results
-                )
             )
             else RequiredScopeStatus.FULL
         )

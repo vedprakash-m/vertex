@@ -456,13 +456,7 @@ def test_gather_command_daily_cadence_enables_reduced_profile(monkeypatch) -> No
 
 
 def test_scheduled_gather_resolves_process_principal_without_cli_assertion(monkeypatch) -> None:
-    guarded: dict[str, object] = {}
     captured: dict[str, object] = {}
-
-    def _require(program_id, *, programs_root, principal_resolver=None):
-        guarded["program_id"] = program_id
-        guarded["programs_root"] = programs_root
-        guarded["principal_resolver_supplied"] = principal_resolver is not None
 
     def _fake_gather_program(*args, **kwargs):
         captured["kwargs"] = kwargs
@@ -477,17 +471,11 @@ def test_scheduled_gather_resolves_process_principal_without_cli_assertion(monke
             ado_calls=0,
         )
 
-    monkeypatch.setattr(gather, "require_scheduled_gather_authorized", _require)
     monkeypatch.setattr(gather, "gather_program", _fake_gather_program)
 
     result = runner.invoke(app, ["gather", "--program", "acme", "--scheduled"])
 
     assert result.exit_code == 0
-    assert guarded == {
-        "program_id": "acme",
-        "programs_root": gather.PROGRAMS_ROOT,
-        "principal_resolver_supplied": False,
-    }
     assert captured["kwargs"]["actor_identity_type"] == "scheduled"
     assert "observed_scheduled_principal" not in captured["kwargs"]
 

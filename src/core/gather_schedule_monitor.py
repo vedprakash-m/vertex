@@ -180,7 +180,10 @@ def require_scheduled_gather_authorized(
 def resolve_scheduled_process_principal() -> str:
     """Return the OS-bound identity of this process, never a caller assertion."""
     if os.name == "nt":
-        whoami_path = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "whoami.exe"
+        system_root = os.environ.get("SystemRoot")
+        if not system_root:
+            raise RuntimeError("Windows process principal could not be resolved")
+        whoami_path = Path(system_root) / "System32" / "whoami.exe"
         completed = subprocess.run(
             [str(whoami_path)],
             check=False,
