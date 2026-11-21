@@ -28,7 +28,7 @@ from src.ai._pipeline import process_generated_text
 from src.commands import gather as gather_helpers
 from src.core.ado_client import ADOClient
 from src.core.ado_semantics import latest_meaningful_ado_update
-from src.core.audience_scope_recipients import merge_audience_scope_recipients, resolve_audience_scope_recipients
+from src.core.audience_scope_recipients import merge_audience_scope_recipients, refuse_removed_primary_bcc_recipient, resolve_audience_scope_recipients
 from src.core.business_days import business_days_since
 from src.core.context_gap_store import append_context_gap
 from src.core.edition_resolver import PROGRAMS_ROOT, get_legacy_nudge_output, get_nudge_paths, get_program_output_dir
@@ -327,13 +327,13 @@ def generate_full_hygiene_nudges(
     resolved_overrides: dict[str, int] = dict(stale_overrides or {})
     _apply_legacy_stale_flags(resolved_overrides, config, stale_a=stale_a, stale_b=stale_b, stale_c=stale_c)
 
-    # Recipient resolution
     try:
         primary_recipient = _resolve_primary_recipient(
             config.delivery.recipient, knowledge.people_directory, program_id=program_id
         )
     except ConfigError:
         raise
+    refuse_removed_primary_bcc_recipient(primary_recipient=primary_recipient, audience_policy=config.presentation.audience_policy, program_id=program_id)
 
     # Load prior nudge state for audit/analytics only (no longer used for filtering)
 
