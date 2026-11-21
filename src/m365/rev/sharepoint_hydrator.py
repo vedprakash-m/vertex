@@ -288,6 +288,12 @@ class SharePointHydrator:
             if result.reason.startswith(("item_not_found", "deleted", "inaccessible")):
                 return self._rejected_metadata(candidate, correlation_id, reason=result.reason)
             return self._metadata_only_fallback(candidate, correlation_id, reason=result.reason)
+        if not isinstance(result, Success) or not isinstance(result.value, GraphDriveItem):
+            return self._metadata_only_fallback(
+                candidate,
+                correlation_id,
+                reason="malformed_metadata_result",
+            )
         item: GraphDriveItem = result.value
         if item.deleted:
             return self._rejected_metadata(candidate, correlation_id, reason=f"deleted:{item.item_id}")
@@ -328,6 +334,15 @@ class SharePointHydrator:
                 candidate,
                 correlation_id,
                 reason=content_result.reason,
+                item=item,
+            )
+        if not isinstance(content_result, Success) or not isinstance(
+            content_result.value, GraphDriveItemContent
+        ):
+            return self._metadata_only_fallback(
+                candidate,
+                correlation_id,
+                reason="malformed_content_result",
                 item=item,
             )
         content = content_result.value

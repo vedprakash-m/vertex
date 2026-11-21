@@ -11,6 +11,7 @@ from src.core.config_loader import KustoQuerySettings, KustoSettings
 from src.core.exceptions import AuthError, ConfigError, QueryError
 from src.core.kusto_rendering import build_kusto_sections
 from src.core.kusto_templates import KustoTemplateContext
+from src.core.chart_cache_store import ChartCacheEntry
 
 
 def test_lookback_exact_window_renders_selected_snapshot_bounds() -> None:
@@ -629,6 +630,63 @@ def test_actual_registry_chart_logs_nonfinite_auxiliary_cache_refusal(renderer_i
     assert warnings == ()
     assert "non-finite" in caplog.text
     assert path.read_bytes() == before
+
+
+def test_cached_chart_preserves_inferred_time_series_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core import kusto_rendering
+    from unittest.mock import Mock
+
+    query = KustoQuerySettings(
+        id="velocity",
+        cluster="synthetic",
+        database="synthetic",
+        kql="T | project Timestamp, Count",
+        section="Velocity",
+        render_as="chart_image",
+        confidence="high",
+        kusto_section_validates_slice=False,
+        caveats=(),
+        reference_url=None,
+        chart_renderer_id="vertex::declarative",
+    )
+    cache_entry = ChartCacheEntry(
+        program_id="demo",
+        query_id=query.id,
+        rows=(
+            {
+                "Timestamp": "2026-11-18T00:00:00Z",
+                "Count": 2,
+            },
+            {
+                "Timestamp": "2026-11-19T00:00:00Z",
+                "Count": 3,
+            },
+        ),
+        captured_at=datetime(2026, 11, 19, tzinfo=timezone.utc),
+        chart_config_hash="hash",
+        row_count=2,
+        query_contract_hash="contract",
+    )
+    renderer = Mock()
+    renderer.build.return_value = (b"image", {})
+    registry = Mock()
+    registry.get_renderer.return_value = renderer
+    monkeypatch.setattr(
+        "src.core.chart_renderer_registry.get_default_registry",
+        lambda: registry,
+    )
+
+    section = kusto_rendering._build_chart_section_from_cache(
+        query,
+        cache_entry,
+        datetime(2026, 11, 20, tzinfo=timezone.utc),
+        True,
+    )
+
+    assert section is not None
+    assert section.result_kind == "time_series"
 
 
 @pytest.mark.parametrize("fallback", [False, True])

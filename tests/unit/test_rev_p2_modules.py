@@ -28,7 +28,8 @@ from src.core.rev.entity_types import EntityType
 from src.core.rev.governor import BudgetLimits, Governor
 from src.core.rev.identity import HydrationLocator
 from src.core.rev.ports import EnumeratedCandidate
-from src.core.rev.result import Forbidden, Incomplete, Success, Unsupported
+from src.core.rev.result import Forbidden, Incomplete, RateLimited, Success, Unsupported
+from src.m365.rev.sharepoint_hydrator import GraphDriveItem, GraphDriveItemContent
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +654,520 @@ class TestSharePointHydrator:
         result = hydrator.hydrate(candidate, correlation_id="test")
         assert isinstance(result, Success)
         assert result.value.metadata_only is True
+
+    @pytest.mark.parametrize(
+        ("client_kwargs", "expected"),
+        [
+            ({"rate_limited_ids": frozenset({"item-content"})}, RateLimited),
+            ({"forbidden_ids": frozenset({"item-content"})}, Forbidden),
+        ],
+    )
+    def test_bounded_content_client_preserves_typed_failures(
+        self, client_kwargs, expected
+    ) -> None:
+        from src.m365.rev.sharepoint_hydrator import (
+            FakeRevSharePointClient,
+            SharePointContext,
+            SharePointHydrator,
+        )
+
+        item = GraphDriveItem(
+            item_id="item-content",
+            drive_id="drive-1",
+            name="status.txt",
+            mime_type="text/plain",
+            file_content=b"status",
+        )
+        client = FakeRevSharePointClient((item,), **client_kwargs)
+
+        result = client.get_drive_item_content(
+            drive_id="drive-1",
+            item_id="item-content",
+            offset=0,
+            max_bytes=2,
+        )
+
+        assert isinstance(result, expected)
+        metadata_result = client.get_drive_item(
+            drive_id="drive-1",
+            item_id="item-content",
+        )
+        assert isinstance(metadata_result, expected)
+        hydrator = SharePointHydrator(
+            client,
+            SharePointContext(tenant_id="t1", principal_mailbox="owner@example.net"),
+        )
+        hydrated = hydrator.hydrate(
+            _candidate("item-content", source_type=EntityType.DRIVE_ITEM),
+            correlation_id="test",
+        )
+        assert isinstance(hydrated, expected)
+
+    def test_fake_client_missing_metadata_and_bounded_search_are_typed(self) -> None:
+        from src.m365.rev.sharepoint_hydrator import FakeRevSharePointClient, GraphDriveItem
+
+        client = FakeRevSharePointClient(
+            (
+                GraphDriveItem(item_id="a", drive_id="drive-1"),
+                GraphDriveItem(item_id="b", drive_id="drive-1"),
+            )
+        )
+
+        missing = client.get_drive_item(drive_id="drive-1", item_id="missing")
+        found = client.search_drive_items(kql="fixture", limit=1)
+
+        assert isinstance(missing, Incomplete)
+        assert missing.reason == "item_not_found:missing"
+        assert isinstance(found, Success)
+        assert [item.item_id for item in found.value] == ["a"]
+
+    def test_bounded_content_missing_and_nonzero_offset_are_explicit(self) -> None:
+        from src.m365.rev.sharepoint_hydrator import FakeRevSharePointClient, GraphDriveItem
+
+        item = GraphDriveItem(
+            item_id="item-content",
+            drive_id="drive-1",
+            file_content=b"012345",
+            etag="etag-1",
+            version="2",
+        )
+        client = FakeRevSharePointClient((item,))
+
+        missing = client.get_drive_item_content(
+            drive_id="drive-1",
+            item_id="missing",
+            offset=3,
+            max_bytes=2,
+        )
+        ranged = client.get_drive_item_content(
+            drive_id="drive-1",
+            item_id="item-content",
+            offset=3,
+            max_bytes=2,
+        )
+
+        assert isinstance(missing, Incomplete)
+        assert missing.reason == "item_not_found:missing"
+        assert missing.value.offset == 3
+        assert isinstance(ranged, Success)
+        assert ranged.value.data == b"34"
+        assert ranged.value.offset == 3
+        assert ranged.value.total_size == 6
+        assert ranged.value.etag == "etag-1"
+        assert ranged.value.version == "2"
+        assert ranged.value.complete is False
+
+    @pytest.mark.parametrize("status", ["deleted", "inaccessible"])
+    def test_candidate_tombstone_does_not_contact_client_and_preserves_acl(
+        self, status: str
+    ) -> None:
+        from dataclasses import replace
+        from src.m365.rev.sharepoint_hydrator import (
+            FakeRevSharePointClient,
+            GraphDriveItem,
+            SharePointContext,
+            SharePointHydrator,
+        )
+
+        acl = ({"kind": "group", "id": "group-1", "roles": ("read",)},)
+        item = GraphDriveItem(
+            item_id="item-status",
+            drive_id="drive-1",
+            acl=acl,
+        )
+        client = FakeRevSharePointClient((item,))
+        hydrator = SharePointHydrator(
+            client,
+            SharePointContext(tenant_id="t1", principal_mailbox="owner@example.net"),
+        )
+        candidate = replace(
+            _candidate("item-status", source_type=EntityType.DRIVE_ITEM),
+            partial_metadata={"name": "status.txt", "drive_id": "drive-1", "acl": acl, status: True},
+        )
+
+        result = hydrator.hydrate(candidate, correlation_id="test")
+
+        assert isinstance(result, Incomplete) if status == "deleted" else isinstance(result, Forbidden)
+        assert client.calls == []
+        if isinstance(result, Incomplete):
+            assert result.value.metadata_only is True
+            assert result.value.route_metadata["acl"] == acl
+            assert result.value.route_metadata["deleted"] is True
+            assert result.value.route_metadata["acl_authorization_claimed"] is False
+
+    @pytest.mark.parametrize(
+        ("metadata_result", "reason"),
+        [
+            (Incomplete(GraphDriveItem(item_id="x", drive_id="drive-1"), reason="item_not_found:x"), "item_not_found:x"),
+            (Incomplete(GraphDriveItem(item_id="x", drive_id="drive-1"), reason="partial_metadata"), "partial_metadata"),
+        ],
+    )
+    def test_incomplete_metadata_outcomes_are_classified_and_fail_closed(
+        self, metadata_result, reason: str
+    ) -> None:
+        from src.m365.rev.sharepoint_hydrator import (
+            GraphDriveItem,
+            SharePointContext,
+            SharePointHydrator,
+        )
+
+        class Client:
+            def get_drive_item(self, **_kwargs):
+                return metadata_result
+
+        hydrator = SharePointHydrator(
+            Client(),
+            SharePointContext(tenant_id="t1", principal_mailbox="owner@example.net"),
+        )
+
+        result = hydrator.hydrate(
+            _candidate("x", source_type=EntityType.DRIVE_ITEM),
+            correlation_id="test",
+        )
+
+        if reason.startswith("item_not_found"):
+            assert isinstance(result, Incomplete)
+        else:
+            assert isinstance(result, Success)
+        assert result.value.metadata_only is True
+        assert result.value.route_metadata["fallback_reason"] == reason
+
+    def test_metadata_etag_change_rejects_stale_candidate(self) -> None:
+        from dataclasses import replace
+        from src.m365.rev.sharepoint_hydrator import GraphDriveItem
+
+        item = GraphDriveItem(
+            item_id="item-etag",
+            drive_id="drive-1",
+            name="status.txt",
+            mime_type="text/plain",
+            file_content=b"new status",
+            etag="etag-new",
+            version="4",
+        )
+        hydrator, client = self._make_hydrator(items=(item,))
+        candidate = replace(
+            _candidate("item-etag", source_type=EntityType.DRIVE_ITEM),
+            locator=replace(
+                _candidate("item-etag", source_type=EntityType.DRIVE_ITEM).locator,
+                container="drive-1",
+                etag_hint="etag-old",
+            ),
+        )
+
+        result = hydrator.hydrate(candidate, correlation_id="test")
+
+        assert isinstance(result, Incomplete)
+        assert result.reason == "etag_changed:etag-old->etag-new"
+        assert result.value.route_metadata["etag"] == "etag-new"
+        assert [call[0] for call in client.calls] == ["get_drive_item"]
+
+    @pytest.mark.parametrize(
+        ("content", "reason"),
+        [
+            (Incomplete(GraphDriveItemContent(data=b"", offset=0), reason="partial_content"), "partial_content"),
+            (Success(GraphDriveItemContent(data=b"x", etag="etag-other")), "content_etag_mismatch"),
+            (Success(GraphDriveItemContent(data=b"x", version="other")), "content_version_mismatch"),
+            (Success(GraphDriveItemContent(data=b"", complete=True)), "content_unavailable"),
+        ],
+    )
+    def test_malformed_content_outcomes_keep_version_and_byte_provenance(
+        self, content, reason: str
+    ) -> None:
+        from src.m365.rev.sharepoint_hydrator import (
+            GraphDriveItem,
+            GraphDriveItemContent,
+            SharePointContext,
+            SharePointHydrator,
+        )
+
+        item = GraphDriveItem(
+            item_id="item-content",
+            drive_id="drive-1",
+            name="status.txt",
+            mime_type="text/plain",
+            file_content=b"x",
+            etag="etag-item",
+            version="3",
+        )
+
+        class Client:
+            def get_drive_item(self, **_kwargs):
+                return Success(item)
+
+            def get_drive_item_content(self, **_kwargs):
+                return content
+
+        hydrator = SharePointHydrator(
+            Client(),
+            SharePointContext(tenant_id="t1", principal_mailbox="owner@example.net"),
+        )
+        result = hydrator.hydrate(
+            _candidate("item-content", source_type=EntityType.DRIVE_ITEM),
+            correlation_id="test",
+        )
+
+        assert isinstance(result, Incomplete if "mismatch" in reason else Success)
+        assert result.value.metadata_only is True
+        if "mismatch" not in reason:
+            assert result.value.route_metadata["fallback_reason"] == reason
+        if "mismatch" in reason:
+            assert reason in result.reason
+            assert reason in result.value.route_metadata["fallback_reason"]
+        assert result.value.route_metadata["version"] == "3"
+        assert result.value.route_metadata["content_offset"] == 0
+
+    def test_malformed_client_results_fail_closed_to_metadata(self) -> None:
+        from src.m365.rev.sharepoint_hydrator import SharePointContext, SharePointHydrator
+
+        class Client:
+            def __init__(self, malformed):
+                self.malformed = malformed
+
+            def get_drive_item(self, **_kwargs):
+                return self.malformed
+
+        malformed = object()
+        hydrator = SharePointHydrator(
+            Client(malformed),
+            SharePointContext(tenant_id="t1", principal_mailbox="owner@example.net"),
+        )
+        result = hydrator.hydrate(
+            _candidate("item-malformed", source_type=EntityType.DRIVE_ITEM),
+            correlation_id="test",
+        )
+
+        assert isinstance(result, Success)
+        assert result.value.metadata_only is True
+        assert result.value.route_metadata["fallback_reason"] == "malformed_metadata_result"
+
+        class ContentClient:
+            def get_drive_item(self, **_kwargs):
+                return Success(
+                    GraphDriveItem(
+                        item_id="item-malformed-content",
+                        drive_id="drive-1",
+                        mime_type="text/plain",
+                    )
+                )
+
+            def get_drive_item_content(self, **_kwargs):
+                return GraphDriveItemContent(data=b"x")
+
+        content_hydrator = SharePointHydrator(
+            ContentClient(),
+            SharePointContext(tenant_id="t1", principal_mailbox="owner@example.net"),
+        )
+        content_result = content_hydrator.hydrate(
+            _candidate("item-malformed-content", source_type=EntityType.DRIVE_ITEM),
+            correlation_id="test",
+        )
+        assert isinstance(content_result, Success)
+        assert content_result.value.metadata_only is True
+        assert content_result.value.route_metadata["fallback_reason"] == "malformed_content_result"
+
+    def test_content_typed_failure_is_not_rewritten(self) -> None:
+        from src.m365.rev.sharepoint_hydrator import (
+            GraphDriveItem,
+            SharePointContext,
+            SharePointHydrator,
+        )
+
+        item = GraphDriveItem(
+            item_id="item-content",
+            drive_id="drive-1",
+            mime_type="text/plain",
+            file_content=b"x",
+        )
+        failure = RateLimited(provider="graph_sharepoint", retry_after_seconds=5.0)
+
+        class Client:
+            def get_drive_item(self, **_kwargs):
+                return Success(item)
+
+            def get_drive_item_content(self, **_kwargs):
+                return failure
+
+        hydrator = SharePointHydrator(
+            Client(),
+            SharePointContext(tenant_id="t1", principal_mailbox="owner@example.net"),
+        )
+
+        result = hydrator.hydrate(
+            _candidate("item-content", source_type=EntityType.DRIVE_ITEM),
+            correlation_id="test",
+        )
+
+        assert result is failure
+
+    def test_decode_failure_returns_metadata_only_with_byte_provenance(self) -> None:
+        from src.m365.rev.sharepoint_hydrator import (
+            GraphDriveItem,
+            GraphDriveItemContent,
+            SharePointContext,
+            SharePointHydrator,
+        )
+
+        class UndecodableBytes(bytes):
+            def decode(self, *args, **kwargs):
+                raise UnicodeDecodeError("utf-8", b"x", 0, 1, "fixture")
+
+        item = GraphDriveItem(
+            item_id="item-decode",
+            drive_id="drive-1",
+            name="decode.txt",
+            mime_type="text/plain",
+            file_content=b"x",
+            etag="etag-decode",
+        )
+        content = GraphDriveItemContent(
+            data=UndecodableBytes(b"x"),
+            offset=0,
+            total_size=1,
+            etag="etag-decode",
+            complete=True,
+        )
+
+        class Client:
+            def get_drive_item(self, **_kwargs):
+                return Success(item)
+
+            def get_drive_item_content(self, **_kwargs):
+                return Success(content)
+
+        hydrator = SharePointHydrator(
+            Client(),
+            SharePointContext(tenant_id="t1", principal_mailbox="owner@example.net"),
+        )
+        result = hydrator.hydrate(
+            _candidate("item-decode", source_type=EntityType.DRIVE_ITEM),
+            correlation_id="test",
+        )
+
+        assert isinstance(result, Success)
+        assert result.value.metadata_only is True
+        assert result.value.route_metadata["fallback_reason"] == "decode_error"
+        assert result.value.route_metadata["content_length"] == 1
+
+    def test_nonfatal_privacy_failure_returns_metadata_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from types import SimpleNamespace
+        from src.m365.rev.sharepoint_hydrator import GraphDriveItem
+
+        item = GraphDriveItem(
+            item_id="item-privacy",
+            drive_id="drive-1",
+            name="privacy.txt",
+            mime_type="text/plain",
+            file_content=b"status",
+            etag="etag-privacy",
+        )
+        hydrator, _ = self._make_hydrator(items=(item,))
+        monkeypatch.setattr(
+            "src.m365.rev.sharepoint_hydrator.run_local_checks",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                passed=False,
+                quarantined=False,
+                sensitivity_denied=False,
+                reason="fixture_local_check_failed",
+            ),
+        )
+
+        result = hydrator.hydrate(
+            _candidate("item-privacy", source_type=EntityType.DRIVE_ITEM),
+            correlation_id="test",
+        )
+
+        assert isinstance(result, Success)
+        assert result.value.metadata_only is True
+        assert result.value.route_metadata["fallback_reason"] == "fixture_local_check_failed"
+        assert result.value.route_metadata["content_etag"] == "etag-privacy"
+
+    @pytest.mark.parametrize(
+        ("quarantined", "sensitivity_denied", "scope"),
+        [(True, False, "content"), (False, True, "sensitivity")],
+    )
+    def test_terminal_privacy_failures_remain_forbidden(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        quarantined: bool,
+        sensitivity_denied: bool,
+        scope: str,
+    ) -> None:
+        from types import SimpleNamespace
+        from src.m365.rev.sharepoint_hydrator import GraphDriveItem
+
+        item = GraphDriveItem(
+            item_id="item-privacy-terminal",
+            drive_id="drive-1",
+            name="privacy.txt",
+            mime_type="text/plain",
+            file_content=b"status",
+        )
+        hydrator, _ = self._make_hydrator(items=(item,))
+        monkeypatch.setattr(
+            "src.m365.rev.sharepoint_hydrator.run_local_checks",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                passed=False,
+                quarantined=quarantined,
+                sensitivity_denied=sensitivity_denied,
+                reason=f"{scope}_denied",
+            ),
+        )
+
+        result = hydrator.hydrate(
+            _candidate("item-privacy-terminal", source_type=EntityType.DRIVE_ITEM),
+            correlation_id="test",
+        )
+
+        assert isinstance(result, Forbidden)
+        assert result.scope == scope
+
+    def test_legacy_client_uses_bounded_embedded_bytes_with_provenance(self) -> None:
+        from src.m365.rev.sharepoint_hydrator import (
+            GraphDriveItem,
+            SharePointContext,
+            SharePointHydrator,
+        )
+
+        item = GraphDriveItem(
+            item_id="item-legacy",
+            drive_id="drive-1",
+            name="legacy.txt",
+            mime_type="text/plain",
+            file_content=b"full text",
+            size=9,
+            etag="etag-legacy",
+            version="8",
+        )
+
+        class LegacyClient:
+            def get_drive_item(self, **_kwargs):
+                return Success(item)
+
+        hydrator = SharePointHydrator(
+            LegacyClient(),
+            SharePointContext(
+                tenant_id="t1",
+                principal_mailbox="owner@example.net",
+                max_body_bytes=4,
+            ),
+        )
+        result = hydrator.hydrate(
+            _candidate("item-legacy", source_type=EntityType.DRIVE_ITEM),
+            correlation_id="test",
+        )
+
+        assert isinstance(result, Success)
+        assert result.value.metadata_only is True
+        assert result.value.route_metadata["content_offset"] == 0
+        assert result.value.route_metadata["content_length"] == 4
+        assert result.value.route_metadata["content_size"] == 9
+        assert result.value.route_metadata["content_complete"] is False
+        assert result.value.route_metadata["content_etag"] == "etag-legacy"
+        assert result.value.route_metadata["content_version"] == "8"
+        assert result.value.normalized_source_hash.startswith("sha256:")
 
     def test_live_hydrator_returns_unsupported(self) -> None:
         from src.m365.rev.sharepoint_hydrator import LiveSharePointHydrator

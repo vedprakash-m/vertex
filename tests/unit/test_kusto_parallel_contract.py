@@ -15,6 +15,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from src.core.integration_types import ChannelRegistration, RegistrationStatus
 from src.core.kusto_hydration import (
     KustoCancellationToken,
@@ -265,6 +267,25 @@ def test_uncooperative_sequential_timeout_never_starts_next_query(
         assert time.monotonic() - started < 4
     finally:
         release.set()
+
+
+def test_pre_cancelled_token_withholds_execution(tmp_path: Path) -> None:
+    query = _query("query-a")
+    provider = KustoHydrationProvider(
+        executor=lambda _: pytest.fail("pre-cancelled query executed"),
+        query_loader=lambda *_, **__: (query,),
+    )
+    token = KustoCancellationToken()
+    token.cancel()
+
+    with pytest.raises(TimeoutError, match="cancelled before execution"):
+        provider._run_one(
+            _registration("query-a"),
+            query,
+            "demo",
+            KustoHydrationConfig(programs_root=tmp_path),
+            token,
+        )
 
 
 def test_max_concurrency_bounds_simultaneous_executor_threads(tmp_path: Path) -> None:

@@ -13,6 +13,8 @@ from src.core.integration_types import (
 )
 from src.core.kusto_signal_extractor import (
     KustoSignalExtractor,
+    _interpret_typed_kusto_result,
+    _typed_series_trend,
     format_kusto_result_text,
     kusto_source_event_time,
 )
@@ -324,6 +326,169 @@ def test_kusto_signal_extractor_refuses_typed_schema_drift_without_values() -> N
     assert "[kind=table, interpretation=ambiguous]" in text
     assert "refusal=schema drift" in text
     assert "must-not-surface" not in text
+
+
+def _time_series_schema(
+    *,
+    time_column: str = "Timestamp",
+    value_columns: tuple[str, ...] = ("Value",),
+) -> KustoResultSchema:
+    columns = tuple(
+        KustoResultColumn(
+            name,
+            "datetime" if name == time_column else "real",
+        )
+        for name in (time_column, *value_columns)
+    )
+    return KustoResultSchema(
+        kind=KustoResultKind.TIME_SERIES,
+        columns=columns,
+        row_count=1,
+        time_column=time_column,
+        value_columns=value_columns,
+    )
+
+
+@pytest.mark.parametrize(
+    ("rows", "schema", "measure", "refusal"),
+    [
+        (
+            ({"Timestamp": "2026-11-19T10:00:00Z", "Value": object()},),
+            _time_series_schema(),
+            None,
+            "unsupported row value",
+        ),
+        (
+            ({"Timestamp": "2026-11-19T10:00:00Z", "Value": 1},),
+            KustoResultSchema(
+                kind=KustoResultKind.TIME_SERIES,
+                columns=(
+                    KustoResultColumn("Timestamp", "datetime"),
+                    KustoResultColumn("Value", "long"),
+                ),
+                row_count=1,
+                time_column=None,
+                value_columns=(),
+            ),
+            None,
+            "invalid time-series schema",
+        ),
+        (
+            ({"Timestamp": "2026-11-19T10:00:00Z", "Value": 1},),
+            _time_series_schema(),
+            "Other",
+            "declared numeric measure unavailable",
+        ),
+        (
+            ({"Timestamp": "not-a-time", "Value": 1},),
+            _time_series_schema(),
+            "Value",
+            "invalid time point",
+        ),
+        (
+            ({"Timestamp": "2026-11-19T10:00:00Z", "Value": "not-numeric"},),
+            _time_series_schema(),
+            "Value",
+            "non-numeric series value",
+        ),
+        (
+            (
+                {"Timestamp": "2026-11-19T10:00:00Z", "Value": 1},
+                {"Timestamp": "2026-11-19T10:00:00Z", "Value": 2},
+            ),
+            _time_series_schema(),
+            "Value",
+            "duplicate time points",
+        ),
+    ],
+)
+def test_typed_time_series_refusal_edges(
+    rows: tuple[dict[str, object], ...],
+    schema: KustoResultSchema,
+    measure: str | None,
+    refusal: str,
+) -> None:
+    interpretation = _interpret_typed_kusto_result(
+        rows,  # type: ignore[arg-type]
+        schema=schema,
+        declared_measure=measure,
+    )
+
+    assert interpretation is not None
+    assert interpretation.qualification == "ambiguous"
+    assert interpretation.refusal == refusal
+
+
+def test_typed_time_series_uses_declared_measure_and_accepts_extra_row_fields() -> None:
+    schema = _time_series_schema()
+    interpretation = _interpret_typed_kusto_result(
+        (
+            {
+                "Timestamp": "2026-11-19T10:00:00Z",
+                "Value": 1,
+                "Extra": {"unsupported": True},
+            },
+        ),
+        schema=schema,
+        declared_measure="Value",
+    )
+
+    assert interpretation is not None
+    assert interpretation.refusal is None
+    assert interpretation.trend == "insufficient_data"
+
+
+def test_typed_time_series_refuses_point_serialization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core import kusto_signal_extractor
+
+    original = kusto_signal_extractor._serialize_kusto_row
+    calls = 0
+
+    def serialize(row: object, columns: tuple[str, ...]) -> str | None:
+        nonlocal calls
+        calls += 1
+        return original(row, columns) if calls == 1 else None  # type: ignore[arg-type]
+
+    monkeypatch.setattr(kusto_signal_extractor, "_serialize_kusto_row", serialize)
+    interpretation = _interpret_typed_kusto_result(
+        ({"Timestamp": "2026-11-19T10:00:00Z", "Value": 1},),
+        schema=_time_series_schema(),
+        declared_measure="Value",
+    )
+
+    assert interpretation is not None
+    assert interpretation.refusal == "unsupported point value"
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (("bad", "also-bad"), "unknown"),
+        ((3, 2), "decreasing"),
+        ((2, 2), "flat"),
+        (({"Left": 1, "Right": 2},), "[Left:increasing,Right:decreasing]"),
+    ],
+)
+def test_typed_series_trend_operator_variants(
+    values: tuple[object, object] | tuple[dict[str, int]],
+    expected: str,
+) -> None:
+    if values and isinstance(values[0], dict):
+        rows = (
+            {"Timestamp": "2026-11-19T10:00:00Z", **values[0]},
+            {"Timestamp": "2026-11-19T11:00:00Z", "Left": 2, "Right": 1},
+        )
+        columns = ("Left", "Right")
+    else:
+        rows = (
+            {"Timestamp": "2026-11-19T10:00:00Z", "Value": values[0]},
+            {"Timestamp": "2026-11-19T11:00:00Z", "Value": values[1]},
+        )
+        columns = ("Value",)
+
+    assert _typed_series_trend(rows, "Timestamp", columns) == expected
 
 
 def test_kusto_signal_extractor_uses_declared_measure_for_unbound_timeseries() -> None:

@@ -256,6 +256,18 @@ def test_list_work_item_revisions_pages_across_multiple_requests() -> None:
     assert outcomes[0].is_truncated is False
 
 
+@pytest.mark.parametrize("checkpoint", [-1, True, 1.5, "2"])
+def test_list_work_item_revisions_rejects_invalid_incremental_checkpoint(
+    checkpoint: object,
+) -> None:
+    client = ADOClient(organization="your-org", project="One")
+    with pytest.raises(ValueError, match="non-negative integer"):
+        client.list_work_item_revisions(
+            101,
+            start_after_revision=checkpoint,  # type: ignore[arg-type]
+        )
+
+
 def test_list_work_item_revisions_reports_truncation_at_safety_cap() -> None:
     class _AlwaysFullPageClient(ADOClient):
         def __init__(self) -> None:
