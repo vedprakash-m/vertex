@@ -68,6 +68,88 @@ class StudyEvaluationResult:
     blocking_reasons: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class DualLabelPair:
+    item_id: str
+    human_label: str
+    model_label: str
+    adjudicated_label: str
+
+
+@dataclass(frozen=True, slots=True)
+class HoldoutAgreementResult:
+    sample_count: int
+    divergence_count: int
+    adjudicated_count: int
+    human_model_kappa: float
+
+
+def evaluate_dual_label_holdout(
+    pairs: tuple[DualLabelPair, ...],
+    *,
+    kappa_floor: float = 0.70,
+) -> HoldoutAgreementResult:
+    """Evaluate paired human/model labels with explicit human adjudication."""
+    if not 0 <= kappa_floor <= 1:
+        raise ValueError("kappa_floor must be between 0 and 1.")
+    if not pairs:
+        raise ValueError("At least one dual-label pair is required.")
+    ids = [pair.item_id for pair in pairs]
+    if len(set(ids)) != len(ids) or any(not item_id.strip() for item_id in ids):
+        raise ValueError("Dual-label item IDs must be unique and non-empty.")
+    for pair in pairs:
+        if any(not label.strip() for label in (
+            pair.human_label,
+            pair.model_label,
+            pair.adjudicated_label,
+        )):
+            raise ValueError("Dual-label observations require human, model and adjudicated labels.")
+
+    divergence_count = sum(pair.human_label != pair.model_label for pair in pairs)
+    for pair in pairs:
+        if pair.human_label != pair.model_label and pair.adjudicated_label not in {
+            pair.human_label,
+            pair.model_label,
+        }:
+            raise ValueError(
+                f"Divergent pair {pair.item_id!r} requires human adjudication to select a supplied label."
+            )
+    kappa = _cohen_kappa(pairs)
+    if not math.isfinite(kappa) or kappa < kappa_floor:
+        raise ValueError(
+            f"Human/model kappa {kappa:.4f} is below the required floor {kappa_floor:.4f}."
+        )
+    return HoldoutAgreementResult(
+        sample_count=len(pairs),
+        divergence_count=divergence_count,
+        adjudicated_count=divergence_count,
+        human_model_kappa=kappa,
+    )
+
+
+def _cohen_kappa(pairs: tuple[DualLabelPair, ...]) -> float:
+    labels = sorted({
+        label
+        for pair in pairs
+        for label in (pair.human_label, pair.model_label)
+    })
+    count = len(pairs)
+    observed = sum(pair.human_label == pair.model_label for pair in pairs) / count
+    if len(labels) == 1:
+        return 1.0
+    expected = math.fsum(
+        (
+            sum(pair.human_label == label for pair in pairs) / count
+            * sum(pair.model_label == label for pair in pairs)
+            / count
+        )
+        for label in labels
+    )
+    if expected >= 1.0:
+        return 1.0 if observed == 1.0 else 0.0
+    return (observed - expected) / (1.0 - expected)
+
+
 def evaluate_stratum_agreement(
     samples: tuple[StratumSample, ...],
     *,

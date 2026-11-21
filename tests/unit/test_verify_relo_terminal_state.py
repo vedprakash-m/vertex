@@ -271,6 +271,67 @@ def test_terminal_cli_uses_explicit_budget_registry(tmp_path, capsys) -> None:
     assert main(["--repo-root", str(root), "--spec", str(spec), "--budgets", str(registry), "--terminal-state", "--json"]) == 6
     assert json.loads(capsys.readouterr().out)["budgets"] == {"ratified": 1, "unratified": ["candidate-one"]}
 
+
+def test_terminal_cli_reports_exact_w6_state_without_inventing_product_completion(
+    tmp_path, capsys
+) -> None:
+    root, spec = _root(tmp_path)
+    packet = tmp_path / "w6-terminal.json"
+    evidence = {
+        "engineering_passed": False,
+        "safety_passed": False,
+        "source_workflows_passed": False,
+        "operator_workflows_passed": False,
+        "independent_labeling_available": False,
+        "mandatory_vision_sources_available": False,
+        "scheduled_identity_available": False,
+        "autonomy_evidence_available": False,
+        "fixed_targets_passed": False,
+        "ratified_budgets_passed": False,
+        "non_forceable_gates_passed": False,
+        "mandatory_sources_no_waiver": False,
+        "scheduled_recoverable_operation": False,
+        "operators_proficient": False,
+        "closed_loop_functions_certified": False,
+        "quality_adjusted_human_impact_lcb_above_080": False,
+        "containment_survives": True,
+        "hybrid_inventory_complete": True,
+        "inflight_state_drained": False,
+        "stores_dispositioned": True,
+        "evidence_preserved": True,
+        "product_vision_owner_decision_ref": "decision:separate",
+    }
+    packet.write_text(
+        json.dumps({
+            "schema_version": "1",
+            "card_id": "RELO-W6.12",
+            "packet_id": "contained-1",
+            "captured_at": "2026-11-21T12:00:00+00:00",
+            "owner_disposition": {"status": "pending"},
+            "artifacts": [{
+                "artifact_id": "halt-proof",
+                "sha256": "0" * 64,
+                "external_evidence_ref": "private://terminal/contained-1",
+            }],
+            "requested_terminal_state": "CONTAINED",
+            "profile_id": "",
+            "halt_reason": "",
+            "evidence": evidence,
+        }),
+        encoding="utf-8",
+    )
+
+    assert main([
+        "--repo-root", str(root),
+        "--spec", str(spec),
+        "--terminal-state",
+        "--w6-evidence", str(packet),
+        "--json",
+    ]) == 6
+    terminal = json.loads(capsys.readouterr().out)["w6_terminal_evidence"]
+    assert terminal["terminal_state"] == "CONTAINED"
+    assert terminal["measurement"]["product_vision_complete"] is False
+
 def test_w6_projection_exposes_decision_and_dependency_gates(tmp_path) -> None:
     ledger = """schema_version: "1"
 work_items:

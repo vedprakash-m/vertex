@@ -6550,6 +6550,7 @@ Manage launch readiness snapshots.
 | `show` |  |
 | `study` | Evaluate local study evidence and emit the statistical result as JSON. |
 | `vertical-evaluate` | Evaluate the local program artifact protocol without certifying external evidence. |
+| `w6` | Verify one explicit W6 evidence packet without certifying external gates. |
 
 #### `vertex readiness fetch`
 
@@ -6596,6 +6597,18 @@ Evaluate the local program artifact protocol without certifying external evidenc
 | Option | Type | Required | Default | Description |
 |---|---|---|---|---|
 | --protocol PATH | path | Yes |  | Vertical comparison protocol JSON. |
+
+#### `vertex readiness w6`
+
+**Usage:** `vertex readiness w6 [OPTIONS]`
+
+Verify one explicit W6 evidence packet without certifying external gates.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --evidence PATH | path | Yes |  | Path to a RELO-W6 evidence packet JSON. |
 
 ### `vertex registry`
 
