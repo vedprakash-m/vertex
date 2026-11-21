@@ -958,7 +958,7 @@ def cockpit_exceptions(
     extended: bool = typer.Option(
         False,
         "--extended",
-        help="Include blocked drafts, approval expiries, runtime incidents, source/context gaps, and unvalidated bindings.",
+        help="Include blocked drafts, approval expiries, runtime incidents, knowledge proposals, source/context gaps, and unvalidated bindings.",
     ),
 ) -> None:
     """RELO-W4.12: read-only prioritized exception queue ranked from existing
@@ -1005,8 +1005,8 @@ def cockpit_exceptions(
     if extended:
         lines.append(
             "  Scope: unresolved dispatch reconciliation, blocked drafts, approval expiries, "
-            "runtime incidents, unassessed risks, source/context gaps, unvalidated bindings, "
-            "overdue actions, and stale risks; input completeness is not evaluated."
+            "runtime incidents, knowledge proposals, unassessed risks, source/context gaps, "
+            "unvalidated bindings, overdue actions, and stale risks; input completeness is not evaluated."
         )
     else:
         lines.append(

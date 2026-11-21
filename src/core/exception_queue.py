@@ -15,6 +15,11 @@ from src.core.actuation_outbox import outbox_db_path
 from src.core._db import open_program_db
 from src.core.action_tracker import assess_action_staleness
 from src.core.context_gap_store import ContextGapRecord, load_context_gaps
+from src.core.governed_feedback_lifecycle import (
+    ProposalStatus,
+    get_feedback_proposals_path,
+    load_feedback_proposals,
+)
 from src.core.incident_journal_store import read_incident_entries
 from src.core.models_v2 import ActionItem, RiskEntry, RiskImpact, RiskProbability, RiskStatus
 from src.core.reality_store import get_program_reality_db_path
@@ -391,6 +396,49 @@ def load_runtime_incident_exceptions(
     return tuple(items)
 
 
+def load_knowledge_proposal_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only projection of pending or expired-approval governed feedback proposals."""
+    proposals_path = get_feedback_proposals_path(program_id, programs_root=programs_root)
+    if not proposals_path.is_file():
+        return ()
+    pending_statuses = {
+        ProposalStatus.PROPOSED,
+        ProposalStatus.EVALUATING,
+        ProposalStatus.AWAITING_APPROVAL,
+        ProposalStatus.APPROVED,
+        ProposalStatus.SHADOW,
+    }
+    items: list[ExceptionItem] = []
+    for proposal in load_feedback_proposals(program_id, programs_root=programs_root):
+        if proposal.status in pending_statuses:
+            age_days = max(0, (as_of - proposal.updated_at.astimezone(timezone.utc).date()).days)
+            items.append(ExceptionItem(
+                kind="knowledge_proposal",
+                subject_id=proposal.proposal_id,
+                severity_rank=1,
+                age_days=age_days,
+                reason=f"Proposal for {proposal.subject} is {proposal.status.value}.",
+                evidence=f"feedback_proposals.jsonl#{proposal.proposal_id}",
+            ))
+        elif proposal.status is ProposalStatus.ACTIVE and proposal.approval is not None:
+            exp_date = proposal.approval.expires_at.astimezone(timezone.utc).date()
+            if exp_date <= as_of:
+                items.append(ExceptionItem(
+                    kind="knowledge_proposal",
+                    subject_id=proposal.proposal_id,
+                    severity_rank=0,
+                    age_days=(as_of - exp_date).days,
+                    reason=f"Active proposal approval for {proposal.subject} expired {exp_date.isoformat()}.",
+                    evidence=f"feedback_proposals.jsonl#{proposal.proposal_id}",
+                ))
+    return tuple(items)
+
+
 def load_extended_exception_signals(
     program_id: str,
     *,
@@ -402,6 +450,7 @@ def load_extended_exception_signals(
         load_blocked_draft_exceptions(program_id, programs_root=programs_root, as_of=as_of)
         + load_approval_expiry_exceptions(program_id, programs_root=programs_root, as_of=as_of)
         + load_runtime_incident_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+        + load_knowledge_proposal_exceptions(program_id, programs_root=programs_root, as_of=as_of)
         + load_context_gap_exceptions(program_id, programs_root=programs_root, as_of=as_of)
         + load_unvalidated_binding_exceptions(program_id, programs_root=programs_root, as_of=as_of)
     )
@@ -416,6 +465,7 @@ __all__ = [
     "load_context_gap_exceptions",
     "load_dispatch_exceptions",
     "load_extended_exception_signals",
+    "load_knowledge_proposal_exceptions",
     "load_runtime_incident_exceptions",
     "load_unvalidated_binding_exceptions",
 ]

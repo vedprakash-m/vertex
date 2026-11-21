@@ -696,8 +696,19 @@ def test_cli_exceptions_extended_signals_read_only(
         load_approval_expiry_exceptions,
         load_blocked_draft_exceptions,
         load_context_gap_exceptions,
+        load_knowledge_proposal_exceptions,
         load_runtime_incident_exceptions,
         load_unvalidated_binding_exceptions,
+    )
+    from src.core.governed_feedback_lifecycle import (
+        FeedbackApproval,
+        FeedbackPrivacyClass,
+        FeedbackRetentionClass,
+        FeedbackValue,
+        GovernedFeedbackProposal,
+        ProposalKind,
+        ProposalStatus,
+        _append_proposals,
     )
     from src.core.incident_journal_store import append_incident_entry
     from src.core.ledger.durable_outbox_store import _SCHEMA_SQL
@@ -752,6 +763,7 @@ def test_cli_exceptions_extended_signals_read_only(
     assert load_unvalidated_binding_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
     assert load_approval_expiry_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
     assert load_runtime_incident_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
+    assert load_knowledge_proposal_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
     (pubs_dir / "non-dict.manifest.json").write_text("[]", encoding="utf-8")
     with pytest.raises(ValueError, match="not an object"):
         load_blocked_draft_exceptions("synthetic", programs_root=root, as_of=AS_OF)
@@ -899,6 +911,80 @@ def test_cli_exceptions_extended_signals_read_only(
         programs_root=root,
     )
 
+    _append_proposals(
+        "synthetic",
+        (
+            GovernedFeedbackProposal(
+                proposal_id="kp-pending",
+                program_id="synthetic",
+                subject="risk.threshold",
+                version=1,
+                parent_proposal_id=None,
+                kind=ProposalKind.THRESHOLD,
+                target="workstream:core",
+                proposed_value=FeedbackValue.integer(5),
+                observation_ids=("obs-1",),
+                owner="alice",
+                evidence_refs=("ev-1",),
+                reason="Adjust threshold",
+                privacy_class=FeedbackPrivacyClass.INTERNAL,
+                retention_class=FeedbackRetentionClass.GOVERNED,
+                status=ProposalStatus.AWAITING_APPROVAL,
+                created_at=datetime(2026, 11, 13, 0, 0, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 11, 13, 0, 0, tzinfo=timezone.utc),
+            ),
+            GovernedFeedbackProposal(
+                proposal_id="kp-exp-active",
+                program_id="synthetic",
+                subject="prompt.tune",
+                version=1,
+                parent_proposal_id=None,
+                kind=ProposalKind.PROMPT,
+                target="exec_summary",
+                proposed_value=FeedbackValue.enum("tight"),
+                observation_ids=("obs-2",),
+                owner="alice",
+                evidence_refs=("ev-2",),
+                reason="Expired active approval",
+                privacy_class=FeedbackPrivacyClass.INTERNAL,
+                retention_class=FeedbackRetentionClass.GOVERNED,
+                status=ProposalStatus.ACTIVE,
+                created_at=datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc),
+                approval=FeedbackApproval(
+                    approved_by="owner",
+                    actor_role="platform_owner",
+                    approved_at=datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc),
+                    expires_at=datetime(2026, 11, 10, 0, 0, tzinfo=timezone.utc),
+                    kill_switch="disable_prompt_tune",
+                    rollback_to_version=None,
+                    rollback_plan="revert prompt.tune",
+                    proposal_digest="sha256:abc",
+                ),
+            ),
+            GovernedFeedbackProposal(
+                proposal_id="kp-rejected",
+                program_id="synthetic",
+                subject="ignored.rule",
+                version=1,
+                parent_proposal_id=None,
+                kind=ProposalKind.RULE,
+                target="core",
+                proposed_value=FeedbackValue.boolean(False),
+                observation_ids=("obs-3",),
+                owner="alice",
+                evidence_refs=("ev-3",),
+                reason="Rejected",
+                privacy_class=FeedbackPrivacyClass.INTERNAL,
+                retention_class=FeedbackRetentionClass.GOVERNED,
+                status=ProposalStatus.REJECTED,
+                created_at=datetime(2026, 11, 1, 0, 0, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 11, 1, 0, 0, tzinfo=timezone.utc),
+            ),
+        ),
+        programs_root=root,
+    )
+
     monkeypatch.setattr(cockpit_module, "PROGRAMS_ROOT", root)
     monkeypatch.delenv("VERTEX_DB_PATH", raising=False)
     files_before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
@@ -909,6 +995,10 @@ def test_cli_exceptions_extended_signals_read_only(
     assert [item.subject_id for item in load_runtime_incident_exceptions("synthetic", programs_root=root, as_of=AS_OF)] == [
         "inc-sev1"
     ]
+    assert {item.subject_id for item in load_knowledge_proposal_exceptions("synthetic", programs_root=root, as_of=AS_OF)} == {
+        "kp-pending",
+        "kp-exp-active",
+    }
     assert len(load_context_gap_exceptions("synthetic", programs_root=root, as_of=AS_OF)) == 1
     assert len(load_unvalidated_binding_exceptions("synthetic", programs_root=root, as_of=AS_OF)) == 1
 
@@ -917,6 +1007,7 @@ def test_cli_exceptions_extended_signals_read_only(
     assert "[blocked_draft]" not in default_res.output
     assert "[approval_expiry]" not in default_res.output
     assert "[runtime_incident]" not in default_res.output
+    assert "[knowledge_proposal]" not in default_res.output
 
     ext_res = runner.invoke(
         app,
@@ -931,8 +1022,11 @@ def test_cli_exceptions_extended_signals_read_only(
     assert "[runtime_incident] inc-sev1" in ext_res.output
     assert "inc-sev3" not in ext_res.output
     assert "inc-old" not in ext_res.output
+    assert "[knowledge_proposal] kp-pending" in ext_res.output
+    assert "[knowledge_proposal] kp-exp-active" in ext_res.output
+    assert "kp-rejected" not in ext_res.output
     assert "[source_gap] report:core:workiq_latest" in ext_res.output
     assert "(2 signals)" in ext_res.output
     assert "[unvalidated_binding] b-unvalidated" in ext_res.output
-    assert "approval expiries, runtime incidents" in ext_res.output
+    assert "knowledge proposals" in ext_res.output
     assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == files_before
