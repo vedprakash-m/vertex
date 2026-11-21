@@ -411,6 +411,7 @@ def test_push_refs_scans_outgoing_commits_and_hooks_wire_disclosure_checks(
     pre_commit = (REPO_ROOT / ".githooks" / "pre-commit").read_text(encoding="utf-8")
     pre_push = (REPO_ROOT / ".githooks" / "pre-push").read_text(encoding="utf-8")
     assert "scripts/rev_precommit_quality.py" in pre_commit
+    assert "--diff-filter=ACMRT" in pre_commit
     assert "scripts/verify_disclosure_candidate.py --staged" in pre_commit
     assert "scripts/verify_disclosure_candidate.py --push-refs" in pre_push
 
@@ -420,6 +421,8 @@ def test_push_refs_scans_outgoing_commits_and_hooks_wire_disclosure_checks(
     _git(tmp_path, "add", "clean_branch.txt")
     _git(tmp_path, "commit", "-m", "v3 clean")
     v3_oid = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+    # This ref says nothing about which objects the destination has.
+    _git(tmp_path, "update-ref", "refs/remotes/unrelated/main", head_oid)
     monkeypatch.setattr(
         sys,
         "stdin",
@@ -430,4 +433,95 @@ def test_push_refs_scans_outgoing_commits_and_hooks_wire_disclosure_checks(
     )
     new_branch_code, new_branch_payload = _run(module, capsys, tmp_path, "--push-refs")
     assert new_branch_code == 1  # detects prior leaked v2 commit in branch ancestry
-    assert new_branch_payload["candidate_count"] >= 1
+    assert any(f["code"] == "SECRET_PATTERN" and f["path"] == "doc.txt"
+               for f in new_branch_payload["findings"])
+
+
+def test_push_refs_rejects_nonblank_malformed_input(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("malformed ref update\n"))
+    code, payload = _run(_load_module(), capsys, tmp_path, "--push-refs")
+    assert code == 2
+    assert payload["findings"][0]["code"] == "SELECTION_INVALID"
+
+
+def test_staged_scans_type_changes_and_uses_index_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    _configure_git_repo(tmp_path)
+    doc = tmp_path / "doc.txt"
+    doc.write_text("safe initial file\n", encoding="utf-8")
+    _git(tmp_path, "add", "doc.txt")
+    _git(tmp_path, "commit", "-m", "baseline")
+    value = "ghp_" + "abcdefghijklmnopqrstuvwxyz123456"
+    blob = _git(tmp_path, "hash-object", "-w", "--stdin", input_text=value).stdout.strip()
+    _git(tmp_path, "update-index", "--cacheinfo", f"120000,{blob},doc.txt")
+
+    real_resolve = Path.resolve
+
+    def resolve_with_worktree_alias(self, *args, **kwargs):
+        if self == doc:
+            return tmp_path / "different.txt"
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_with_worktree_alias)
+    code, payload = _run(module, capsys, tmp_path, "--staged")
+    assert code == 1
+    assert any(f["code"] == "SECRET_PATTERN" and f["path"] == "doc.txt"
+               for f in payload["findings"])
+
+
+def test_staged_scans_literal_blob_with_local_replacement(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_module()
+    _configure_git_repo(tmp_path)
+    (tmp_path / "doc.txt").write_text("ghp_" + "abcdefghijklmnopqrstuvwxyz123456", encoding="utf-8")
+    _git(tmp_path, "add", "doc.txt")
+    original = _git(tmp_path, "rev-parse", ":doc.txt").stdout.strip()
+    replacement = _git(tmp_path, "hash-object", "-w", "--stdin", input_text="safe").stdout.strip()
+    _git(tmp_path, "replace", original, replacement)
+
+    code, payload = _run(module, capsys, tmp_path, "--staged")
+
+    assert code == 1
+    assert any(f["code"] == "SECRET_PATTERN" for f in payload["findings"])
+
+
+def test_push_refs_scans_content_created_by_the_merge(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    module = _load_module()
+    _configure_git_repo(tmp_path)
+    (tmp_path / "base.txt").write_text("safe baseline\n", encoding="utf-8")
+    _git(tmp_path, "add", "base.txt")
+    _git(tmp_path, "commit", "-m", "baseline")
+    base = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+    _git(tmp_path, "branch", "side")
+    _git(tmp_path, "checkout", "side")
+    (tmp_path / "side.txt").write_text("safe side change\n", encoding="utf-8")
+    _git(tmp_path, "add", "side.txt")
+    _git(tmp_path, "commit", "-m", "side change")
+    _git(tmp_path, "checkout", "-")
+    _git(tmp_path, "merge", "--no-ff", "--no-commit", "side")
+    (tmp_path / "merge.txt").write_text("ghp_" + "abcdefghijklmnopqrstuvwxyz123456", encoding="utf-8")
+    _git(tmp_path, "add", "merge.txt")
+    _git(tmp_path, "commit", "-m", "merge with additional content")
+    head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"refs/heads/main {head} refs/heads/main {base}\n"))
+
+    code, payload = _run(module, capsys, tmp_path, "--push-refs")
+
+    assert code == 1
+    assert any(
+        finding["path"] == "merge.txt" and finding["code"] == "SECRET_PATTERN"
+        for finding in payload["findings"]
+    )

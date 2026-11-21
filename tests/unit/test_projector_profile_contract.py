@@ -104,6 +104,7 @@ def test_default_html_preserves_14px_and_680_widths_while_projector_uses_16px_10
 
     projector_html = render_projector_variant(renderer, ctx)
     assert "Decision W" in projector_html
+    assert "td, th" in projector_html
     assert "font-size: 16px !important" in projector_html
     assert "font-size:16px" in projector_html
     assert "overflow-x: hidden" in projector_html

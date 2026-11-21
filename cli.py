@@ -395,6 +395,10 @@ class VertexRootGroup(TyperGroup):
                 ctx.meta["offline_cockpit_exceptions"] = True
             elif resolved[0] == "admin" and resolved[2][:2] == ["metric", "history"]:
                 ctx.meta["offline_metric_history_command"] = True
+            elif resolved[0] == "readiness" and resolved[1] is not None:
+                probe = click.Context(resolved[1], info_name="readiness", parent=ctx, resilient_parsing=True)
+                _, remaining, _ = resolved[1].make_parser(probe).parse_args(list(resolved[2]))
+                ctx.meta["offline_readiness_study"] = remaining[:1] == ["study"]
             elif resolved[0] == "doctor" and resolved[1] is not None and any(
                 arg == "--rev-health" or arg.startswith("--rev-health=") for arg in resolved[2]
             ):
@@ -525,6 +529,8 @@ def main(
         ctx.invoked_subcommand == "ask" and ctx.meta.get("ask_skip_startup") is True
     ) or (
         ctx.invoked_subcommand == "cockpit" and ctx.meta.get("offline_cockpit_exceptions") is True
+    ) or (
+        ctx.invoked_subcommand == "readiness" and ctx.meta.get("offline_readiness_study") is True
     ) or (
         ctx.invoked_subcommand in {"report", "draft"} and ctx.meta.get("report_conflicting_send") is True
     ):

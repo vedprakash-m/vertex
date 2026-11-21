@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from src.commands import brief as brief_cmd
+from src.commands import doctor as doctor_cmd
 from src.commands import escalate as escalate_cmd
 from src.commands import report as report_cmd
 from src.commands import review_full as review_full_cmd
@@ -298,6 +299,18 @@ def test_w41_confirmed_verdict_never_shadowed_by_unconfirmed_draft(tmp_path: Pat
     assert retained is not None
     assert retained.health == RiskLevel.HIGH
     assert retained.as_of == NOW
+    doctor = doctor_cmd.run_doctor(
+        edition_name=EDITION_NAME,
+        reports_root=programs_root.parent / "reports",
+        programs_root=programs_root,
+        archive_root=archive_root,
+        ado_probe=lambda _: doctor_cmd.ADOProbeResult(True, "synthetic", 1, None, "Synthetic ADO"),
+    )
+    check = next(row for row in doctor.checks if row.label == "Retained Verdict")
+    assert check.status == "warn"
+    assert check.metadata is not None
+    assert check.metadata["snapshot_id"] == retained.snapshot_id
+    assert check.metadata["health"] == retained.health.value
 
     # Default call when archive exists also refuses unconfirmed draft shadowing
     default_retained = load_latest_program_verdict("acme", programs_root=programs_root, archive_root=archive_root)
@@ -422,11 +435,21 @@ def test_w42_corrupt_verdict_manifest_fails_closed_across_brief_escalate_and_rev
         open_browser=False,
     )
 
-    manifest_path = programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.manifest.json"
+    retained = load_latest_program_verdict(
+        "acme", programs_root=programs_root, archive_root=archive_root, confirmed_only=True,
+    )
+    assert retained is not None
+    manifest_path = retained.manifest_path
     manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest_payload["metadata"]["program_verdict_observation"] = {"corrupt": True}
     manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
 
+    doctor = doctor_cmd.run_doctor(
+        edition_name=EDITION_NAME, reports_root=reports_root, programs_root=programs_root,
+        archive_root=archive_root,
+        ado_probe=lambda _: doctor_cmd.ADOProbeResult(True, "synthetic", 1, None, "Synthetic ADO"),
+    )
+    assert next(row for row in doctor.checks if row.label == "Retained Verdict").status == "fail"
     brief_report = brief_cmd.build_brief("acme", programs_root=programs_root, as_of=NOW)
     assert brief_report.published_verdict is None
     assert any("Published program verdict unavailable" in line for line in brief_report.now_lines)
@@ -597,20 +620,24 @@ def test_w41_load_latest_program_verdict_manifest_validation_and_archive_edge_ca
     with pytest.raises(ConfigError, match="identity"):
         load_latest_program_verdict("../bad", programs_root=programs_root)
 
-    # Corrupt archive index files are skipped and confirmed_only with no confirmed pool returns None
+    # An unreadable index cannot establish the absence of a confirmation.
     ed_arch = archive_root / EDITION_NAME
     ed_arch.mkdir(parents=True)
     (ed_arch / "index.json").write_text("{not json", encoding="utf-8")
-    assert load_latest_program_verdict("acme", programs_root=programs_root, archive_root=archive_root, confirmed_only=True) is None
+    with pytest.raises(ConfigError, match="archive index"):
+        load_latest_program_verdict("acme", programs_root=programs_root, archive_root=archive_root, confirmed_only=True)
 
     (ed_arch / "index.json").write_text(json.dumps({"issues": "not-a-list"}), encoding="utf-8")
-    assert load_latest_program_verdict("acme", programs_root=programs_root, archive_root=archive_root, confirmed_only=True) is None
+    with pytest.raises(ConfigError, match="archive index"):
+        load_latest_program_verdict("acme", programs_root=programs_root, archive_root=archive_root)
 
     (ed_arch / "index.json").write_text(
         json.dumps({"issues": [{"kind": "dry_run", "issue_number": 1}, {"kind": "confirmed", "issue_number": "1"}]}),
         encoding="utf-8",
     )
-    assert load_latest_program_verdict("acme", programs_root=programs_root, archive_root=archive_root, confirmed_only=True) is None
+    with pytest.raises(ConfigError, match="archive index"):
+        load_latest_program_verdict("acme", programs_root=programs_root, archive_root=archive_root)
+    (ed_arch / "index.json").write_text(json.dumps({"issues": []}), encoding="utf-8")
 
     manifest_path = programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.manifest.json"
     # No observation metadata -> None

@@ -899,6 +899,7 @@ Use --drill to run the rollback in a sandbox and record proof s7a_rollback_drill
 | --edition TEXT | text | Yes |  | Edition name, for example acme_weekly. |
 | --issue INTEGER | integer | No |  | Issue number to render. Defaults to next issue. |
 | --dry-run | boolean | No | False | Generate draft outputs without archive writes. Narrative seeding may still write draft narrative files for the current issue. |
+| --projector-preview | boolean | No | False | Write a separate 1080p HTML preview for a newsletter dry run. |
 | --reseed | boolean | No | False | Delete seedable draft narratives for the target issue before re-seeding from the trusted baseline. Dry-run only. |
 | --no-seed | boolean | No | False | Skip trusted-baseline narrative seeding for this run and render from scaffold templates or existing narratives instead. |
 | --offline | boolean | No | False | Render from the newest cached snapshot without live ADO or Kusto calls. |
@@ -937,6 +938,7 @@ Use --drill to run the rollback in a sandbox and record proof s7a_rollback_drill
 | --edition TEXT | text | Yes |  | Edition name, for example acme_weekly. |
 | --issue INTEGER | integer | No |  | Issue number to render. Defaults to next issue. |
 | --dry-run | boolean | No | False | Generate draft outputs without archive writes. Narrative seeding may still write draft narrative files for the current issue. |
+| --projector-preview | boolean | No | False | Write a separate 1080p HTML preview for a newsletter dry run. |
 | --reseed | boolean | No | False | Delete seedable draft narratives for the target issue before re-seeding from the trusted baseline. Dry-run only. |
 | --no-seed | boolean | No | False | Skip trusted-baseline narrative seeding for this run and render from scaffold templates or existing narratives instead. |
 | --offline | boolean | No | False | Render from the newest cached snapshot without live ADO or Kusto calls. |
@@ -6508,6 +6510,7 @@ Manage launch readiness snapshots.
 |---|---|
 | `fetch` |  |
 | `show` |  |
+| `study` | Evaluate local study evidence and emit the statistical result as JSON. |
 
 #### `vertex readiness fetch`
 
@@ -6530,6 +6533,18 @@ Manage launch readiness snapshots.
 |---|---|---|---|---|
 | --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
 | --format TEXT | text | No | table | Output format: table or json. |
+
+#### `vertex readiness study`
+
+**Usage:** `vertex readiness study [OPTIONS]`
+
+Evaluate local study evidence and emit the statistical result as JSON.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --evidence PATH | path | Yes |  | Path to the matched-cycle and label-audit JSON. |
 
 ### `vertex registry`
 

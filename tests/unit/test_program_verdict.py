@@ -120,6 +120,92 @@ def test_load_latest_program_verdict_refuses_corrupt_retained_manifest(
         load_latest_program_verdict("synthetic", programs_root=tmp_path)
 
 
+@pytest.mark.parametrize(("index", "message"), [
+    ({"edition": "weekly", "issues": [{"issue_number": 1, "manifest_path": "manifests/issue_001.json"}]},
+     "indexed archive manifest"),
+    ({"edition": "different", "issues": []}, "archive index"),
+    ({"issues": [False]}, "archive index entry"),
+    ({"issues": [{"issue_number": 0}]}, "archive index issue number"),
+])
+def test_load_latest_program_verdict_refuses_invalid_indexed_authority(
+    tmp_path: Path, index: dict, message: str,
+) -> None:
+    from src.core.program_verdict import load_latest_program_verdict
+
+    _write_verdict_manifest(tmp_path, issue=2, started_at=NOW, health="low")
+    archive = tmp_path / "synthetic" / "archive" / "weekly"
+    archive.mkdir(parents=True)
+    (archive / "index.json").write_text(json.dumps(index), encoding="utf-8")
+    with pytest.raises(ConfigError, match=message):
+        load_latest_program_verdict("synthetic", programs_root=tmp_path)
+
+
+@pytest.mark.parametrize("file", ["index.json", "manifests/issue_001.json"])
+def test_load_latest_program_verdict_refuses_archive_path_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str,
+) -> None:
+    from src.core.program_verdict import load_latest_program_verdict
+
+    programs_root = tmp_path / "programs"
+    archive = programs_root / "synthetic" / "archive" / "weekly"
+    archive.mkdir(parents=True)
+    (archive / "index.json").write_text(json.dumps({"issues": [{"issue_number": 1}]}), encoding="utf-8")
+    resolved_outside = tmp_path / "outside" / Path(file).name
+    real_resolve = Path.resolve
+
+    def escape(self, *args, **kwargs):
+        if self == archive / file:
+            return resolved_outside
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", escape)
+    with pytest.raises(ConfigError, match="archive.*path"):
+        load_latest_program_verdict("synthetic", programs_root=programs_root)
+
+
+@pytest.mark.parametrize("change", [
+    "health", "missing_digest", "capture_identity", "snapshot", "manifest_capture",
+    "missing_inputs", "missing_capture", "missing_binding",
+])
+def test_retained_reader_verifies_observation_binding(tmp_path: Path, change: str) -> None:
+    from src.core.program_verdict import load_latest_program_verdict, observe_program_verdict
+
+    path = _write_verdict_manifest(tmp_path, issue=1, started_at=NOW)
+    snapshot = _snapshot(risk=RiskLevel.HIGH)
+    capture = _capture(snapshot)
+    observation = observe_program_verdict(capture, snapshot, ())
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["metadata"]["program_verdict_observation"] = asdict(observation)
+    path.write_text(json.dumps(payload, default=lambda value: value.isoformat()), encoding="utf-8")
+    loaded = load_latest_program_verdict("synthetic", programs_root=tmp_path)
+    assert loaded is not None and loaded.snapshot_id == capture.sha256
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    bound = payload["metadata"]["program_verdict_observation"]
+    if change == "health":
+        bound["verdict"]["health"] = "low"
+    elif change == "missing_digest":
+        del bound["inputs_sha256"]
+    elif change == "capture_identity":
+        bound["verdict"]["snapshot_id"] = "different"
+        bound["verdict_sha256"] = hash_jsonable(bound["verdict"])
+    elif change == "manifest_capture":
+        payload["metadata"]["run_evidence_snapshot"] = {}
+    elif change == "missing_inputs":
+        del bound["inputs"]
+    elif change == "missing_capture":
+        del bound["inputs"]["capture"]
+    elif change == "missing_binding":
+        payload["manifest_id"] = "published"
+        for key in ("inputs", "inputs_sha256", "verdict_sha256"):
+            del bound[key]
+    else:
+        bound["inputs"]["snapshot"]["issue_number"] = 2
+        bound["inputs_sha256"] = hash_jsonable(bound["inputs"])
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ConfigError, match="observation"):
+        load_latest_program_verdict("synthetic", programs_root=tmp_path)
+
+
 @pytest.mark.parametrize("program_id", ["", "..", "../outside", "nested/program"])
 def test_load_latest_program_verdict_refuses_uncontained_program_identity(
     tmp_path: Path, program_id: str,
@@ -747,7 +833,7 @@ def test_milestone_observation_retains_coverage_and_replays_canonically():
     assert {"MILESTONE:m1", "MILESTONE:m2"} <= set(observed.verdict.source_refs)
 
 
-def test_load_latest_program_verdict_picks_newest_across_archive_and_pub_confirmed(tmp_path: Path) -> None:
+def test_load_latest_program_verdict_uses_archive_even_when_same_issue_is_redrafted(tmp_path: Path) -> None:
     import json
     from src.core.program_verdict import load_latest_program_verdict
 
@@ -773,7 +859,8 @@ def test_load_latest_program_verdict_picks_newest_across_archive_and_pub_confirm
         "source_refs": [],
     }
     verdict_new = dict(verdict_old, health="high", as_of="2026-10-02T00:00:00Z")
-    (archive_base / "manifests" / "issue_001.manifest.json").write_text(
+    archive_manifest = archive_base / "manifests" / "issue_001.json"
+    archive_manifest.write_text(
         json.dumps({
             "started_at": "2026-10-01T00:00:00Z",
             "metadata": {"program_verdict_observation": {"mode": "observe", "verdict": verdict_old}},
@@ -782,7 +869,8 @@ def test_load_latest_program_verdict_picks_newest_across_archive_and_pub_confirm
     )
     pub_dir = root / "acme" / "publications" / "weekly" / "issue_001"
     pub_dir.mkdir(parents=True)
-    (pub_dir / "issue_001.manifest.json").write_text(
+    draft_manifest = pub_dir / "issue_001.manifest.json"
+    draft_manifest.write_text(
         json.dumps({
             "started_at": "2026-10-02T00:00:00Z",
             "metadata": {"program_verdict_observation": {"mode": "observe", "verdict": verdict_new}},
@@ -791,4 +879,17 @@ def test_load_latest_program_verdict_picks_newest_across_archive_and_pub_confirm
     )
     loaded = load_latest_program_verdict("acme", programs_root=root, confirmed_only=True)
     assert loaded is not None
-    assert loaded.health == RiskLevel.HIGH
+    assert loaded.health == RiskLevel.LOW
+    assert loaded.manifest_path == archive_manifest
+
+    draft_manifest.write_text("{corrupt", encoding="utf-8")
+    assert load_latest_program_verdict("acme", programs_root=root) == loaded
+
+    editions = root / "acme" / "editions"
+    editions.mkdir()
+    (editions / "weekly.yaml").write_text("id: weekly\nprogram_id: acme\n", encoding="utf-8")
+    other = tmp_path / "archive" / "other_weekly"
+    (other / "manifests").mkdir(parents=True)
+    (other / "index.json").write_bytes((archive_base / "index.json").read_bytes())
+    (other / "manifests" / "issue_001.json").write_text("{corrupt", encoding="utf-8")
+    assert load_latest_program_verdict("acme", programs_root=root) == loaded

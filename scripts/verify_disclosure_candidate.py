@@ -21,6 +21,7 @@ from scripts.check_publication_content import BINARY_SUFFIXES, SKIP_PATHS, scan_
 
 SCHEMA_VERSION = 1
 _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
+_GIT_OID = re.compile(r"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _UNAVAILABLE = {"IGNORE_STATUS_UNAVAILABLE", "INPUT_UNAVAILABLE"}
 _MESSAGES = {
     "CANDIDATE_DUPLICATE": "Candidate path was selected more than once.",
@@ -156,69 +157,63 @@ def _load_manifest(
 
 def _load_staged_candidates(root: Path) -> tuple[Candidate, ...]:
     result = subprocess.run(
-        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"],
+        ["git", "--no-replace-objects", "diff", "--cached", "--name-only", "--diff-filter=ACMRT",
+         "--ignore-submodules=none", "-z"],
         cwd=root,
         capture_output=True,
         check=False,
     )
     if result.returncode != 0:
         raise _SelectionError("INPUT_UNAVAILABLE")
-    raw_paths = result.stdout.decode("utf-8", errors="strict").split("\0")
-    candidates: list[Candidate] = []
-    for rel in raw_paths:
-        if not rel:
-            continue
-        candidate = _resolve(rel, root)
-        candidates.append(Candidate(candidate.path, candidate.relative_path, git_object=f":{candidate.relative_path}"))
-    return tuple(candidates)
+    return tuple(Candidate(root / rel, rel, git_object=f":{rel}") for rel in _git_paths(result.stdout))
+
+
+def _git_paths(raw_paths: bytes) -> tuple[str, ...]:
+    try:
+        paths = tuple(rel for rel in raw_paths.decode("utf-8").split("\0") if rel)
+    except UnicodeError as error:
+        raise _SelectionError("INPUT_UNAVAILABLE") from error
+    if any("\\" in rel or {"", ".", ".."} & set(rel.split("/")) for rel in paths):
+        raise _SelectionError("CANDIDATE_INVALID")
+    return paths
 
 
 def _load_push_ref_candidates(root: Path) -> tuple[Candidate, ...]:
-    zero_oid = "0" * 40
     commits: list[str] = []
     for raw_line in sys.stdin.read().splitlines():
         parts = raw_line.strip().split()
-        if len(parts) != 4:
+        if not parts:
             continue
+        if len(parts) != 4:
+            raise _SelectionError("SELECTION_INVALID")
         _local_ref, local_oid, _remote_ref, remote_oid = parts
+        if len(local_oid) != len(remote_oid) or not all(_GIT_OID.fullmatch(oid) for oid in (local_oid, remote_oid)):
+            raise _SelectionError("SELECTION_INVALID")
+        zero_oid = "0" * len(local_oid)
         if local_oid == zero_oid:
             continue
-        cmd = (
-            ["git", "rev-list", local_oid, "--not", "--remotes"]
-            if remote_oid == zero_oid
-            else ["git", "rev-list", f"{remote_oid}..{local_oid}"]
-        )
+        # A new ref has no advertised base. Local tracking refs cannot prove
+        # which commits the destination already has.
+        cmd = ["git", "--no-replace-objects", "rev-list",
+               local_oid if remote_oid == zero_oid else f"{remote_oid}..{local_oid}"]
         rev = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
         if rev.returncode != 0:
             raise _SelectionError("INPUT_UNAVAILABLE")
         commits.extend(line.strip() for line in rev.stdout.splitlines() if line.strip())
 
-    seen_objects: set[tuple[str, str]] = set()
     candidates: list[Candidate] = []
-    for oid in commits:
+    for oid in dict.fromkeys(commits):
         diff = subprocess.run(
-            ["git", "diff-tree", "--root", "--no-commit-id", "--name-only", "--diff-filter=ACMR", "-r", "-z", oid],
+            ["git", "--no-replace-objects", "diff-tree", "--root", "--diff-merges=first-parent", "--no-commit-id", "--name-only",
+             "--diff-filter=ACMRT", "--ignore-submodules=none", "-r", "-z", oid],
             cwd=root,
             capture_output=True,
             check=False,
         )
         if diff.returncode != 0:
             raise _SelectionError("INPUT_UNAVAILABLE")
-        for rel in diff.stdout.decode("utf-8", errors="strict").split("\0"):
-            if not rel:
-                continue
-            resolved = _resolve(rel, root)
-            key = (oid, resolved.relative_path)
-            if key in seen_objects:
-                continue
-            seen_objects.add(key)
-            candidates.append(
-                Candidate(
-                    resolved.path,
-                    resolved.relative_path,
-                    git_object=f"{oid}:{resolved.relative_path}",
-                )
-            )
+        candidates.extend(Candidate(root / rel, rel, git_object=f"{oid}:{rel}")
+                          for rel in _git_paths(diff.stdout))
     return tuple(candidates)
 
 
@@ -279,7 +274,7 @@ def _scan(relative_path: str, lines: list[str], *, allow_skip_paths: bool = Fals
 def _read_candidate_bytes(candidate: Candidate, root: Path) -> bytes | None:
     if candidate.git_object is not None:
         result = subprocess.run(
-            ["git", "show", candidate.git_object],
+            ["git", "--no-replace-objects", "cat-file", "blob", candidate.git_object],
             cwd=root,
             capture_output=True,
             check=False,

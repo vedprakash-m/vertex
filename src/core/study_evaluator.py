@@ -7,7 +7,7 @@ specs/re-re-vertex.md §7 and specs/re-vertex.md §0.6:
   expand required re-verification sample size to 120.
 - Decision L (`W6.2`): Minimum 8 matched weekly operating cycles spanning >=49
   calendar days, with one-sided 95% lower confidence bound (LCB) on
-  quality-adjusted time saved exceeding 80% of the 420-minute baseline.
+  quality-adjusted time saved exceeding 80% of the baseline, estimated by resampling matched cycles.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 import math
+from random import Random
 
 _DEFAULT_MIN_STRATUM_SAMPLES = 60
 _DEFAULT_EXPANDED_STRATUM_SAMPLES = 120
@@ -24,40 +25,7 @@ _DEFAULT_MIN_CYCLES = 8
 _DEFAULT_MIN_CALENDAR_DAYS = 49
 _DEFAULT_LCB_THRESHOLD = 0.80
 
-# Exact one-sided 95% Student-t critical values (t_{0.95, df}) for df = 1..30.
-_STUDENT_T_95_ONE_SIDED: dict[int, float] = {
-    1: 6.313752,
-    2: 2.919986,
-    3: 2.353363,
-    4: 2.131847,
-    5: 2.015048,
-    6: 1.943180,
-    7: 1.894579,
-    8: 1.859548,
-    9: 1.833113,
-    10: 1.812461,
-    11: 1.795885,
-    12: 1.782288,
-    13: 1.770933,
-    14: 1.761310,
-    15: 1.753050,
-    16: 1.745884,
-    17: 1.739607,
-    18: 1.734064,
-    19: 1.729133,
-    20: 1.724718,
-    21: 1.720743,
-    22: 1.717144,
-    23: 1.713872,
-    24: 1.710882,
-    25: 1.708141,
-    26: 1.705618,
-    27: 1.703288,
-    28: 1.701131,
-    29: 1.699127,
-    30: 1.697261,
-}
-_NORMAL_Z_95_ONE_SIDED = 1.644854
+_BOOTSTRAP_RESAMPLES = 20_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +76,8 @@ def evaluate_stratum_agreement(
     divergence_pause_threshold: int = _DEFAULT_DIVERGENCE_PAUSE_THRESHOLD,
 ) -> tuple[StratumAgreementResult, ...]:
     """Evaluate Decision M stratified dual-label agreement per section stratum."""
+    if len({sample.stratum_id for sample in samples}) != len(samples):
+        raise ValueError("Stratum IDs must be unique.")
     results: list[StratumAgreementResult] = []
     for sample in samples:
         if sample.sample_count < 0 or sample.divergence_count < 0:
@@ -162,10 +132,16 @@ def evaluate_stratum_agreement(
     return tuple(results)
 
 
-def _one_sided_t_95(degrees_of_freedom: int) -> float:
-    if degrees_of_freedom <= 0:
-        raise ValueError("Degrees of freedom must be positive.")
-    return _STUDENT_T_95_ONE_SIDED.get(degrees_of_freedom, _NORMAL_Z_95_ONE_SIDED)
+def _bootstrap_lower_bound(ratios: list[float]) -> float:
+    # Resample whole matched operating cycles, preserving the pairing and
+    # the outcomes of failed workflows already reflected in each cycle.
+    rng = Random(0)
+    count = len(ratios)
+    means = sorted(
+        math.fsum(rng.choices(ratios, k=count)) / count
+        for _ in range(_BOOTSTRAP_RESAMPLES)
+    )
+    return means[_BOOTSTRAP_RESAMPLES // 20 - 1]
 
 
 def evaluate_matched_cycles(
@@ -196,33 +172,38 @@ def evaluate_matched_cycles(
         )
 
     ratios: list[float] = []
-    for cycle in cycles:
-        if cycle.baseline_minutes <= 0:
-            raise ValueError(f"Cycle {cycle.cycle_id!r} baseline_minutes must be positive.")
-        if cycle.assisted_minutes < 0:
-            raise ValueError(f"Cycle {cycle.cycle_id!r} assisted_minutes cannot be negative.")
+    ordered_cycles = sorted(cycles, key=lambda cycle: cycle.week_start)
+    if len({cycle.cycle_id for cycle in cycles}) != cycle_count:
+        blockers.append("Matched cycle IDs must be unique.")
+    if any((later.week_start - earlier.week_start).days < 7
+           for earlier, later in zip(ordered_cycles, ordered_cycles[1:])):
+        blockers.append("Matched weekly cycles must not overlap.")
+    for cycle in ordered_cycles:
+        if not math.isfinite(cycle.baseline_minutes) or cycle.baseline_minutes <= 0:
+            raise ValueError(f"Cycle {cycle.cycle_id!r} baseline_minutes must be finite and positive.")
+        if not math.isfinite(cycle.assisted_minutes) or cycle.assisted_minutes < 0:
+            raise ValueError(f"Cycle {cycle.cycle_id!r} assisted_minutes must be finite and nonnegative.")
+        adjusted = cycle.quality_adjusted_minutes_saved
+        if adjusted is not None and (not math.isfinite(adjusted) or adjusted > cycle.baseline_minutes):
+            raise ValueError(
+                f"Cycle {cycle.cycle_id!r} quality_adjusted_minutes_saved must be finite and at most baseline_minutes."
+            )
         if not cycle.quality_passed:
             ratios.append(0.0)
             continue
-        saved = (
-            cycle.quality_adjusted_minutes_saved
-            if cycle.quality_adjusted_minutes_saved is not None
-            else max(0.0, cycle.baseline_minutes - cycle.assisted_minutes)
-        )
+        saved = cycle.baseline_minutes - cycle.assisted_minutes if adjusted is None else adjusted
         ratios.append(saved / cycle.baseline_minutes)
 
-    elapsed_days = (max(c.week_start for c in cycles) - min(c.week_start for c in cycles)).days
+    elapsed_days = (ordered_cycles[-1].week_start - ordered_cycles[0].week_start).days
     if cycle_count < min_cycles:
         blockers.append(f"Observed {cycle_count} matched weekly cycles (< {min_cycles} required).")
     if elapsed_days < min_calendar_days:
         blockers.append(f"Elapsed study window is {elapsed_days} calendar days (< {min_calendar_days} required).")
 
-    mean_saved = sum(ratios) / cycle_count
+    mean_saved = math.fsum(ratios) / cycle_count
     lcb_95: float | None = None
     if cycle_count >= 2:
-        variance = sum((value - mean_saved) ** 2 for value in ratios) / (cycle_count - 1)
-        std_err = math.sqrt(variance / cycle_count)
-        lcb_95 = mean_saved - (_one_sided_t_95(cycle_count - 1) * std_err)
+        lcb_95 = _bootstrap_lower_bound(ratios)
         if lcb_95 <= lcb_threshold:
             blockers.append(
                 f"Quality-adjusted time saved 95% LCB is {lcb_95:.4f} (must exceed {lcb_threshold:.2f})."

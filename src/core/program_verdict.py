@@ -8,9 +8,10 @@ import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from src.core.edition_resolver import list_editions_for_program
 from src.core.exceptions import ConfigError
 from src.core.forecast_engine import ETAForecast
-from src.core.manifest_writer import hash_jsonable, validate_run_evidence_snapshot
+from src.core.manifest_writer import decode_run_evidence_snapshot, hash_jsonable, validate_run_evidence_snapshot
 from src.core.models import Confidence, DimensionRisk, RiskLevel, RunEvidenceSnapshot, Snapshot, WorkItem
 from src.core.models_v2 import Milestone, MilestoneAssessment, MilestoneStatus, RiskEntry, RiskImpact, RiskProbability, RiskStatus
 from src.core.program_reality import FactAssessment, RealityConflict
@@ -132,7 +133,9 @@ def _extract_observation_candidate(
     if not isinstance(payload, dict):
         raise ConfigError("Program verdict manifest is invalid.")
     metadata = payload.get("metadata")
-    observation = metadata.get("program_verdict_observation") if isinstance(metadata, dict) else None
+    if not isinstance(metadata, dict):
+        return None
+    observation = metadata.get("program_verdict_observation")
     if observation is None:
         return None
     if not isinstance(observation, dict) or observation.get("mode") != "observe":
@@ -140,6 +143,24 @@ def _extract_observation_candidate(
     verdict = observation.get("verdict")
     if not isinstance(verdict, dict) or verdict.get("program_id") != program_id:
         raise ConfigError("Program verdict manifest observation identity is invalid.")
+    if (
+        "manifest_id" in payload
+        or "run_evidence_snapshot" in metadata
+        or {"inputs", "inputs_sha256", "verdict_sha256"} & observation.keys()
+    ):
+        inputs = observation.get("inputs")
+        if not isinstance(inputs, dict):
+            raise ConfigError("The retained program verdict observation has no captured inputs.")
+        retained_capture = inputs.get("capture")
+        try:
+            capture = decode_run_evidence_snapshot(retained_capture)
+        except ConfigError as error:
+            raise ConfigError("The retained program verdict observation capture is invalid.") from error
+        if "run_evidence_snapshot" in metadata and metadata["run_evidence_snapshot"] != retained_capture:
+            raise ConfigError("The retained program verdict observation disagrees with the manifest capture.")
+        validate_retained_program_verdict(
+            observation, capture=capture, report_snapshot_hash=capture.report_snapshot_hash,
+        )
     raw_clock = payload.get("started_at")
     if not isinstance(raw_clock, str):
         raise ConfigError("Program verdict manifest clock is unavailable.")
@@ -160,8 +181,10 @@ def _discover_confirmed_issue_keys(
 ) -> tuple[set[tuple[str, int]], list[tuple[datetime, Path, dict]]]:
     confirmed_keys: set[tuple[str, int]] = set()
     archive_candidates: list[tuple[datetime, Path, dict]] = []
+    program_archive = programs_root / program_id / "archive"
+    selected_editions = set(list_editions_for_program(program_id, programs_root=programs_root))
     candidate_roots = []
-    for base in (archive_root, programs_root.parent / "archive", programs_root / program_id / "archive"):
+    for base in (archive_root, programs_root.parent / "archive", program_archive):
         if base is not None and base not in candidate_roots and base.is_dir():
             candidate_roots.append(base)
     seen_manifests: set[Path] = set()
@@ -169,26 +192,35 @@ def _discover_confirmed_issue_keys(
         resolved_base = base.resolve()
         for index_path in sorted(base.glob("*/index.json")):
             edition = index_path.parent.name
+            if base != program_archive and selected_editions and edition not in selected_editions:
+                continue
+            if not index_path.resolve().is_relative_to(resolved_base):
+                raise ConfigError("Program verdict archive index path is outside the selected archive.")
             try:
                 index_payload = json.loads(index_path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            raw_issues = index_payload.get("issues") if isinstance(index_payload, dict) else None
+                raise ConfigError("Program verdict archive index is invalid or unreadable.") from None
+            if not isinstance(index_payload, dict) or index_payload.get("edition", edition) != edition:
+                raise ConfigError("Program verdict archive index is invalid.")
+            raw_issues = index_payload.get("issues")
             if not isinstance(raw_issues, list):
-                continue
+                raise ConfigError("Program verdict archive index is invalid.")
             for entry in raw_issues:
-                if not isinstance(entry, dict) or entry.get("kind") != "confirmed":
+                if not isinstance(entry, dict):
+                    raise ConfigError("Program verdict archive index entry is invalid.")
+                if entry.get("kind", "confirmed") != "confirmed":
                     continue
                 issue_num = entry.get("issue_number")
-                if type(issue_num) is not int:
-                    continue
+                if type(issue_num) is not int or issue_num <= 0:
+                    raise ConfigError("Program verdict archive index issue number is invalid.")
                 confirmed_keys.add((edition, issue_num))
-                manifest_path = (index_path.parent / "manifests" / f"issue_{issue_num:03d}.manifest.json").resolve()
-                if manifest_path.is_file() and manifest_path not in seen_manifests:
-                    try:
-                        manifest_path.relative_to(resolved_base)
-                    except ValueError:
-                        continue
+                manifest_path = (index_path.parent / "manifests" / f"issue_{issue_num:03d}.json").resolve()
+                if not manifest_path.is_relative_to(resolved_base):
+                    raise ConfigError("Program verdict indexed archive manifest path is invalid.")
+                if not manifest_path.is_file():
+                    if entry.get("manifest_path") is not None:
+                        raise ConfigError("Program verdict indexed archive manifest is unavailable.")
+                elif manifest_path not in seen_manifests:
                     seen_manifests.add(manifest_path)
                     candidate = _extract_observation_candidate(program_id, manifest_path)
                     if candidate is not None:
@@ -214,33 +246,25 @@ def load_latest_program_verdict(
     confirmed_keys, archive_candidates = _discover_confirmed_issue_keys(
         program_id, programs_root=selected_root, archive_root=archive_root,
     )
+    if confirmed_only or confirmed_keys:
+        if not archive_candidates:
+            return None
+        _, path, verdict = max(archive_candidates, key=lambda row: (row[0], str(row[1])))
+        return _published_verdict_from_payload(program_id, path, verdict)
+
     publications = selected_root / program_root / "publications"
-    pub_confirmed: list[tuple[datetime, Path, dict]] = []
     pub_all: list[tuple[datetime, Path, dict]] = []
     if publications.exists():
         publication_root = publications.resolve()
         for path in publications.rglob("*.manifest.json"):
             try:
-                rel = path.resolve().relative_to(publication_root)
+                path.resolve().relative_to(publication_root)
             except (OSError, ValueError):
                 raise ConfigError("Program verdict manifest path is invalid.") from None
             candidate = _extract_observation_candidate(program_id, path)
             if candidate is None:
                 continue
             pub_all.append(candidate)
-            if len(rel.parts) >= 2 and rel.parts[1].startswith("issue_"):
-                suffix = rel.parts[1].removeprefix("issue_")
-                if suffix.isdigit() and (rel.parts[0], int(suffix)) in confirmed_keys:
-                    pub_confirmed.append(candidate)
-
-    if confirmed_only or confirmed_keys:
-        pool = archive_candidates or pub_confirmed
-        if archive_candidates and pub_confirmed:
-            pool = archive_candidates + pub_confirmed
-        if not pool:
-            return None
-        _, path, verdict = max(pool, key=lambda row: (row[0], str(row[1])))
-        return _published_verdict_from_payload(program_id, path, verdict)
     if not pub_all:
         return None
     _, path, verdict = max(pub_all, key=lambda row: (row[0], str(row[1])))

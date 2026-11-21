@@ -910,7 +910,10 @@ def test_escalate_cli_can_scope_to_single_decision_ask(monkeypatch, repo_root: P
     _append_related_incident_entry(programs_root)
     archive_dir = programs_root / "acme" / "archive" / EDITION_NAME
     archive_dir.mkdir(parents=True, exist_ok=True)
-    (archive_dir / "index.json").write_text("{malformed", encoding="utf-8")
+    (archive_dir / "index.json").write_text(
+        json.dumps({"edition": EDITION_NAME, "issues": []}),
+        encoding="utf-8",
+    )
     (archive_dir / "scorecards.json").write_text("{malformed", encoding="utf-8")
 
     _orig_gen = escalate_module.generate_escalations
@@ -1237,6 +1240,9 @@ def _seed_milestone_archive(programs_root: Path) -> None:
         ),
         encoding="utf-8",
     )
+    confirmed_manifest_path = archive_dir / "manifests" / "issue_001.json"
+    confirmed_manifest_path.parent.mkdir()
+    confirmed_manifest_path.write_bytes(manifest_path.read_bytes())
     (archive_dir / "index.json").write_text(
         json.dumps(
             {
@@ -1246,7 +1252,7 @@ def _seed_milestone_archive(programs_root: Path) -> None:
                         "issue_number": 1,
                         "generated_at": "2026-05-03T09:00:00+00:00",
                         "kind": "confirmed",
-                        "manifest_path": str(manifest_path),
+                        "manifest_path": str(confirmed_manifest_path),
                     }
                 ],
             },

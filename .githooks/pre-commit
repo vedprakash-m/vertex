@@ -16,8 +16,8 @@
 # an advisory notice and exits 0 when no labeled corpus is present.
 set -euo pipefail
 
-# Staged files (added/copied/modified/renamed).
-staged=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)
+# Staged files (added/copied/modified/renamed/type-changed).
+staged=$(git diff --cached --name-only --diff-filter=ACMRT 2>/dev/null || true)
 if [ -z "$staged" ]; then
   exit 0
 fi

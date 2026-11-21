@@ -12,8 +12,10 @@ import subprocess
 import sys
 
 import pytest
+from typer.testing import CliRunner
 import yaml
 
+from cli import app
 from src.commands import confirm, report
 from src.commands.confirm_stages import archive_transaction
 from src.commands.confirm_stages.draft_loaders import ConfirmDraftManifest, load_confirm_draft_manifest
@@ -103,7 +105,8 @@ def _seed_workspace(tmp_path: Path, *, name: str) -> tuple[Path, Path, Path, Pat
 
 
 def _seed_cached_snapshot(
-    workspace: Path, *, issue: int = 77, risk_override: str | None = None
+    workspace: Path, *, issue: int = 77, risk_override: str | None = None,
+    as_of: datetime | None = None, projector_preview: bool = False,
 ) -> tuple[report.DraftArtifacts, Path]:
     programs_root = workspace / "programs"
     reports_root = workspace / "reports"
@@ -115,6 +118,8 @@ def _seed_cached_snapshot(
         archive_root=archive_root,
         programs_root=programs_root,
         dry_run=True,
+        as_of=as_of,
+        projector_preview=projector_preview,
         work_item_loader=lambda _bundle, ts: (_sample_items(ts)[:1], 0),
         open_browser=False,
     )
@@ -214,6 +219,14 @@ def test_state_a_missing_risk_blocks_qg8_unforceably_and_leaves_checkout_and_arc
     assert report_res.returncode == 3, report_res.stderr + report_res.stdout
     payload = json.loads(report_res.stdout)
     assert payload["qg_results"]["QG-8"] is False
+    assert not list(workspace.rglob("*.projector.html"))
+    incompatible = CliRunner().invoke(
+        app, ["report", "--edition", EDITION_NAME, "--offline", "--no-ai", "--no-seed",
+              "--dry-run", "--edition-type", "deck", "--projector-preview"],
+        env={"VERTEX_PROGRAMS_ROOT": str(programs_root)},
+    )
+    assert incompatible.exit_code == 2
+    assert "--projector-preview requires a newsletter --dry-run" in incompatible.output
     assert sentinel.read_text(encoding="utf-8") == stale_sentinel
 
     # --offline --as-of is rejected cleanly
@@ -305,11 +318,14 @@ def test_state_b_outlook_html_determinism_ban_list_canary_and_claim_attribution(
     unrelated_cwd = tmp_path / "unrelated"
     unrelated_cwd.mkdir()
     normalized_htmls: list[str] = []
+    snapshot_as_of = datetime.now(timezone.utc)
 
     for copy_name in ("copy_one", "copy_two"):
         ws, programs_root, reports_root, archive_root = _seed_workspace(tmp_path, name=copy_name)
         monkeypatch.setenv("VERTEX_DB_PATH", str(ws / "vertex-db"))
-        _seed_cached_snapshot(ws, issue=77, risk_override="low")
+        _seed_cached_snapshot(
+            ws, issue=77, risk_override="low", as_of=snapshot_as_of, projector_preview=True,
+        )
         narrative_dir = get_narratives_dir(EDITION_NAME, 77, reports_root, programs_root=programs_root)
         narrative_text = "Material claim: deployment lane cleared integration gate (WI:900001).\n"
         (narrative_dir / "exec_summary.md").write_text(narrative_text, encoding="utf-8")
@@ -317,7 +333,7 @@ def test_state_b_outlook_html_determinism_ban_list_canary_and_claim_attribution(
         res = _invoke_cli_subprocess(
             ws,
             unrelated_cwd,
-            ["report", "--edition", EDITION_NAME, "--issue", "77", "--offline", "--no-ai", "--no-seed", "--dry-run", "--stdout"],
+            ["report", "--edition", EDITION_NAME, "--issue", "77", "--offline", "--no-ai", "--no-seed", "--dry-run", "--stdout", "--projector-preview"],
         )
         assert res.returncode in {0, 3}, res.stderr + res.stdout
         payload = json.loads(res.stdout)
@@ -328,6 +344,10 @@ def test_state_b_outlook_html_determinism_ban_list_canary_and_claim_attribution(
         assert "640px" in html or 'width="640"' in html
         assert any(font in html for font in ("Segoe UI", "Calibri", "Arial"))
         assert "WI:900001" in html
+        assert "Decision W" not in html
+        projector = html_path.with_suffix(".projector.html").read_text(encoding="utf-8")
+        assert "Decision W" in projector
+        assert "WI:900001" in projector
         editorial_rules = EditorialRules(
             schema_version="1.0",
             stale_warn_days=7,
@@ -430,7 +450,7 @@ def test_state_c_pinned_verdict_parity_and_archive_fence_rejection(
             ),
             encoding="utf-8",
         )
-        write_confirmed_issue(
+        confirmed_paths = write_confirmed_issue(
             edition=EDITION_NAME,
             issue_number=issue_num,
             snapshot=snap,
@@ -452,6 +472,7 @@ def test_state_c_pinned_verdict_parity_and_archive_fence_rejection(
                 freshness_summary={},
                 qg_results={"QG-8": True},
                 git_sha=None,
+                metadata={"program_verdict_observation": asdict(obs)},
             ),
             archive_root=archive_root,
         )
@@ -461,7 +482,7 @@ def test_state_c_pinned_verdict_parity_and_archive_fence_rejection(
     retained = load_latest_program_verdict("acme", programs_root=programs_root)
     assert retained is not None
     assert retained.snapshot_id == issue2_cap_sha256
-    assert retained.manifest_path.name == "issue_002.manifest.json"
+    assert retained.manifest_path == confirmed_paths.manifest_path
     assert retained.as_of == t2
     assert retained.health is RiskLevel.HIGH
 
@@ -474,7 +495,8 @@ def test_state_c_pinned_verdict_parity_and_archive_fence_rejection(
     assert cockpit.program_summary.overall_risk == "red"
 
     # Transaction fence rejection leaves confirmed archive index intact vs passing control
-    index_before = (archive_root / EDITION_NAME / "index.json").read_bytes() if (archive_root / EDITION_NAME / "index.json").exists() else None
+    index_before = confirmed_paths.index_path.read_bytes()
+    snapshot_before = confirmed_paths.snapshot_path.read_bytes()
     snapshots_before = len(read_archive_index(EDITION_NAME, archive_root=archive_root).issues)
     assert snapshots_before == 2
     draft3_state = load_draft_state(EDITION_NAME, 3, programs_root=programs_root) or {}
@@ -510,6 +532,6 @@ def test_state_c_pinned_verdict_parity_and_archive_fence_rejection(
             draft_manifest=replace(draft3_manifest, config_hash="sha256:" + "0" * 64),
             **common_kwargs,
         )
-    index_after = (archive_root / EDITION_NAME / "index.json").read_bytes() if (archive_root / EDITION_NAME / "index.json").exists() else None
-    assert index_after == index_before
+    assert confirmed_paths.index_path.read_bytes() == index_before
+    assert confirmed_paths.snapshot_path.read_bytes() == snapshot_before
     assert len(read_archive_index(EDITION_NAME, archive_root=archive_root).issues) == 2

@@ -1065,6 +1065,8 @@ The `PROVIDER_REGISTRY` in `channel_wiring.py` maps channel names to their provi
 
 **Key flags:** `--dry-run` (no archive writes), `--diff` (compare to prior dry-run), `--ai-review` (AI advisory), `--no-ai` (suppress AI), `--as-of` (override ADO timestamp), `--format` (stdout output format)
 
+For newsletter editions, `--dry-run --projector-preview` emits a separate projector HTML file for presentation review. The project uses the ordinary HTML and EML for Outlook review and the projector file for 1920×1080 review.
+
 ### 9.4 Triage (`vertex triage`)
 
 **Purpose:** Prioritized author checklist showing everything that needs attention before an editing session.
@@ -1491,6 +1493,7 @@ The L1 engine provides a typed telemetry substrate for hypothesis-driven program
 2. A subsystem failure (e.g., no released synthesis yet, a source degraded) degrades that section to an honest empty/default state, never a crash or a silently stale figure.
 3. `vertex cockpit explain --program <id> --finding <finding_id>` traces a finding to its evidence; optional `--as-of <timestamp>` explains retained history without rebuilding.
 4. No value metric renders as `measured` without a certified `TimeSavingsCertification` behind it.
+5. `vertex cockpit exceptions --program <id>` ranks unresolved dispatch reconciliation, unassessed risks, overdue actions and stale risks from available local inputs. `--extended` also checks blocked drafts, approval expiries, runtime incidents, knowledge proposals, source gaps and unvalidated bindings. The age-check date applies to current files.
 
 ### 9.29 Gap-Driven Solicitation
 
@@ -1533,7 +1536,7 @@ The generated operator reference lives at [tests/contracts/cli_reference_snapsho
 | `reconcile` | Contradiction review across sources | `--edition`, `--refresh`, `--format`, `--dry-run` |
 | `freshness` | Freshness report | `--edition`, `--since`, `--teams-format`, `--notify` |
 | `triage` | Readiness checklist | `--edition` |
-| `readiness` | Readiness snapshot and gate reporting | `--edition`, `--refresh`, `--format` |
+| `readiness` | Program readiness snapshot and offline matched-cycle evaluation | `show`, `fetch`, `study --evidence <file>` |
 | `vitality` | ADO vitality scores | `--program`, `--owner`, `--workstream` |
 | `diff` | Semantic diff | `--edition`, `--since` |
 | `override` | Interactive risk editor | `--edition`, `--dimension` |

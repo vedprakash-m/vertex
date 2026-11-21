@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import date, timedelta
 import json
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import cli
 from cli import app
 from src.commands.readiness import evaluate_launch_study_readiness
 from src.core.study_evaluator import (
@@ -28,6 +30,44 @@ def _eight_passing_cycles(*, start: date = date(2026, 11, 20), assisted: float =
         )
         for idx in range(8)
     )
+
+
+@pytest.mark.parametrize("case", [
+    "eligible", "empty", "implicit_baseline", "string_bool", "duplicate_stratum",
+    "invalid_json", "noncanonical_date", "wrong_collection", "wrong_document",
+])
+def test_readiness_study_evaluates_explicit_evidence_without_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    def unexpected_startup(*args, **kwargs):
+        pytest.fail("Study evaluation must skip unrelated startup.")
+
+    monkeypatch.setattr(cli, "_set_invocation_ai_mode", unexpected_startup)
+    cycles = [asdict(cycle) for cycle in _eight_passing_cycles()]
+    strata = [asdict(StratumSample("exec", 60, 0))]
+    if case == "empty":
+        cycles.clear()
+    elif case == "implicit_baseline":
+        del cycles[0]["baseline_minutes"]
+    elif case == "string_bool":
+        cycles[0]["quality_passed"] = "false"
+    elif case == "duplicate_stratum":
+        strata += strata
+    elif case == "noncanonical_date":
+        cycles[0]["week_start"] = "20261120"
+    path = tmp_path / "study.json"
+    document = {"cycles": cycles, "strata": {} if case == "wrong_collection" else strata}
+    content = "{" if case == "invalid_json" else json.dumps([] if case == "wrong_document" else document, default=str)
+    path.write_text(content, encoding="utf-8")
+    result = CliRunner().invoke(app, ["readiness", "--format", "json", "study", "--evidence", str(path)])
+    assert path.read_text(encoding="utf-8") == content
+    assert result.exit_code == {"eligible": 0, "empty": 1}.get(case, 2), result.output
+    if case in {"eligible", "empty"}:
+        payload = json.loads(result.stdout)
+        assert payload["accepted"] is (case == "eligible")
+        assert payload["scope"] == "statistical_evaluation"
+    else:
+        assert "Invalid study evidence" in result.stderr
 
 
 def test_stratum_agreement_decision_m_contracts() -> None:
@@ -57,6 +97,13 @@ def test_stratum_agreement_decision_m_contracts() -> None:
         evaluate_stratum_agreement((StratumSample(stratum_id="bad", sample_count=-1, divergence_count=0),))
     with pytest.raises(ValueError, match="exceed"):
         evaluate_stratum_agreement((StratumSample(stratum_id="bad", sample_count=10, divergence_count=11),))
+    with pytest.raises(ValueError, match="unique"):
+        evaluate_stratum_agreement(
+            (
+                StratumSample(stratum_id="duplicate", sample_count=60, divergence_count=0),
+                StratumSample(stratum_id="duplicate", sample_count=60, divergence_count=0),
+            )
+        )
 
 
 def test_matched_cycles_evaluation_lcb_and_calendar_gates() -> None:
@@ -121,11 +168,11 @@ def test_matched_cycles_evaluation_lcb_and_calendar_gates() -> None:
             strata=strata,
         )
 
-    # 6. >30 cycles exercises normal z_0.95 critical value branch (df >= 30).
+    # 6. A larger cohort still uses the matched-cycle bootstrap.
     thirty_two = tuple(
         MatchedWeeklyCycle(
             cycle_id=f"c32-{i}",
-            week_start=date(2026, 11, 20) + timedelta(days=2 * i),
+            week_start=date(2026, 11, 20) + timedelta(days=7 * i),
             baseline_minutes=420.0,
             assisted_minutes=40.0 + (i % 3),
             quality_passed=True,
@@ -136,6 +183,39 @@ def test_matched_cycles_evaluation_lcb_and_calendar_gates() -> None:
     assert large_sample.accepted is True
     assert large_sample.cycle_count == 32
     assert large_sample.lcb_95_saved_fraction is not None and large_sample.lcb_95_saved_fraction > 0.80
+
+
+def test_matched_cycle_bootstrap_uses_signed_savings_and_is_order_independent() -> None:
+    from dataclasses import replace
+
+    strata = (StratumSample("exec", 60, 0),)
+    cycles = _eight_passing_cycles(assisted=0.0)
+    cycles = (*cycles[:-1], replace(cycles[-1], assisted_minutes=840.0))
+    result = evaluate_matched_cycles(cycles, strata=strata)
+    assert result.mean_saved_fraction == pytest.approx(0.75)
+    assert result.lcb_95_saved_fraction == pytest.approx(0.25)
+    assert evaluate_matched_cycles(tuple(reversed(cycles)), strata=strata) == result
+    assert not result.accepted
+
+
+def test_matched_cycles_reject_duplicate_evidence_and_invalid_timings() -> None:
+    from dataclasses import replace
+
+    strata = (StratumSample("exec", 60, 0),)
+    cycles = _eight_passing_cycles(assisted=0.0)
+    for duplicate in (
+        replace(cycles[1], cycle_id=cycles[0].cycle_id),
+        replace(cycles[1], week_start=cycles[0].week_start + timedelta(days=3)),
+    ):
+        assert not evaluate_matched_cycles((cycles[0], duplicate, *cycles[2:]), strata=strata).accepted
+    for timing, value in (
+        ("baseline_minutes", float("nan")),
+        ("assisted_minutes", float("inf")),
+        ("quality_adjusted_minutes_saved", float("nan")),
+        ("quality_adjusted_minutes_saved", 421.0),
+    ):
+        with pytest.raises(ValueError, match=timing):
+            evaluate_matched_cycles((replace(cycles[0], **{timing: value}),), strata=strata)
 
 
 def test_metric_list_resolves_workspace_registry_without_checkout_fallback(
