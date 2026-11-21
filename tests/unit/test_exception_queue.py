@@ -688,13 +688,22 @@ def test_cli_exceptions_extended_signals_read_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from src.core._db import open_program_db
+    from src.core.actuation_approval_store import _APPROVAL_SCHEMA_SQL
+    from src.core.actuation_outbox import outbox_db_path
     from src.core.context_gap_store import append_context_gap
     from src.core.exception_queue import (
+        load_approval_expiry_exceptions,
         load_blocked_draft_exceptions,
         load_context_gap_exceptions,
+        load_runtime_incident_exceptions,
         load_unvalidated_binding_exceptions,
     )
+    from src.core.incident_journal_store import append_incident_entry
+    from src.core.ledger.durable_outbox_store import _SCHEMA_SQL
     from src.core.metric_models import MetricSourceBinding
+    from src.core.models import Confidence
+    from src.core.models_v2 import IncidentEntry
 
     root = tmp_path / "programs"
     prog_dir = root / "synthetic"
@@ -741,6 +750,8 @@ def test_cli_exceptions_extended_signals_read_only(
     )
     assert load_blocked_draft_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
     assert load_unvalidated_binding_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
+    assert load_approval_expiry_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
+    assert load_runtime_incident_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
     (pubs_dir / "non-dict.manifest.json").write_text("[]", encoding="utf-8")
     with pytest.raises(ValueError, match="not an object"):
         load_blocked_draft_exceptions("synthetic", programs_root=root, as_of=AS_OF)
@@ -800,16 +811,112 @@ def test_cli_exceptions_extended_signals_read_only(
         )
     )
 
+    with open_program_db(outbox_db_path("synthetic", programs_root=root)) as conn:
+        conn.executescript(_SCHEMA_SQL + "\n" + _APPROVAL_SCHEMA_SQL)
+        for aid, iid, exp, ev_exp in (
+            ("apr-expired", "intent-exp", "2026-11-12T00:00:00Z", "2026-11-20T00:00:00Z"),
+            ("apr-future", "intent-ok", "2026-11-25T00:00:00Z", "2026-11-25T00:00:00Z"),
+            ("apr-done", "intent-done", "2026-11-10T00:00:00Z", "2026-11-10T00:00:00Z"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO outbox_approvals (
+                    approval_id, intent_id, revision, semantic_effect_key, payload_sha256,
+                    approval_policy_version, approver_actor, approver_principal,
+                    approver_machine, approver_session, evidence_snapshot_id,
+                    evidence_expires_at, approved_at, expires_at
+                ) VALUES (?, ?, 1, 'k', 'p', 'v1', 'op', 'p', 'm', 's', 'snap-1', ?, '2026-11-01T00:00:00Z', ?)
+                """,
+                (aid, iid, ev_exp, exp),
+            )
+            conn.execute(
+                "INSERT INTO outbox_current_approvals (intent_id, approval_id, revision) VALUES (?, ?, 1)",
+                (iid, aid),
+            )
+        conn.execute(
+            """
+            INSERT INTO outbox (
+                outbox_id, domain, correlation_id, payload_json, status,
+                attempt_count, created_at, updated_at
+            ) VALUES ('ob-done', 'actuation_dispatch', 'ob-done', '{}', 'completed', 1,
+                      '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO outbox_admissions (
+                outbox_id, intent_id, approval_id, approval_revision,
+                semantic_effect_key, payload_sha256, desired_effect_hash,
+                provider, tenant, project, operation, target_identity,
+                causal_occurrence_id, expected_revision, expected_state,
+                rate_key, rate_limit, blast_radius, admitted_at
+            ) VALUES ('ob-done', 'intent-done', 'apr-done', 1, 'k', 'p', 'd',
+                      'ado', 't', 'p', 'create_task.v1', 'tgt', 'c', 1, 's',
+                      'r', 1, 1, '2026-11-01T00:00:00Z')
+            """
+        )
+
+    append_incident_entry(
+        IncidentEntry(
+            program_id="synthetic",
+            incident_id="inc-sev1",
+            signal_id="sig-sev1",
+            observed_at=datetime(2026, 11, 14, 0, 0, tzinfo=timezone.utc),
+            recorded_at=datetime(2026, 11, 14, 1, 0, tzinfo=timezone.utc),
+            belief_change_summary="Active outage in telemetry pipeline",
+            workstream_id=None,
+            severity=1,
+            confidence=Confidence.HIGH,
+        ),
+        programs_root=root,
+    )
+    append_incident_entry(
+        IncidentEntry(
+            program_id="synthetic",
+            incident_id="inc-sev3",
+            signal_id="sig-sev3",
+            observed_at=datetime(2026, 11, 14, 0, 0, tzinfo=timezone.utc),
+            recorded_at=datetime(2026, 11, 14, 1, 0, tzinfo=timezone.utc),
+            belief_change_summary="Low severity notice",
+            workstream_id=None,
+            severity=3,
+            confidence=Confidence.LOW,
+        ),
+        programs_root=root,
+    )
+    append_incident_entry(
+        IncidentEntry(
+            program_id="synthetic",
+            incident_id="inc-old",
+            signal_id="sig-old",
+            observed_at=datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc),
+            recorded_at=datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc),
+            belief_change_summary="Old resolved outage",
+            workstream_id=None,
+            severity=0,
+            confidence=Confidence.HIGH,
+        ),
+        programs_root=root,
+    )
+
     monkeypatch.setattr(cockpit_module, "PROGRAMS_ROOT", root)
     monkeypatch.delenv("VERTEX_DB_PATH", raising=False)
     files_before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
+    assert [item.subject_id for item in load_approval_expiry_exceptions("synthetic", programs_root=root, as_of=AS_OF)] == [
+        "apr-expired"
+    ]
+    assert [item.subject_id for item in load_runtime_incident_exceptions("synthetic", programs_root=root, as_of=AS_OF)] == [
+        "inc-sev1"
+    ]
     assert len(load_context_gap_exceptions("synthetic", programs_root=root, as_of=AS_OF)) == 1
     assert len(load_unvalidated_binding_exceptions("synthetic", programs_root=root, as_of=AS_OF)) == 1
 
     default_res = runner.invoke(app, ["exceptions", "--program", "synthetic", "--as-of", AS_OF.isoformat()])
     assert default_res.exit_code == 0, default_res.output
     assert "[blocked_draft]" not in default_res.output
+    assert "[approval_expiry]" not in default_res.output
+    assert "[runtime_incident]" not in default_res.output
 
     ext_res = runner.invoke(
         app,
@@ -818,8 +925,14 @@ def test_cli_exceptions_extended_signals_read_only(
     assert ext_res.exit_code == 0, ext_res.output
     assert "[blocked_draft] synthetic_weekly-11-blocked" in ext_res.output
     assert "synthetic_weekly-10-confirmed" not in ext_res.output
+    assert "[approval_expiry] apr-expired" in ext_res.output
+    assert "apr-future" not in ext_res.output
+    assert "apr-done" not in ext_res.output
+    assert "[runtime_incident] inc-sev1" in ext_res.output
+    assert "inc-sev3" not in ext_res.output
+    assert "inc-old" not in ext_res.output
     assert "[source_gap] report:core:workiq_latest" in ext_res.output
     assert "(2 signals)" in ext_res.output
     assert "[unvalidated_binding] b-unvalidated" in ext_res.output
-    assert "source/context gaps, unvalidated bindings" in ext_res.output
+    assert "approval expiries, runtime incidents" in ext_res.output
     assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == files_before

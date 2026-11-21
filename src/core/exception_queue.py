@@ -15,6 +15,7 @@ from src.core.actuation_outbox import outbox_db_path
 from src.core._db import open_program_db
 from src.core.action_tracker import assess_action_staleness
 from src.core.context_gap_store import ContextGapRecord, load_context_gaps
+from src.core.incident_journal_store import read_incident_entries
 from src.core.models_v2 import ActionItem, RiskEntry, RiskImpact, RiskProbability, RiskStatus
 from src.core.reality_store import get_program_reality_db_path
 from src.core.risk_register_engine import assess_risk_staleness
@@ -96,7 +97,7 @@ def load_dispatch_exceptions(
     db_path = outbox_db_path(program_id, programs_root=programs_root)
     if not db_path.exists():
         return ()
-    with open_program_db(db_path, read_only=True) as connection:
+    with open_program_db(db_path, read_only=True, immutable=_zero_write_immutable(db_path)) as connection:
         has_table = connection.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type = 'table' AND name = 'outbox_reconciliation_receipts'"
@@ -250,6 +251,11 @@ def load_context_gap_exceptions(
     return tuple(items)
 
 
+def _zero_write_immutable(db_path: Path) -> bool:
+    wal_path = db_path.with_name(f"{db_path.name}-wal")
+    return not wal_path.exists() or wal_path.stat().st_size == 0
+
+
 def load_unvalidated_binding_exceptions(
     program_id: str,
     *,
@@ -260,9 +266,7 @@ def load_unvalidated_binding_exceptions(
     db_path = get_program_reality_db_path(program_id, programs_root=programs_root)
     if not db_path.is_file():
         return ()
-    wal_path = db_path.with_name(f"{db_path.name}-wal")
-    use_immutable = not wal_path.exists() or wal_path.stat().st_size == 0
-    with open_program_db(db_path, read_only=True, immutable=use_immutable) as connection:
+    with open_program_db(db_path, read_only=True, immutable=_zero_write_immutable(db_path)) as connection:
         has_table = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reality_metric_source_bindings'"
         ).fetchone()
@@ -294,6 +298,99 @@ def load_unvalidated_binding_exceptions(
     return tuple(items)
 
 
+def load_approval_expiry_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only check for expired unrevoked actuation approvals without completed dispatch."""
+    db_path = outbox_db_path(program_id, programs_root=programs_root)
+    if not db_path.is_file():
+        return ()
+    with open_program_db(db_path, read_only=True, immutable=_zero_write_immutable(db_path)) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if not {"outbox_approvals", "outbox_current_approvals"}.issubset(tables):
+            return ()
+        has_outbox = {"outbox", "outbox_admissions"}.issubset(tables)
+        outbox_filter = (
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM outbox_admissions AS adm "
+            "JOIN outbox AS o ON o.outbox_id = adm.outbox_id "
+            "WHERE adm.intent_id = a.intent_id AND o.status = 'completed'"
+            ")"
+            if has_outbox
+            else ""
+        )
+        rows = connection.execute(
+            f"""
+            SELECT a.approval_id, a.intent_id, a.revision, a.expires_at, a.evidence_expires_at
+            FROM outbox_approvals AS a
+            JOIN outbox_current_approvals AS c
+              ON c.approval_id = a.approval_id
+            WHERE a.revoked_at IS NULL
+              {outbox_filter}
+            ORDER BY a.expires_at ASC, a.approval_id ASC
+            """
+        ).fetchall()
+    items: list[ExceptionItem] = []
+    for approval_id, intent_id, revision, expires_at_text, evidence_expires_at_text in rows:
+        exp_dt = datetime.fromisoformat(str(expires_at_text).replace("Z", "+00:00"))
+        ev_dt = datetime.fromisoformat(str(evidence_expires_at_text).replace("Z", "+00:00"))
+        if exp_dt.utcoffset() is None or ev_dt.utcoffset() is None:
+            raise ValueError("Stored actuation approval expiry timestamp is not timezone-aware")
+        earliest_date = min(
+            exp_dt.astimezone(timezone.utc).date(),
+            ev_dt.astimezone(timezone.utc).date(),
+        )
+        if earliest_date > as_of:
+            continue
+        age_days = max(0, (as_of - earliest_date).days)
+        items.append(ExceptionItem(
+            kind="approval_expiry",
+            subject_id=str(approval_id),
+            severity_rank=0,
+            age_days=age_days,
+            reason=f"Approval for {intent_id} (rev {revision}) expired {earliest_date.isoformat()}.",
+            evidence=f"actuation/outbox.db#approval:{approval_id}",
+        ))
+    return tuple(items)
+
+
+def load_runtime_incident_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only projection of recent severity-0/1/2 runtime incidents from incident_journal.jsonl."""
+    entries = read_incident_entries(program_id, programs_root=programs_root)
+    items: list[ExceptionItem] = []
+    for entry in entries:
+        if entry.severity is not None and entry.severity > 2:
+            continue
+        obs_date = entry.observed_at.astimezone(timezone.utc).date()
+        age_days = (as_of - obs_date).days
+        if age_days < 0 or age_days > 30:
+            continue
+        sev_label = f"Sev-{entry.severity}" if entry.severity is not None else "Incident"
+        severity_rank = 0 if (entry.severity is not None and entry.severity <= 1) else 1
+        items.append(ExceptionItem(
+            kind="runtime_incident",
+            subject_id=entry.incident_id,
+            severity_rank=severity_rank,
+            age_days=age_days,
+            reason=f"{sev_label}: {entry.belief_change_summary}",
+            evidence=f"journal/incident_journal.jsonl#{entry.signal_id}",
+        ))
+    return tuple(items)
+
+
 def load_extended_exception_signals(
     program_id: str,
     *,
@@ -303,6 +400,8 @@ def load_extended_exception_signals(
     """Read-only loader for RELO-W4.12 extended operational exception signals."""
     return (
         load_blocked_draft_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+        + load_approval_expiry_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+        + load_runtime_incident_exceptions(program_id, programs_root=programs_root, as_of=as_of)
         + load_context_gap_exceptions(program_id, programs_root=programs_root, as_of=as_of)
         + load_unvalidated_binding_exceptions(program_id, programs_root=programs_root, as_of=as_of)
     )
@@ -312,9 +411,11 @@ __all__ = [
     "DispatchException",
     "ExceptionItem",
     "build_exception_queue",
+    "load_approval_expiry_exceptions",
     "load_blocked_draft_exceptions",
     "load_context_gap_exceptions",
     "load_dispatch_exceptions",
     "load_extended_exception_signals",
+    "load_runtime_incident_exceptions",
     "load_unvalidated_binding_exceptions",
 ]

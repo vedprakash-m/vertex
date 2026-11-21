@@ -2643,7 +2643,7 @@ risk-register, action-journal, and optional extended operational signals. Writes
 |---|---|---|---|---|
 | --program TEXT | text | Yes |  | Program id, e.g. acme. |
 | --as-of TEXT | text | No |  | Date (YYYY-MM-DD) for age checks, not historical replay (default: today, UTC). |
-| --extended | boolean | No | False | Include blocked drafts, source/context gaps, and unvalidated metric bindings. |
+| --extended | boolean | No | False | Include blocked drafts, approval expiries, runtime incidents, source/context gaps, and unvalidated bindings. |
 
 ### `vertex calibration`
 
