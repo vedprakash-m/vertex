@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any, Callable, Sequence
 
 from src.core.archive_store import read_archive_index
-from src.core.communication_budget import CommunicationBudgetFinding, evaluate_communication_budget
+from src.core.communication_budget import (
+    CommunicationBudgetFinding,
+    build_communication_audience_manifest,
+    communication_budget_policy_from_edition,
+    evaluate_communication_budget,
+)
 from src.core.edition_resolver import resolve_edition
 from src.core.eml_writer import build_eml_bytes
+from src.core.exceptions import StateError
 from src.core.jinja_filters import risk_label
 from src.core.models import DRISummary, NotifyPreview
 from src.core.notification_state_store import load_confirmed_notification_events
@@ -148,30 +155,52 @@ def assess_notify_communication_budgets(
     programs_root: Path,
     now: datetime,
     cooldown_days: int | None = None,
+    max_asks: int | None = None,
 ) -> tuple[CommunicationBudgetFinding, ...]:
     """Evaluate per-DRI ask budget and cooldown in observe-only mode for notify sends."""
-    if cooldown_days is None:
-        resolved = resolve_edition(edition_name, programs_root=programs_root)
-        cooldown_days = (
-            vitality_settings_from_program(resolved.raw_program).nudge_cooldown_days
-            if resolved is not None
-            else 14
-        )
+    resolved = resolve_edition(edition_name, programs_root=programs_root)
+    fallback_cooldown = (
+        vitality_settings_from_program(resolved.raw_program).nudge_cooldown_days
+        if resolved is not None
+        else 14
+    )
+    policy = communication_budget_policy_from_edition(
+        resolved.raw_edition if resolved is not None else None,
+        default_cooldown_days=fallback_cooldown,
+    )
+    resolved_cooldown = cooldown_days if cooldown_days is not None else policy.cooldown_days
+    resolved_max_asks = max_asks if max_asks is not None else policy.max_asks
     events = load_confirmed_notification_events(edition=edition_name, programs_root=programs_root)
-    assigned_summaries = [summary for summary in dri_summaries if summary.dri_email != "unassigned"]
+    summaries_by_email = {
+        summary.dri_email.strip().lower(): summary
+        for summary in dri_summaries
+        if summary.dri_email.strip().lower() not in {"", "unassigned"}
+    }
     findings: list[CommunicationBudgetFinding] = []
     aware_now = _ensure_aware_utc(now)
     for index, preview in enumerate(previews):
-        summary = assigned_summaries[index] if index < len(assigned_summaries) else None
+        summary = next(
+            (
+                summaries_by_email[recipient.strip().lower()]
+                for recipient in preview.to
+                if recipient.strip().lower() in summaries_by_email
+            ),
+            None,
+        )
         audience_id = (
             summary.dri_email
             if summary is not None
             else (", ".join(preview.to) if preview.to else f"recipient_{index + 1}")
         )
-        asks = (
+        preview_asks = tuple(
+            line.strip()
+            for line in preview.md_body.splitlines()
+            if line.strip().startswith("- ADO#")
+        )
+        asks = preview_asks or (
             [f"ADO#{item.work_item_id}" for item in summary.items]
             if summary is not None
-            else [line for line in preview.md_body.splitlines() if line.startswith("- ADO#")]
+            else _notify_material_asks(preview)
         )
         prior_sends = [
             _ensure_aware_utc(event.confirmed_at)
@@ -182,16 +211,59 @@ def assess_notify_communication_budgets(
                 for note in event.notifications
             )
         ]
+        manifest = build_communication_audience_manifest(
+            audience=tuple(preview.to),
+            asks=asks,
+        )
         findings.extend(
             evaluate_communication_budget(
-                audience_id=audience_id,
-                asks=asks,
+                audience_id=manifest.audience_id,
+                asks=manifest.material_asks,
                 prior_sends=prior_sends,
-                cooldown_days=cooldown_days,
+                cooldown_days=resolved_cooldown,
                 now=aware_now,
+                max_asks=resolved_max_asks,
             )
         )
     return tuple(sorted(findings, key=lambda f: (f.code, f.audience_id, f.detail)))
+
+
+def _notify_material_asks(preview: NotifyPreview) -> tuple[str, ...]:
+    content = f"{preview.md_body}\n{preview.html_body}"
+    refs = tuple(dict.fromkeys(re.findall(r"\bADO#\d+\b", content)))
+    if refs:
+        return refs
+    count_match = re.search(r"\b(\d+)\s+items?\s+need\b", preview.subject, re.IGNORECASE)
+    if count_match is None:
+        return ()
+    return tuple(
+        f"NOTIFY_ITEM:{index}"
+        for index in range(1, int(count_match.group(1)) + 1)
+    )
+
+
+def enforce_notify_communication_budgets(
+    *,
+    edition_name: str,
+    previews: Sequence[NotifyPreview],
+    dri_summaries: Sequence[DRISummary],
+    programs_root: Path,
+    now: datetime,
+) -> tuple[CommunicationBudgetFinding, ...]:
+    findings = assess_notify_communication_budgets(
+        edition_name=edition_name,
+        previews=previews,
+        dri_summaries=dri_summaries,
+        programs_root=programs_root,
+        now=now,
+    )
+    if findings:
+        detail = "; ".join(
+            f"{finding.audience_id} {finding.code}: {finding.detail}"
+            for finding in findings
+        )
+        raise StateError(f"Communication budget blocks notification send: {detail}")
+    return findings
 
 
 def assess_report_email_communication_budget(
@@ -202,6 +274,7 @@ def assess_report_email_communication_budget(
     archive_root: Path,
     now: datetime,
     cooldown_days: int = 7,
+    max_asks: int | None = None,
 ) -> tuple[CommunicationBudgetFinding, ...]:
     """Evaluate leadership ask budget and weekly cooldown in observe-only mode for report email."""
     index = read_archive_index(edition_name, archive_root=archive_root)
@@ -211,12 +284,17 @@ def assess_report_email_communication_budget(
         if entry.kind == "confirmed"
     ]
     asks = [f"TOP3:{item.text}" for item in top_items]
-    return evaluate_communication_budget(
-        audience_id=audience_id or edition_name,
+    manifest = build_communication_audience_manifest(
+        audience=tuple(part.strip() for part in audience_id.split(",") if part.strip()),
         asks=asks,
+    )
+    return evaluate_communication_budget(
+        audience_id=manifest.audience_id,
+        asks=manifest.material_asks,
         prior_sends=prior_sends,
         cooldown_days=cooldown_days,
         now=_ensure_aware_utc(now),
+        **({"max_asks": max_asks} if max_asks is not None else {}),
     )
 
 
@@ -228,20 +306,41 @@ def observe_report_email_communication_budget(
     archive_root: Path,
     manifest_metadata: dict[str, Any],
     now: datetime,
-    cooldown_days: int = 7,
+    cooldown_days: int | None = None,
+    enforce: bool = False,
 ) -> tuple[CommunicationBudgetFinding, ...]:
     """Record observe-only report-email communication budget findings onto manifest metadata."""
-    audience_id = ", ".join(_distribution_to(bundle))
+    audience = _distribution_to(bundle)
+    config_cooldown = getattr(bundle.config, "communication_cooldown_days", None)
+    policy = communication_budget_policy_from_edition(
+        {
+            "communication_budget": {
+                "max_asks": getattr(bundle.config, "communication_max_asks", 5),
+                "cooldown_days": 7 if config_cooldown is None else config_cooldown,
+            }
+        },
+        default_cooldown_days=7,
+    )
+    audience_id = ", ".join(audience)
     findings = assess_report_email_communication_budget(
         edition_name=edition_name,
         audience_id=audience_id,
         top_items=top_items,
         archive_root=archive_root,
         now=now,
-        cooldown_days=cooldown_days,
+        cooldown_days=cooldown_days if cooldown_days is not None else policy.cooldown_days,
+        max_asks=policy.max_asks,
     )
     manifest_metadata["communication_budget_observations"] = [
         {"code": f.code, "audience_id": f.audience_id, "detail": f.detail}
         for f in findings
     ]
+    if enforce and findings:
+        raise StateError(
+            "Communication budget blocks report draft send: "
+            + "; ".join(
+                f"{finding.audience_id} {finding.code}: {finding.detail}"
+                for finding in findings
+            )
+        )
     return findings

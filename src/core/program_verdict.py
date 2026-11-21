@@ -271,6 +271,22 @@ def load_latest_program_verdict(
     return _published_verdict_from_payload(program_id, path, verdict)
 
 
+def load_authoritative_program_risk(
+    program_id: str,
+    *,
+    programs_root: Path,
+    archive_root: Path | None = None,
+) -> RiskLevel | None:
+    """Resolve the shared retained verdict authority for cross-program consumers."""
+    verdict = load_latest_program_verdict(
+        program_id,
+        programs_root=programs_root,
+        archive_root=archive_root,
+        confirmed_only=True,
+    )
+    return verdict.health if verdict is not None else None
+
+
 def _published_verdict_from_payload(
     program_id: str, path: Path, verdict: dict
 ) -> PublishedProgramVerdict:

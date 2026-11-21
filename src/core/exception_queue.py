@@ -5,8 +5,9 @@ Ranks existing signals only; computes nothing new and writes nothing.
 
 from __future__ import annotations
 
-from collections import defaultdict
+import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -14,7 +15,8 @@ from pathlib import Path
 from src.core.actuation_outbox import outbox_db_path
 from src.core._db import open_program_db
 from src.core.action_tracker import assess_action_staleness
-from src.core.context_gap_store import ContextGapRecord, load_context_gaps
+from src.core.claim_tracker import load_open_claims, load_open_decision_asks
+from src.core.context_gap_store import load_context_gaps, rank_context_gaps
 from src.core.governed_feedback_lifecycle import (
     ProposalStatus,
     get_feedback_proposals_path,
@@ -36,6 +38,24 @@ class ExceptionItem:
     age_days: int
     reason: str
     evidence: str
+
+
+@dataclass(frozen=True, slots=True)
+class DecoratedException:
+    kind: str
+    subject_id: str
+    severity_rank: int
+    age_days: int
+    reason: str
+    evidence: str
+    fingerprint: str
+    authority_source: str
+    authority_status: str
+    diff_preview: str
+    expected_effect: str
+    mutation_scope: str
+    remediation_command: str | None
+    action_guidance: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +111,92 @@ def build_exception_queue(
         ))
     items.extend(extended_exceptions)
     return tuple(sorted(items, key=lambda item: (item.severity_rank, -item.age_days, item.subject_id)))
+
+
+_SAFE_CLI_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+_AUTHORITY = {
+    "needs_input": ("risk register", "available, primary-judgment divergence possible"),
+    "stale_risk": ("risk register", "available, primary-judgment divergence possible"),
+    "overdue_action": ("action journal", "available, retention-limited"),
+    "partial_dispatch": ("actuation outbox", "available, provider state uncertain"),
+    "uncertain_dispatch": ("actuation outbox", "available, provider state uncertain"),
+    "blocked_draft": ("publication manifest", "available, current draft scope"),
+    "approval_expiry": ("actuation approval", "available, expiry observed"),
+    "runtime_incident": ("incident journal", "available, recent 30-day window"),
+    "knowledge_proposal": ("feedback proposal journal", "available, lifecycle status"),
+    "source_gap": ("context gap journal", "available, signal completeness unknown"),
+    "unvalidated_binding": ("reality metric binding", "available, validation absent"),
+    "open_claim": ("claim journal", "available, read-only"),
+    "open_decision_ask": ("claim journal", "available, read-only"),
+}
+
+
+def decorate_exception_queue(
+    items: tuple[ExceptionItem, ...],
+    *,
+    program_id: str,
+    as_of: date,
+    extended: bool,
+) -> tuple[DecoratedException, ...]:
+    decorated: list[DecoratedException] = []
+    for item in items:
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "kind": item.kind,
+                    "subject_id": item.subject_id,
+                    "reason": item.reason,
+                    "evidence": item.evidence,
+                    "age_days": item.age_days,
+                    "as_of": as_of.isoformat(),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        source, status = _AUTHORITY.get(
+            item.kind, ("unclassified exception source", "availability unknown")
+        )
+        safe = (
+            bool(_SAFE_CLI_TOKEN.fullmatch(program_id))
+            and bool(_SAFE_CLI_TOKEN.fullmatch(item.kind))
+            and bool(_SAFE_CLI_TOKEN.fullmatch(item.subject_id))
+        )
+        command = (
+            f"vertex cockpit exception --program {program_id} --kind {item.kind} "
+            f"--subject {item.subject_id} --as-of {as_of.isoformat()} "
+            f"--expect-fingerprint {fingerprint}"
+            + (" --extended" if extended else "")
+        ) if safe else None
+        decorated.append(DecoratedException(
+            kind=item.kind,
+            subject_id=item.subject_id,
+            severity_rank=item.severity_rank,
+            age_days=item.age_days,
+            reason=item.reason,
+            evidence=item.evidence,
+            fingerprint=fingerprint,
+            authority_source=source,
+            authority_status=status,
+            diff_preview=(
+                f"Observed {item.kind} for {item.subject_id}: {item.reason} "
+                f"Evidence: {item.evidence}."
+            ),
+            expected_effect=(
+                "Re-read and revalidate the same current exception without changing "
+                "state, dispatching, or selecting a remediation."
+            ),
+            mutation_scope="none",
+            remediation_command=command,
+            action_guidance=(
+                "Run the exact read-only command and compare its fingerprint before "
+                "opening the owning specialized workflow."
+                if command is not None
+                else "Manual inspection required: this subject cannot be copied safely "
+                "into a CLI token; inspect the evidence reference directly."
+            ),
+        ))
+    return tuple(decorated)
 
 
 def load_dispatch_exceptions(
@@ -236,22 +342,21 @@ def load_context_gap_exceptions(
 ) -> tuple[ExceptionItem, ...]:
     """Read-only projection of context/source gaps in _feedback/context_gaps.jsonl."""
     records = load_context_gaps(program_id, programs_root=programs_root)
-    grouped: dict[tuple[str, str | None, str], list[ContextGapRecord]] = defaultdict(list)
-    for rec in records:
-        grouped[(rec.feature, rec.lane, rec.field)].append(rec)
     items: list[ExceptionItem] = []
-    for (feature, lane, field_name), group in sorted(grouped.items(), key=lambda entry: (entry[0][0], entry[0][1] or "", entry[0][2])):
-        latest = max(group, key=lambda rec: rec.ts)
-        age_days = max(0, (as_of - latest.ts.astimezone(timezone.utc).date()).days)
-        severity_rank = 0 if latest.severity == "feature_blocked" else 1
-        suffix = f" ({len(group)} signals)" if len(group) > 1 else ""
+    for gap in rank_context_gaps(records, programs_root=programs_root):
+        age_days = max(
+            0,
+            (as_of - gap.last_seen.astimezone(timezone.utc).date()).days,
+        )
+        severity_rank = 0 if gap.severity == "feature_blocked" else 1
+        suffix = f" ({gap.count} signals)" if gap.count > 1 else ""
         items.append(ExceptionItem(
             kind="source_gap",
-            subject_id=f"{feature}:{lane or 'global'}:{field_name}",
+            subject_id=f"{gap.feature}:{gap.lane or 'global'}:{gap.field}",
             severity_rank=severity_rank,
             age_days=age_days,
-            reason=f"[{latest.severity}] {latest.message}{suffix}",
-            evidence=f"_feedback/context_gaps.jsonl#{feature}:{field_name}",
+            reason=f"[{gap.severity}] {gap.message}{suffix}",
+            evidence=f"_feedback/context_gaps.jsonl#{gap.feature}:{gap.field}",
         ))
     return tuple(items)
 
@@ -439,6 +544,43 @@ def load_knowledge_proposal_exceptions(
     return tuple(items)
 
 
+def load_claim_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    claims = load_open_claims(
+        program_id, programs_root, repair_corruption=False,
+    )
+    asks = load_open_decision_asks(
+        program_id, programs_root, repair_corruption=False,
+    )
+    items = [
+        ExceptionItem(
+            kind="open_claim",
+            subject_id=claim.id,
+            severity_rank=1,
+            age_days=max(0, (as_of - claim.claim_date).days),
+            reason=f"Claim remains open: {claim.text}",
+            evidence=f"journal/claims.jsonl#{claim.id}",
+        )
+        for claim in claims
+    ]
+    items.extend(
+        ExceptionItem(
+            kind="open_decision_ask",
+            subject_id=ask.id,
+            severity_rank=0,
+            age_days=max(0, (as_of - ask.ask_date).days),
+            reason=f"Decision ask remains open: {ask.text}",
+            evidence=f"journal/claims.jsonl#{ask.id}",
+        )
+        for ask in asks
+    )
+    return tuple(items)
+
+
 def load_extended_exception_signals(
     program_id: str,
     *,
@@ -453,15 +595,19 @@ def load_extended_exception_signals(
         + load_knowledge_proposal_exceptions(program_id, programs_root=programs_root, as_of=as_of)
         + load_context_gap_exceptions(program_id, programs_root=programs_root, as_of=as_of)
         + load_unvalidated_binding_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+        + load_claim_exceptions(program_id, programs_root=programs_root, as_of=as_of)
     )
 
 
 __all__ = [
+    "DecoratedException",
     "DispatchException",
     "ExceptionItem",
     "build_exception_queue",
+    "decorate_exception_queue",
     "load_approval_expiry_exceptions",
     "load_blocked_draft_exceptions",
+    "load_claim_exceptions",
     "load_context_gap_exceptions",
     "load_dispatch_exceptions",
     "load_extended_exception_signals",

@@ -12,6 +12,7 @@ from src.core.models_v2 import Milestone, MilestoneAssessment, MilestoneStatus, 
 from src.core.overrides_store import OverridesDocument
 from src.core.program_reality import FactAssessment, ProgramReality
 from src.core.program_verdict import resolve_authoritative_program_risk
+from src.core.risk_dedupe import active_risk_entries
 from src.core.risk_register_engine import assess_risk_staleness, compute_risk_score, risk_summary_sort_key
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.store_factory import build_signal_store_for_program_id, build_trajectory_store_for_program_id
@@ -337,11 +338,7 @@ def _select_active_risk_assessment(
     risks: tuple[RiskEntry, ...],
     assessments: tuple[FactAssessment, ...],
 ) -> FactAssessment | None:
-    active_risks = tuple(
-        risk
-        for risk in risks
-        if risk.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}
-    )
+    active_risks = active_risk_entries(risks)
     if not active_risks:
         return None
     selected_risk = min(active_risks, key=risk_summary_sort_key)
@@ -475,11 +472,7 @@ def _build_risk_register_summary(
     if not risks:
         return None
 
-    active_risks = tuple(
-        risk
-        for risk in risks
-        if risk.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}
-    )
+    active_risks = active_risk_entries(risks)
     if not active_risks:
         return None
 

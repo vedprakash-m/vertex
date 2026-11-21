@@ -2446,6 +2446,7 @@ Program/platform/economics/value cockpit (read-only projection).
 | `autonomy-promote` | The explicit, human-gated path -- required for L3/L4 (Section 8.15.1's |
 | `autonomy-demote` | Manual one-level demotion for a material contradiction, duplicate |
 | `exceptions` | RELO-W4.12: read-only prioritized exception queue ranked from existing |
+| `exception` | Re-read one exception and verify its exact fingerprint without mutation. |
 
 #### `vertex cockpit show`
 
@@ -2646,6 +2647,24 @@ risk-register, action-journal, and optional extended operational signals. Writes
 | --program TEXT | text | Yes |  | Program id, e.g. acme. |
 | --as-of TEXT | text | No |  | Date (YYYY-MM-DD) for age checks, not historical replay (default: today, UTC). |
 | --extended | boolean | No | False | Include blocked drafts, approval expiries, runtime incidents, knowledge proposals, source/context gaps, and unvalidated bindings. |
+| --format TEXT | text | No | human | Output format: human, json, html, or protocol. |
+
+#### `vertex cockpit exception`
+
+**Usage:** `vertex cockpit exception [OPTIONS]`
+
+Re-read one exception and verify its exact fingerprint without mutation.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  |  |
+| --kind TEXT | text | Yes |  |  |
+| --subject TEXT | text | Yes |  |  |
+| --as-of TEXT | text | Yes |  |  |
+| --expect-fingerprint TEXT | text | Yes |  |  |
+| --extended | boolean | No | False |  |
 
 ### `vertex calibration`
 
@@ -2770,6 +2789,7 @@ NCFL context proposal extraction and review.
 |---|---|
 | `import-reply` | Stage an unverified reply for manual review, never approval or apply. |
 | `verify-reply-origin` | Attest reply origin as an authorized OS principal; not change approval. |
+| `close-reply` | Close a gap only after an authorized reviewer verifies the manual edit. |
 | `solicit` | Prepare a pending context request; never approve, send or resolve. |
 | `extract` |  |
 | `proposals` |  |
@@ -2812,6 +2832,23 @@ Attest reply origin as an authorized OS principal; not change approval.
 | --reason TEXT | text | Yes |  | How the operator independently checked origin. |
 | --actor TEXT | text | No | operator | Display label, never verifier authorization. |
 | --dry-run | boolean | No | False | Preview verification; write nothing. |
+
+#### `vertex context close-reply`
+
+**Usage:** `vertex context close-reply [OPTIONS]`
+
+Close a gap only after an authorized reviewer verifies the manual edit.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --edition TEXT | text | Yes |  | Edition name. |
+| --issue INTEGER RANGE | integer range | Yes |  | Issue containing the accepted reply. |
+| --proposal-id TEXT | text | Yes |  | Exact accepted reply proposal. |
+| --reason TEXT | text | Yes |  | Evidence that the retained manual edit completed the gap. |
+| --actor TEXT | text | No | operator | Display label; OS principal controls authority. |
+| --dry-run | boolean | No | False | Preview closure; write no resolution. |
 
 #### `vertex context solicit`
 
@@ -6511,6 +6548,7 @@ Manage launch readiness snapshots.
 | `fetch` |  |
 | `show` |  |
 | `study` | Evaluate local study evidence and emit the statistical result as JSON. |
+| `vertical-evaluate` | Evaluate the local program artifact protocol without certifying external evidence. |
 
 #### `vertex readiness fetch`
 
@@ -6545,6 +6583,18 @@ Evaluate local study evidence and emit the statistical result as JSON.
 | Option | Type | Required | Default | Description |
 |---|---|---|---|---|
 | --evidence PATH | path | Yes |  | Path to the matched-cycle and label-audit JSON. |
+
+#### `vertex readiness vertical-evaluate`
+
+**Usage:** `vertex readiness vertical-evaluate [OPTIONS]`
+
+Evaluate the local program artifact protocol without certifying external evidence.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --protocol PATH | path | Yes |  | Vertical comparison protocol JSON. |
 
 ### `vertex registry`
 

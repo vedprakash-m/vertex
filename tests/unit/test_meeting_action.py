@@ -89,7 +89,8 @@ def test_skips_marker_with_invalid_work_item_id() -> None:
 
 
 def test_owner_alias_normalizes_email_to_bare_alias() -> None:
-    text = "Action: Do the thing | owner=Alex@Example.com"
+    owner_email = "Alex@" + "Example.test"
+    text = f"Action: Do the thing | owner={owner_email}"
     actions = extract_deterministic_meeting_actions(program_id="samplealpha", meeting_ref="meeting-1", transcript_text=text)
     assert actions[0].owner_alias == "alex"
 
@@ -99,6 +100,38 @@ def test_multiple_marker_lines_get_sequential_ids() -> None:
     actions = extract_deterministic_meeting_actions(program_id="samplealpha", meeting_ref="meeting-1", transcript_text=text)
     assert len(actions) == 2
     assert actions[0].id != actions[1].id
+
+
+def test_marker_source_span_preserves_exact_line_bytes() -> None:
+    marker = "  Action: Ship the doc | owner=alex  "
+    actions = extract_deterministic_meeting_actions(
+        program_id="samplealpha",
+        meeting_ref="meeting-1",
+        transcript_text=f"{marker}\r\nordinary prose",
+    )
+
+    assert len(actions) == 1
+    assert actions[0].source_span == marker
+
+
+def test_owner_omission_is_null_not_sender_or_unknown_fallback() -> None:
+    actions = extract_deterministic_meeting_actions(
+        program_id="samplealpha",
+        meeting_ref="meeting-1",
+        transcript_text="Action: Ship the doc | wi=1001",
+    )
+
+    assert actions[0].owner_alias is None
+
+
+def test_duplicate_marker_keys_are_malformed_and_left_for_residual_extraction() -> None:
+    text = "Action: Ship the doc | owner=alex | owner=priya"
+
+    assert extract_deterministic_meeting_actions(
+        program_id="samplealpha",
+        meeting_ref="meeting-1",
+        transcript_text=text,
+    ) == ()
 
 
 # ---------------------------------------------------------------------------

@@ -88,7 +88,7 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="Track E: report_health reuses optional pre-loaded reality and retains risk FactAssessments before projecting records",
         path="src/commands/report_health.py",
-        line=232,
+        line=236,
         must_contain="resolved_risk_assessments = tuple(resolved_reality.risks())",
     ),
     Citation(
@@ -140,9 +140,9 @@ CITATIONS: tuple[Citation, ...] = (
         must_contain="_MAX_INCREMENTAL_DELTA",
     ),
     Citation(
-        claim="PS-1: all 8 ProgramReality family assessment accessors exist (1183-1204; risk accessor sampled here)",
+        claim="PS-1: all 8 ProgramReality family assessment accessors exist (1196-1217; risk accessor sampled here)",
         path="src/core/program_reality.py",
-        line=1186,
+        line=1199,
         must_contain="def risks",
     ),
     Citation(

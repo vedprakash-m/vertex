@@ -8,6 +8,7 @@ the snapshot; all values come from :mod:`src.core.cockpit_builder`.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -48,11 +49,16 @@ from src.core.cockpit_models import (
     select_cockpit_exceptions,
 )
 from src.core.workspace_paths import is_bare_identifier
-from src.core.action_tracker import get_actions_path, load_actions
+from src.core.action_tracker import has_action_history, load_actions
 from src.core.exception_queue import (
     build_exception_queue,
+    decorate_exception_queue,
     load_dispatch_exceptions,
     load_extended_exception_signals,
+)
+from src.core.exception_render import (
+    render_exception_inbox_html,
+    render_exception_protocol_json,
 )
 from src.core.risk_register_engine import get_risk_register_path, load_risk_register
 from src.core.alerts import StateError, append_or_suppress_alert, read_alerts
@@ -960,6 +966,11 @@ def cockpit_exceptions(
         "--extended",
         help="Include blocked drafts, approval expiries, runtime incidents, knowledge proposals, source/context gaps, and unvalidated bindings.",
     ),
+    format: str = typer.Option(
+        "human",
+        "--format",
+        help="Output format: human, json, html, or protocol.",
+    ),
 ) -> None:
     """RELO-W4.12: read-only prioritized exception queue ranked from existing
     risk-register, action-journal, and optional extended operational signals. Writes nothing."""
@@ -971,8 +982,17 @@ def cockpit_exceptions(
     except ValueError as error:
         raise typer.BadParameter("--as-of must be an ISO date (YYYY-MM-DD).") from error
     risk_present = get_risk_register_path(program, PROGRAMS_ROOT).exists()
-    actions_present = get_actions_path(program, PROGRAMS_ROOT).exists()
-    actions = load_actions(program, PROGRAMS_ROOT, repair_corruption=False) if actions_present else ()
+    actions_present = has_action_history(program, PROGRAMS_ROOT)
+    actions = (
+        load_actions(
+            program,
+            PROGRAMS_ROOT,
+            repair_corruption=False,
+            include_rotated=True,
+        )
+        if actions_present
+        else ()
+    )
     dispatch_exceptions = load_dispatch_exceptions(
         program, programs_root=PROGRAMS_ROOT, as_of=as_of_date,
     )
@@ -988,10 +1008,35 @@ def cockpit_exceptions(
         dispatch_exceptions=dispatch_exceptions,
         extended_exceptions=extended_exceptions,
     )
+    decorated = decorate_exception_queue(
+        queue, program_id=program, as_of=as_of_date, extended=extended,
+    )
+    normalized_format = format.strip().lower()
+    if normalized_format == "html":
+        typer.echo(render_exception_inbox_html(program, as_of_date, decorated))
+        return
+    if normalized_format == "json":
+        typer.echo(json.dumps({
+            "program": program,
+            "as_of": as_of_date.isoformat(),
+            "extended": extended,
+            "items": [asdict(item) for item in decorated],
+            **render_exception_protocol_json(),
+        }, indent=2, sort_keys=True))
+        return
+    if normalized_format == "protocol":
+        typer.echo(json.dumps(render_exception_protocol_json(), indent=2, sort_keys=True))
+        return
+    if normalized_format != "human":
+        raise typer.BadParameter("--format must be human, json, html, or protocol.")
     lines = [f"Exception queue ({program}, as of {as_of_date.isoformat()}): {len(queue)}"]
     lines.extend(
-        f"  {index}. [{item.kind}] {item.subject_id} ({item.age_days}d) {item.reason} <{item.evidence}>"
-        for index, item in enumerate(queue, start=1)
+        f"  {index}. [{item.kind}] {item.subject_id} ({item.age_days}d) {item.reason} "
+        f"<{item.evidence}> authority={item.authority_source} "
+        f"[{item.authority_status}]; diff={item.diff_preview}; "
+        f"revalidate={item.remediation_command or 'not available'}; "
+        f"mutation={item.mutation_scope}"
+        for index, item in enumerate(decorated, start=1)
     )
     if not queue:
         lines.append("  No matching exceptions in available inputs.")
@@ -1015,11 +1060,71 @@ def cockpit_exceptions(
         )
     lines.append("  Risk exceptions use the risk register; primary judgment facts are not evaluated.")
     lines.append(
-        "  Only the current action journal is read; rotated or pruned actions and status updates may be omitted. "
-        "Action statuses may be stale."
+        "  Retained action journal segments are read in recorded filename order; pruned history "
+        "cannot establish completeness and concurrent rotation remains unqualified."
     )
     lines.append("  Current files are evaluated using this date; historical state is not reconstructed.")
     typer.echo("\n".join(lines))
+
+
+@app.command("exception")
+def cockpit_exception(
+    program: str = typer.Option(..., "--program"),
+    kind: str = typer.Option(..., "--kind"),
+    subject: str = typer.Option(..., "--subject"),
+    as_of: str = typer.Option(..., "--as-of"),
+    expect_fingerprint: str = typer.Option(..., "--expect-fingerprint"),
+    extended: bool = typer.Option(False, "--extended"),
+) -> None:
+    """Re-read one exception and verify its exact fingerprint without mutation."""
+    try:
+        as_of_date = date.fromisoformat(as_of)
+        if as_of_date.isoformat() != as_of:
+            raise ValueError
+    except ValueError as error:
+        raise typer.BadParameter("--as-of must be an ISO date (YYYY-MM-DD).") from error
+    risks = load_risk_register(program, PROGRAMS_ROOT)
+    actions = (
+        load_actions(
+            program,
+            PROGRAMS_ROOT,
+            repair_corruption=False,
+            include_rotated=True,
+        )
+        if has_action_history(program, PROGRAMS_ROOT)
+        else ()
+    )
+    queue = build_exception_queue(
+        risks,
+        actions,
+        as_of_date,
+        dispatch_exceptions=load_dispatch_exceptions(
+            program, programs_root=PROGRAMS_ROOT, as_of=as_of_date,
+        ),
+        extended_exceptions=(
+            load_extended_exception_signals(
+                program, programs_root=PROGRAMS_ROOT, as_of=as_of_date,
+            )
+            if extended
+            else ()
+        ),
+    )
+    match = next(
+        (
+            item for item in decorate_exception_queue(
+                queue, program_id=program, as_of=as_of_date, extended=extended,
+            )
+            if item.kind == kind and item.subject_id == subject
+        ),
+        None,
+    )
+    if match is None:
+        typer.echo("Exception is no longer present in the selected current inputs; no mutation performed.")
+        raise typer.Exit(code=1)
+    if match.fingerprint != expect_fingerprint:
+        typer.echo("Exception fingerprint changed; refuse stale remediation and inspect the fresh inbox.")
+        raise typer.Exit(code=1)
+    typer.echo(json.dumps(asdict(match), indent=2, sort_keys=True))
 
 
 __all__ = [

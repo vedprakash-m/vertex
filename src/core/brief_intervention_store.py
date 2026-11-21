@@ -12,6 +12,7 @@ from typing import Any
 import portalocker
 
 from src.core.journal import PROGRAMS_ROOT
+from src.core.models_v2 import LifecycleEvent, LifecycleEventKind
 
 
 SCHEMA_VERSION = "1.0"
@@ -21,6 +22,7 @@ INTERVENTIONS_FILENAME = "brief_interventions.jsonl"
 class BriefInterventionStatus(str, Enum):
     APPROVED = "approved"
     DISMISSED = "dismissed"
+    CLOSED = "closed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +89,53 @@ def append_brief_intervention_resolution(
     path = get_brief_interventions_path(program_id, programs_root=programs_root)
     _append_jsonl(path, record)
     return path
+
+
+def record_intervention_lifecycle(
+    program_id: str,
+    proposal_id: str,
+    kind: LifecycleEventKind,
+    **kwargs: Any,
+) -> LifecycleEvent:
+    from src.core.risk_register_engine import _write_lifecycle_event
+    roots = kwargs.pop("programs_root", PROGRAMS_ROOT)
+    current = load_brief_intervention_resolutions(
+        program_id, programs_root=roots
+    ).get(proposal_id)
+    if current is None:
+        raise ValueError(f"Unknown intervention '{proposal_id}' for program '{program_id}'.")
+    event = _write_lifecycle_event(
+        program_id, "intervention.lifecycle", proposal_id, kind,
+        actor=str(kwargs.pop("actor")), note=kwargs.pop("note", None),
+        effective=kwargs.pop("effective", None), next_review_at=kwargs.pop("next_review_at", None),
+        evidence_refs=tuple(kwargs.pop("evidence_refs", ())),
+        occurred_at=kwargs.pop("occurred_at", None) or datetime.now(timezone.utc),
+        programs_root=roots,
+    )
+    if kind is LifecycleEventKind.CLOSURE:
+        append_brief_intervention_resolution(
+            program_id, proposal_id=proposal_id, title=current.title, command=current.command,
+            source_hash=current.source_hash, status=BriefInterventionStatus.CLOSED,
+            resolved_at=event.occurred_at, programs_root=roots,
+        )
+    return event
+
+
+def load_intervention_lifecycle(
+    program_id: str,
+    proposal_id: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+    as_of: datetime | None = None,
+) -> tuple[LifecycleEvent, ...]:
+    from src.core.risk_register_engine import _load_lifecycle_events
+    return _load_lifecycle_events(
+        program_id,
+        "intervention.lifecycle",
+        proposal_id,
+        programs_root=programs_root,
+        as_of=as_of,
+    )
 
 
 def _resolution_from_record(record: dict[str, Any]) -> BriefInterventionResolution:

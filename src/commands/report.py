@@ -750,13 +750,13 @@ def report_command(
         else:
             bundle = load_bundle(edition, reports_root=reports_root, programs_root=programs_root)
             try:
-                for msg in format_communication_budget_observations(observe_report_email_communication_budget(bundle=bundle, edition_name=edition, top_items=artifacts.report.top_items if hasattr(artifacts.report, "top_items") else (), archive_root=archive_root, manifest_metadata=artifacts.manifest.metadata, now=artifacts.report.ado_data_as_of)):
+                for msg in format_communication_budget_observations(observe_report_email_communication_budget(bundle=bundle, edition_name=edition, top_items=artifacts.report.top_items if hasattr(artifacts.report, "top_items") else (), archive_root=archive_root, manifest_metadata=artifacts.manifest.metadata, now=artifacts.report.ado_data_as_of, enforce=True)):
                     typer.echo(msg)
                 _build_draft_email_sender()(_build_draft_email_message(bundle, artifacts))
                 typer.echo(f"Draft email sent to {bundle.config.author.email}.")
-            except (AuthError, QueryError) as error:
+            except (AuthError, QueryError, StateError) as error:
                 typer.echo(str(error))
-                raise typer.Exit(code=2)
+                raise typer.Exit(code=3 if isinstance(error, StateError) else 2)
 
     typer.echo(f"Draft issue {artifacts.issue_number:03d} generated for {edition}.")
     if artifacts.email_subject:

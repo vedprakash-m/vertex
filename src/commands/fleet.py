@@ -41,6 +41,8 @@ from src.core.program_fact_store import (
     project_dependencies,
     project_risk_entries,
 )
+from src.core.program_verdict import load_authoritative_program_risk
+from src.core.risk_dedupe import active_risk_entries
 from src.core.telemetry_summary import build_program_telemetry_summary
 from src.core.workspace_paths import PROGRAMS_ROOT
 
@@ -683,7 +685,14 @@ def _build_program_summary(
         top_items: tuple[str, ...] = ()
         lifecycle_state: Literal["active", "onboarding"] = "onboarding"
     else:
-        overall_risk = max(current_dimensions.values(), key=_risk_rank) if current_dimensions else RiskLevel.UNKNOWN
+        overall_risk = (
+            load_authoritative_program_risk(
+                program_id,
+                programs_root=programs_root,
+                archive_root=archive_root,
+            )
+            or (max(current_dimensions.values(), key=_risk_rank) if current_dimensions else RiskLevel.UNKNOWN)
+        )
         trends: dict[tuple[str, str], ScorecardTrend] = load_scorecard_trends(primary_edition, current_dimensions, archive_root=archive_root) if current_dimensions else {}
         prior_issue_number = _previous_issue_number(scorecard_history, latest_confirmed.issue_number)
         prior_overall_risk = _overall_risk_for_issue(scorecard_history, prior_issue_number) if prior_issue_number is not None else None
@@ -1070,11 +1079,7 @@ def _build_fleet_risk_register_summary(
     program_facts = load_program_facts(
         program_id, programs_root=programs_root, archive_root=programs_root.parent / "archive",
     )
-    active_risks = tuple(
-        risk
-        for risk in project_risk_entries(program_facts)
-        if risk.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}
-    )
+    active_risks = active_risk_entries(project_risk_entries(program_facts))
     if not active_risks:
         return FleetRiskRegisterSummary(active_count=0, stale_count=0, highlight=None)
 

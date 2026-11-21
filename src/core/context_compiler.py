@@ -42,6 +42,7 @@ import os
 import tempfile
 import time
 import unicodedata
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -133,6 +134,8 @@ class ContextCompileRequest:
     max_input_tokens: int
     reserved_output_tokens: int
     per_source_quotas: Mapping[str, int] = field(default_factory=dict)
+    long_horizon_entity_refs: tuple[str, ...] = ()
+    long_horizon_as_of: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +273,19 @@ class DeterministicContextCompiler:
         ):
             raise ContextCompileRejected("Context compiler injection-screen verdicts must be pass, flagged, or excluded.")
 
+        optional_evidence = request.optional_evidence
+        horizon_refs = request.long_horizon_entity_refs or tuple(
+            dict.fromkeys(
+                match.group(0)
+                for span in (*request.required_evidence, *request.optional_evidence)
+                for match in re.finditer(
+                    r"\b(?:RISK|DECISION|DEPENDENCY|MILESTONE):[A-Za-z0-9_.:-]+\b",
+                    span.text,
+                )
+            )
+        )
+        if horizon_refs:
+            optional_evidence = (*optional_evidence, *self._long_horizon_spans(request, horizon_refs))
         start = time.perf_counter()
         excluded: list[ExcludedSpan] = []
         incremental = getattr(self._token_estimator, "incremental_estimates", False) is True
@@ -285,7 +301,7 @@ class DeterministicContextCompiler:
             self._recompute_tokens(self._screen_span(span), meter) for span in request.required_evidence
         ]
         screened_optional = [
-            self._recompute_tokens(self._screen_span(span), meter) for span in request.optional_evidence
+            self._recompute_tokens(self._screen_span(span), meter) for span in optional_evidence
         ]
 
         # RELO-W1.2 (Sec 8.2.1): a required span carrying a hard-injection
@@ -435,6 +451,42 @@ class DeterministicContextCompiler:
             prompt_text=prompt_text, included=included, excluded=tuple(excluded), manifest=manifest,
             selection_identity=selection_identity,
         )
+
+    def _long_horizon_spans(
+        self, request: ContextCompileRequest, entity_refs: tuple[str, ...],
+    ) -> tuple[EvidenceSpan, ...]:
+        from src.core.program_reality import ProgramReality
+        try:
+            reality = ProgramReality.load(
+                request.program_id, programs_root=self._programs_root,
+                as_of=request.long_horizon_as_of,
+            )
+            outcomes = reality.long_horizon_outcomes(
+                entity_refs, max_items=8, as_of=request.long_horizon_as_of or reality.as_of
+            )
+        except (OSError, ValueError, TypeError) as error:
+            raise ContextCompileRejected(
+                f"Long-horizon relevance evaluation unavailable ({type(error).__name__})."
+            ) from error
+        spans: list[EvidenceSpan] = []
+        for outcome in outcomes:
+            text = (
+                f"Prior {outcome.family} outcome for {outcome.object_id}: "
+                f"{outcome.summary} [status={outcome.status}, recorded={outcome.recorded_at.isoformat()}]"
+            )
+            spans.append(EvidenceSpan(
+                evidence_id=f"long_horizon:{outcome.family}:{outcome.object_id}:{outcome.recorded_at.isoformat()}",
+                source_family="long_horizon",
+                text=text,
+                required=False,
+                origin=ContentOrigin.AUTHORED,
+                trust_level="high",
+                verification_state="verified",
+                injection_screen="pass",
+                salience_inputs={"entity_match": 1.0, "materiality": 0.8, "source_authority": 0.9},
+                token_estimate=self._token_estimator.estimate(text),
+            ))
+        return tuple(spans)
 
     def _estimate_tokens(self, text: str, meter: list[int] | None = None) -> int:
         if meter is not None:

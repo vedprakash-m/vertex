@@ -7,6 +7,7 @@
 
 ## Changelog
 
+- Last updated: 2026-11-21 - Completed the RELO-W4 local implementation wave: confirmed verdict authority across report, cockpit, fleet, triage, brief, escalation and review; attributable sprint planning; canonical grounded action extraction; enforced communication budgets; shared claim release grounding; domain lifecycle and bounded historical relevance; verified maintained-context reply closure; and an authority-labelled, fingerprint-revalidated exception/evaluation protocol. D9/owner/blind/live and human WCAG/proficiency evidence remain separate qualification gates (§9.8-§9.12, §18).
 - Last updated: 2026-11-19 — Knowledge candidates cover the eight required maintained-context classes and retain explicit OS-principal review/renewal plus verified resolution history; live policy population and qualification remain gated (§7.4, §10.2).
 - Last updated: 2026-11-19 — Ratified RELO-D19 (ADR-0020 decision 17): only typed, approved, evidence-linked feedback remains reusable. Confirm now records hash-only governed telemetry, while offline proposals require privacy, contamination, development, frozen-holdout, human-approval and shadow gates before promotion; rollback restores a governed prior version. Raw edit-pattern learning and confirm-time distillation are no longer runtime prompt inputs.
 
@@ -1079,7 +1080,7 @@ For newsletter editions, `--dry-run --projector-preview` emits a separate projec
 - **🟢 Ready:** Completed narratives, set overrides, passing quality gates
 - **Draft readiness score:** Percentage with breakdown
 
-**Maintained-context attention (RELO-W4.11x):** Triage, cockpit and reviewer surfaces project existing active context-gap observations alongside pending context revisions. The shared projection uses the selected program root and an explicit evaluation time; it introduces no approval database or additional history writes. Gaps remain distinct from proposals, with unknown owner/due information explicit. Supported structural repairs leave active attention under existing ranking rules; evaluation, drafts and replies do not renew review or establish authenticated resolution. Unreadable gap history is visibly unavailable, not healthy/empty. Context limitations do not change business-health scoring.
+**Maintained-context attention (RELO-W4.11x):** Triage, cockpit and reviewer surfaces project existing active context-gap observations alongside pending context revisions. The shared projection uses the selected program root and an explicit evaluation time. Gaps remain distinct from proposals, with unknown owner/due information explicit. A reply is bound to its packet, gap, source hash and retained baseline; origin verification and approval remain separate. `context close-reply` records closure only after an authorized OS principal verifies that the accepted reply value is present in the manually maintained target. A later target reversion reopens the gap. Evaluation, import and draft creation alone never renew review or close a gap. Unreadable gap history is visibly unavailable, not healthy/empty. Context limitations do not change business-health scoring.
 
 **Authored review coverage (RELO-W4.11y):** Read-only inventory makes discovered authored files without an existing review rule visible as unassessed or unclassified. Containers are not reviewed documents, and shared/entity/field domains that were not enumerated remain explicitly unassessed. This metadata-only scope does not parse content, certify review currency, infer complete context coverage or change freshness/publish policy.
 
@@ -1195,7 +1196,7 @@ onboarding also produce unknown trend. Existing trend detail discloses
 incomplete coverage in all five formats. Keep publication staleness and
 context diagnostics separate; this is not live source or fleet qualification.
 
-**Observe-only program verdict:** Ordinary program-backed reports retain a
+**Shared retained program verdict:** Ordinary program-backed reports retain a
 versioned deterministic verdict observation in local manifest metadata,
 bound to the existing report/capture and its complete observation inputs.
 It preserves known adverse risk and applies Medium/High schedule floors
@@ -1203,8 +1204,12 @@ at miss probability >=0.50/>=0.80; overdue targets and past p50 dates floor
 at Medium. Terminal items do not acquire overdue findings. Unqualified
 capture/trust/validation/policy and other unevaluated inputs remain explicit
 gaps: no Low/Done clearance, confidence NONE and unknown completion.
-This does not replace rendered health, change publication gates, generate
-authoritative asks or authorize actions; all-consumer migration is pending.
+Confirmed archive observations are the cross-surface authority for report
+health, cockpit, fleet, triage, brief, escalation, review and doctor.
+Unconfirmed draft observations remain bounded advisory fallback only where no
+confirmed authority exists. The shared selector fails closed on corrupt or
+foreign retained evidence. A verdict display still does not change publication
+gates, create authoritative asks or authorize an external action.
 New ordinary drafts additionally retain the observation envelope's canonical
 content hash in draft state. Confirmation verifies that reference, the
 capture/snapshot/input bindings and the content hashes before consuming the
@@ -1226,7 +1231,11 @@ Report risk selection also retains sorted duplicate, merge, fork, cycle and
 dangling lifecycle findings as warnings. They do not drop, merge or mutate
 risks, and cockpit withholds its active-risk aggregate as Unknown when an
 explicit duplicate key affects multiple active risks or a conflicting active
-lifecycle is present. Derived-key similarity remains warning-only.
+lifecycle is present. Derived-key similarity remains warning-only. An
+inactive duplicate with exactly one active canonical successor may move to
+validated risk-archive history only after its source, claim, action, milestone,
+entity and outcome lineage is merged into the canonical active record; archive
+reads remain separate from current risk truth.
 
 Selected milestone records, computed assessments and load diagnostics also
 participate in the observation. Computed Missed floors schedule/health at
@@ -1238,6 +1247,23 @@ from the milestone heuristic's uncertainty placeholder. Missing/ambiguous
 assessments, coverage and input qualification remain explicit; neither
 completed milestones nor critical-path compatibility flags establish global
 Done, validated completion or duration-criticality.
+
+**Planning and action extraction (RELO-W4.4/W4.5):** Sprint planning is an
+executable observation over attributable ADO story points, capacity and
+completed-sprint point totals. It refuses cycles, never overcommits point
+capacity and never substitutes item throughput for missing history. Meeting
+and signal action extraction share one marker grammar. Valid marker identities
+and exact source spans are preserved, malformed markers remain residual input,
+and LLM output is admitted only with verbatim residual grounding and approved
+work-item references.
+
+**Closed-loop maintenance (RELO-W4.9/W4.10):** Risk, dependency, decision,
+action, claim and intervention histories retain breach, escalation, mitigation
+effectiveness, revisit and closure events in bitemporal program facts.
+Long-horizon context selects at most eight relevant accepted terminal outcomes
+for requested entity references; it is bounded, time-travel aware and never a
+substitute for an unbounded prompt replay. Missing, unreadable historical
+evaluation fails as unavailable rather than silently degrading to empty.
 
 **ADO item normalization:** Hydration, report/gather/freshness, child items and
 analytics history share one policy. Terminal Closed/Done/Resolved/Completed/
@@ -1289,7 +1315,7 @@ When no meaningful ADO source timestamp is known, source age is unknown—not th
 
 **Privacy boundary:** ADO nudge comments never quote WorkIQ content. Use neutral language: "Recent non-ADO activity was detected for this item."
 
-**Nudge cooldown:** Max 1 nudge per item per `cooldown_days` (default 14 days; configurable in `hygiene.cooldown_days`).
+**Communication budget and nudge cooldown:** Every governed audience artifact is capped at five material asks/changes by default, overridable with `communication_budget.max_asks`. Send consumers enforce that cap and the selected cooldown before a real send, attestation or confirmed-send record. Nudge item cooldown remains separately anchored to the attested/imported send record and defaults to 14 days. Dry-run surfaces deterministic observe findings without mutation.
 
 **Vitality trend:** Aggregate vitality stored in `vitality.json` on confirm. Trend computed from confirmed archive history.
 
@@ -1351,7 +1377,7 @@ An applied create retains its remote outcome when a subsequent local action-asso
 
 **Extraction:** During `vertex confirm`, claims and decision-asks are extracted from narratives through an AI-first path when AI is enabled, with governed regex fallback retained for calibration, resilience, and explicit reproducibility runs. Max 20 claims per confirm. Deduplication against existing open claims (same entity_refs + similar due_date within ±7 days).
 
-**Claim evidence release rule:** Before confirmation, only `WI:<id>` references from the captured confirm snapshot are approved claim evidence. Missing evidence, unsupported claims and dangling or other unapproved reference families hard-block release through `RELO-QG-05`; the gate cannot be forced, does not rewrite claims, and decision asks remain outside this claim-only rule (RELO-W4.8).
+**Claim evidence release rule:** Claim and decision-ask DTOs and persisted rows retain one compatibility-safe `evidence_refs` grounding field, with `entity_refs` retained for existing readers. Before confirmation, only `WI:<id>` references from the captured confirm snapshot are approved claim evidence. Missing evidence, unsupported claims and dangling or other unapproved reference families hard-block release through `RELO-QG-05`; the gate cannot be forced, does not rewrite claims, and decision asks remain outside this claim-only rule (RELO-W4.8).
 
 **Lifecycle:** Claims start as `open`. Status updates (`met`, `contradicted`, `stale`) are appended to `claims.jsonl` as sidecar entries. Claims are never auto-closed — author resolves via `vertex claims resolve`.
 
@@ -1480,7 +1506,7 @@ The L1 engine provides a typed telemetry substrate for hypothesis-driven program
 
 **Composition:** a `CockpitSnapshot` (see Glossary) aggregates program status, source health, AI-generated intelligence (release-gated `ProgramSynthesis` through-line, when one exists), operational economics (AI spend/tier routing), earned autonomy/trust state per proposal class, and time-savings value — each built by its own best-effort reader so one subsystem's failure never blanks the whole cockpit.
 
-**Local actuation evidence (RELO-W4.12c, in progress):** Fresh cockpit reliability counts describe the selected program's existing actuation journal, not all unfinished work or provider outcomes. Missing or unsafe journal evidence is unavailable rather than zero; observed uncertain, dead-letter, terminal-failure and compensation-required states remain visible as warnings. SQLite may create or update a WAL shared-memory sidecar during a read; its acceptability remains unresolved. This does not complete the current exception inbox or establish reconciliation or operational readiness.
+**Exception inbox and evaluation protocol (RELO-W4.12/W4.13):** `cockpit exceptions` is the local authority-labelled inbox over current risks, retained action history, claims, drafts, approvals, incidents, knowledge proposals, context gaps and bindings. Every item carries evidence, observed diff/preview, authority/availability, a fingerprint-bound read-only revalidation command and explicit no-mutation scope. Claim/action journals refuse read repair; retained action segments are read in recorded order while pruned history remains unevaluated. The HTML protocol is static, keyboard-readable and has no action controls. `readiness vertical-evaluate` evaluates deterministic status/dependency/meeting-close factual non-inferiority and cost/review-time evidence, and returns not-qualified when D9, owner, approved blind, live or real-program evidence is absent. Mechanical and synthetic contracts do not establish WCAG human audit, provider readiness or measured operator proficiency.
 
 **Value measurement is honesty-gated**, not aspirational: a workflow may only claim a `measured` time-savings figure after 8+ real, timer-based before/after `WorkflowMeasurement` pairs clear a bootstrap statistical confidence interval (`TimeSavingsCertification`). Below that evidence bar, value renders as `proxy` or `calibrated`, explicitly labeled — never silently presented as a hard number a leader could cite without caveat.
 

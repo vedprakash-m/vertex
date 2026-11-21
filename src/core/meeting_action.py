@@ -94,7 +94,7 @@ def extract_deterministic_meeting_actions(
         line = raw_line.strip()
         if not line or line[: len(_MARKER)].lower() != _MARKER.lower():
             continue
-        payload = _parse_marker_payload(line)
+        payload = parse_action_marker_payload(line)
         if payload is None:
             continue
         index += 1
@@ -121,7 +121,7 @@ def extract_deterministic_meeting_actions(
                 due_date=due_date,
                 linked_work_item_id=linked_work_item_id,
                 blocks=_parse_blocks(payload.get("blocks")),
-                source_span=line,
+                source_span=raw_line,
                 extraction_method="deterministic",
             )
         )
@@ -132,7 +132,7 @@ _INVALID_DATE = object()
 _INVALID_WI = object()
 
 
-def _parse_marker_payload(line: str) -> dict[str, str] | None:
+def parse_action_marker_payload(line: str) -> dict[str, str] | None:
     body = line[len(_MARKER) :].strip()
     if not body:
         return None
@@ -140,6 +140,7 @@ def _parse_marker_payload(line: str) -> dict[str, str] | None:
     if not segments or not segments[0]:
         return None
     payload = {"text": segments[0]}
+    seen_keys: set[str] = set()
     for segment in segments[1:]:
         if "=" not in segment:
             return None
@@ -147,6 +148,9 @@ def _parse_marker_payload(line: str) -> dict[str, str] | None:
         normalized_key = key.strip().lower()
         if normalized_key not in _ALLOWED_MARKER_KEYS:
             return None
+        if normalized_key in seen_keys:
+            return None
+        seen_keys.add(normalized_key)
         payload[normalized_key] = value.strip()
     return payload
 
@@ -327,6 +331,7 @@ __all__ = [
     "approve_meeting_action",
     "extract_deterministic_meeting_actions",
     "merge_meeting_actions",
+    "parse_action_marker_payload",
     "reject_meeting_action",
     "validate_meeting_actions",
 ]

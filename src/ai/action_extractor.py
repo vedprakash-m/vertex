@@ -14,6 +14,7 @@ from src.ai.provider import DisabledStructuredProvider, LLMProvider
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.core.action_extractor_basic import extract_actions_from_signals, is_meeting_action_source
 from src.core.action_tracker import build_action_id
+from src.core.meeting_action import parse_action_marker_payload
 from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, Program, Signal
 from src.core.policy_loader import load_ai_feature_policy
 
@@ -212,25 +213,13 @@ def _starts_with_action_marker(line: str) -> bool:
 
 
 def _parse_deterministic_action_line(*, line: str, signal: Signal) -> ExtractedActionCandidate | None:
-    body = line[len("Action:") :].strip()
-    if not body:
+    payload = parse_action_marker_payload(line)
+    if payload is None:
         return None
-    segments = [segment.strip() for segment in body.split("|")]
-    if not segments or not segments[0]:
-        return None
-    payload: dict[str, str] = {"text": segments[0]}
-    for segment in segments[1:]:
-        if "=" not in segment:
-            return None
-        key, value = segment.split("=", 1)
-        normalized_key = key.strip().lower()
-        if normalized_key not in {"owner", "due", "refs", "wi"}:
-            return None
-        payload[normalized_key] = value.strip()
     try:
         return ExtractedActionCandidate(
             text=_parse_action_text(payload["text"]),
-            owner_alias=_parse_optional_owner_alias(payload.get("owner")) or _owner_alias_from_signal(signal) or "unknown",
+            owner_alias=_parse_optional_owner_alias(payload.get("owner")) or "unknown",
             due_date=_parse_optional_date(payload.get("due")),
             linked_work_item_ids=(
                 _parse_ref_ids(payload.get("refs") or payload.get("wi"))

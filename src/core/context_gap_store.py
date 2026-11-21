@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 from src.core.jsonl_utils import parse_jsonl_line
 import os
@@ -90,6 +91,67 @@ class ContextGapRecord:
             severity=str(d["severity"]),
             message=str(d["message"]),
             impact_estimate=str(d.get("impact_estimate", "medium")),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ContextGapResolution:
+    resolved_at: datetime
+    program: str
+    gap_fingerprint: str
+    proposal_id: str
+    solicitation_id: str
+    proposal_digest: str
+    source_sha256: str
+    verified_principal: str
+    closed_by: str
+    closure_reason: str
+    target_store: str
+    target_key: str
+    target_field: str
+    applied_value_sha256: str
+
+    def to_json(self) -> dict[str, str]:
+        return {
+            "resolved_at": _normalize_datetime(self.resolved_at).isoformat().replace("+00:00", "Z"),
+            "program": self.program,
+            "gap_fingerprint": self.gap_fingerprint,
+            "proposal_id": self.proposal_id,
+            "solicitation_id": self.solicitation_id,
+            "proposal_digest": self.proposal_digest,
+            "source_sha256": self.source_sha256,
+            "verified_principal": self.verified_principal,
+            "closed_by": self.closed_by,
+            "closure_reason": self.closure_reason,
+            "target_store": self.target_store,
+            "target_key": self.target_key,
+            "target_field": self.target_field,
+            "applied_value_sha256": self.applied_value_sha256,
+        }
+
+    @staticmethod
+    def from_json(raw: dict[str, Any]) -> "ContextGapResolution":
+        required = (
+            "resolved_at", "program", "gap_fingerprint", "proposal_id",
+            "solicitation_id", "proposal_digest", "source_sha256",
+            "verified_principal", "closed_by", "closure_reason",
+            "target_store", "target_key", "target_field",
+            "applied_value_sha256",
+        )
+        if not isinstance(raw, dict) or not all(
+            isinstance(raw.get(field), str) and raw[field]
+            for field in required
+        ):
+            raise ContextGapRecordError("Context gap resolution record is invalid.")
+        try:
+            resolved_at = _parse_datetime(raw["resolved_at"])
+        except (ValueError, OverflowError) as error:
+            raise ContextGapRecordError(
+                "Context gap resolution timestamp is invalid."
+            ) from error
+        return ContextGapResolution(
+            resolved_at=resolved_at,
+            **{field: raw[field] for field in required if field != "resolved_at"},
         )
 
 
@@ -212,6 +274,31 @@ def load_context_gaps(
     return records
 
 
+def append_context_gap_resolution(
+    resolution: ContextGapResolution,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> Path:
+    path = _resolution_path(resolution.program, programs_root=programs_root)
+    _append_jsonl(path, resolution.to_json())
+    return path
+
+
+def load_context_gap_resolutions(
+    program: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> tuple[ContextGapResolution, ...]:
+    path = _resolution_path(program, programs_root=programs_root)
+    if not path.exists():
+        return ()
+    return tuple(
+        ContextGapResolution.from_json(parse_jsonl_line(line))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    )
+
+
 # ---------------------------------------------------------------------------
 # Ranking
 # ---------------------------------------------------------------------------
@@ -254,24 +341,58 @@ def rank_context_gaps(
         key = (g.feature, g.lane, g.field)
         groups[key].append(g)
 
+    resolutions: dict[str, ContextGapResolution] = {}
+    if programs_root is not None:
+        for program_id in sorted({gap.program for gap in gaps}):
+            for retained_resolution in load_context_gap_resolutions(
+                program_id, programs_root=programs_root,
+            ):
+                latest_resolution = resolutions.get(
+                    retained_resolution.gap_fingerprint
+                )
+                if (
+                    latest_resolution is None
+                    or retained_resolution.resolved_at >= latest_resolution.resolved_at
+                ):
+                    resolutions[
+                        retained_resolution.gap_fingerprint
+                    ] = retained_resolution
+
     ranked: list[RankedGap] = []
     registry_documents: dict[str, Any] = {}
     for (feature, lane, field), group in groups.items():
         group.sort(key=lambda r: r.ts)
         first = group[0]
+        fingerprint = f"{first.program}:{first.feature}:{first.lane or ''}:{first.field}"
         # Only the doctor's missing-field detector establishes this condition.
         # Legacy observations may request a change to an already populated value.
         if (
             programs_root is not None and feature == "doctor --context" and lane
             and field in {"deep_context.why", "deep_context.what"}
         ):
-            current, state = _read_registry_value(
+            registry_value, state = _read_registry_value(
                 first.program, lane, field, programs_root=programs_root,
                 registry_documents=registry_documents,
             )
-            if state == "str" and current:
+            if state == "str" and registry_value:
                 continue
         last = group[-1]
+        resolution = resolutions.get(fingerprint)
+        if resolution is not None and resolution.resolved_at >= last.ts:
+            assert programs_root is not None
+            current_value, current_state = _read_registry_value(
+                resolution.program,
+                resolution.target_key,
+                resolution.target_field,
+                programs_root=programs_root,
+                registry_documents=registry_documents,
+            )
+            if (
+                current_state == "str"
+                and hashlib.sha256(current_value.encode("utf-8")).hexdigest()
+                == resolution.applied_value_sha256
+            ):
+                continue
         impact = first.impact_estimate
         severity = first.severity
         message = first.message
@@ -304,6 +425,10 @@ def rank_context_gaps(
 
 def _gap_path(program: str, *, programs_root: Path) -> Path:
     return programs_root / program / "_feedback" / "context_gaps.jsonl"
+
+
+def _resolution_path(program: str, *, programs_root: Path) -> Path:
+    return programs_root / program / "_feedback" / "context_gap_resolutions.jsonl"
 
 
 def _append_jsonl(

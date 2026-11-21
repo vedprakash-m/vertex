@@ -19,6 +19,7 @@ from src.core.models import AttributionTier, Confidence, DimensionRisk, Evidence
 from src.core.models_v2 import Dependency, Scorecard
 from src.core.overrides_store import DimensionOverride, OverridesDocument
 from src.core.program_reality import ProgramReality
+from src.core.program_verdict import load_authoritative_program_risk
 from src.core.scorecard_engine import assign_dimension_items, build_scorecard
 from src.core.scorecard_trends import load_scorecard_trends
 from src.core.snapshot_store import ARCHIVE_ROOT
@@ -444,6 +445,9 @@ def _scorecard_dimension_workstream_ids(scorecards: tuple[Scorecard, ...]) -> di
 
 
 def _load_latest_program_overall_risk(program_id: str, *, programs_root: Path) -> RiskLevel | None:
+    verdict_risk = load_authoritative_program_risk(program_id, programs_root=programs_root)
+    if verdict_risk is not None:
+        return verdict_risk
     program_path = programs_root / program_id / "program.yaml"
     if not program_path.exists():
         return None

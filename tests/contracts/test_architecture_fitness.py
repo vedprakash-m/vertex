@@ -75,7 +75,7 @@ LINE_BUDGETS = {
     # WS-3 / v1.14 (2026-06-10): +21 for _emit_credential_expired_banner helper
     # + CredentialExpired import + 3 banner call sites (WorkIQ/Kusto/IcM).
     # +1 (2026-11-05): forward declared result limits to the shared Kusto client.
-    "src/commands/gather.py": 5469,  # +27 (2026-11-19, RELO-W3 typed Kusto result contract): retain deterministic unbound result text and metadata. +2 (2026-07-25): BL-F2 D-19 real fan-out fix -- _build_kusto_kpi_signal now populates Signal.workstream_ids from the full configured query.workstream_ids set, not just a single scalar picked only when exactly one existed; +3 (2026-07-25): BL-F2 M365 re-routing now explicitly replaces Signal.workstream_ids too, not just workstream_id -- +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
+    "src/commands/gather.py": 5474,  # +5 for RELO-W4.4 field admission and extracted parser import.
     # +36 (2026-07-21, synthetic gather lifecycle contract D-19/AG-2.12): completeness-oracle
     # reconciliation -- resolve_oracle_result import/application at the
     # QueryResultEntry construction site, source_export_counts param on

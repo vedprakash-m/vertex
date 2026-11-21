@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-21
+
+| Feature | Change |
+|---|---|
+| RELO-W4 verdict and risk authority | Use confirmed retained verdicts across report, cockpit, fleet, triage, brief, escalation, review and doctor; compact inactive duplicate risks only into a lineage-preserving active/archive pair and keep archive evidence separate from current truth. |
+| RELO-W4 planning and extraction | Emit an attributable sprint plan from explicit story points, capacity, completed-sprint history and a dependency DAG; share one action-marker parser across meeting and signal extraction with exact marker identity and grounded residual handling. |
+| RELO-W4 communication and claim release | Enforce default five-item audience budgets and configured cooldowns before sends/attestations, while retaining non-mutating dry-run observations; carry shared `evidence_refs` and hard-block unsupported material claims through RELO-QG-05. |
+| RELO-W4 lifecycle, relevance and maintained context | Retain typed bitemporal risk/dependency/decision/action/claim/intervention lifecycle events; bound long-horizon outcome selection; preserve the eight knowledge classes and verified renewal/history; bind, verify and close context-gap replies only after an authorized manual edit, with reversion reopening attention. |
+| RELO-W4 exception and evaluation protocol | Add current authority-labelled exception output, retained action/claim history reads, static accessible HTML, exact fingerprint revalidation, protocol/training disclosure and a `readiness vertical-evaluate` synthetic non-inferiority harness that remains not-qualified without external evidence. |
+
+Modified/added production files: `scripts/evaluate_vertical_artifacts.py`, `src/core/sprint_plan.py`, `src/core/exception_render.py`, `src/core/vertical_artifact_evaluation.py`, verdict/risk/claim/lifecycle/context stores, the sprint gather stages, communication/send consumers, cockpit/readiness/context commands, and generated CLI reference. Modified tests: W4 verdict, risk, archive, planner, action extraction, communication budget, claim gate, context reply, lifecycle, relevance, exception protocol and vertical evaluation suites. Canonical specifications and privacy/test contracts were updated in `specs/vertex-prd.md`, `specs/vertex-tech-spec.md`, `specs/vertex-ux-spec.md`, `tests/contracts/test_architecture_fitness.py`, `tests/contracts/test_nudge_contracts.py` and `tests/contracts/cli_reference_snapshot.md`.
+
+External qualification remains explicit: D9/owner approval, approved blind protocol, live/real-program evidence, independent WCAG audit and measured operator proficiency are not synthesized by this implementation.
+
 ## 2026-11-20
 
 | Feature | Change |

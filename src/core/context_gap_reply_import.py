@@ -29,7 +29,14 @@ import yaml
 from src.core.context_gap_reply import ParsedReply
 from src.core.context_gap_solicitation import validate_solicitation_draft
 from src.core.edition_resolver import PROGRAMS_ROOT, get_nudge_paths
-from src.core.context_gap_store import ContextGapRecord, _gap_path, rank_context_gaps
+from src.core.context_gap_store import (
+    ContextGapRecord,
+    ContextGapResolution,
+    _gap_path,
+    append_context_gap_resolution,
+    load_context_gap_resolutions,
+    rank_context_gaps,
+)
 from src.core.jsonl_utils import parse_jsonl_line
 from src.core.manual_registry_diff import read_registry_baseline
 from src.core.config_loader import load_review_config
@@ -96,7 +103,8 @@ def import_context_gap_reply(
         if any(gap.program != program_id for gap in gaps):
             raise ContextGapReplyImportError("Gap observations contain a foreign program.")
         selected = [
-            gap for gap in rank_context_gaps(gaps)
+            gap
+            for gap in rank_context_gaps(gaps, programs_root=programs_root)
             if f"{gap.program}:{gap.feature}:{gap.lane or ''}:{gap.field}" == gap_fingerprint
         ]
         if len(selected) != 1:
@@ -185,6 +193,8 @@ def import_context_gap_reply(
             confidence=EXTRACTION_METHOD_CONFIDENCE["field_update_email"], batch_eligible=False,
             extraction_method_rationale=rationale,
             conflict_key=f"workstream_registry:{gap.lane}:{target_field}",
+            solicitation_id=solicitation_id,
+            gap_fingerprint=gap_fingerprint,
         )
         if not dry_run:
             return insert_proposal(program_id, proposal, programs_root=programs_root)
@@ -273,6 +283,128 @@ def verify_context_reply_origin(
         raise ContextGapReplyImportError(
             f"Origin verification unavailable ({type(error).__name__}); "
             "check review.yaml, the original source and proposal queue before retrying. No approval recorded.",
+        ) from error
+
+
+def close_context_gap_reply(
+    *,
+    program_id: str,
+    issue_number: int,
+    proposal_id: str,
+    actor: str,
+    reason: str,
+    programs_root: Path,
+    dry_run: bool = False,
+) -> ContextUpdateProposal:
+    """Record closure only after an authorized reviewer verifies the manual edit."""
+    if not is_bare_identifier(program_id) or issue_number < 1 or not reason.strip():
+        raise ContextGapReplyImportError(
+            "Select a program, positive issue and nonempty closure reason."
+        )
+    program = (programs_root / program_id).resolve()
+    if not program.is_relative_to(programs_root.resolve()):
+        raise ContextGapReplyImportError("Program path leaves the selected root.")
+    try:
+        proposals = load_proposals(program_id, programs_root=programs_root)
+        selected = [
+            proposal
+            for proposal in proposals
+            if proposal.proposal_id == proposal_id
+            and proposal.issue_number == issue_number
+        ]
+        if len(selected) != 1:
+            raise ContextGapReplyImportError(
+                "Select one retained reply in the chosen program and issue."
+            )
+        proposal = selected[0]
+        if proposal.source_type != "context_gap_reply":
+            raise ContextGapReplyImportError("Selected proposal is not a context-gap reply.")
+        if proposal.status != "accepted" or proposal.acceptance_binding_error() is not None:
+            raise ContextGapReplyImportError(
+                "Reply closure requires the exact accepted proposal binding."
+            )
+        origin_error = reply_origin_verification_error(
+            proposal, programs_root=programs_root,
+        )
+        if origin_error is not None:
+            raise ContextGapReplyImportError(origin_error)
+        if proposal.solicitation_id is None or proposal.gap_fingerprint is None:
+            raise ContextGapReplyImportError(
+                "Reply proposal is missing solicitation or gap binding."
+            )
+        verification = proposal.verified_reply_origin
+        assert verification is not None and proposal.source_sha256 is not None
+        current_value, _current_hash = read_registry_baseline(
+            program_id,
+            proposal.target_key,
+            proposal.target_field,
+            programs_root=programs_root,
+        )
+        if current_value != proposal.source_value:
+            raise ContextGapReplyImportError(
+                "Manual target does not match the accepted reply value; edit and recheck first."
+            )
+        policy_path = program / "review.yaml"
+        _require_program_path(policy_path, program)
+        settings = load_review_config(policy_path)
+        identity = capture_operator_identity(actor, require_os_principal=True)
+        if identity.principal not in settings.reply_origin_verifier_principals:
+            raise ContextGapReplyImportError(
+                "OS principal is not authorized to close verified context replies."
+            )
+        assert identity.principal is not None
+        existing = next(
+            (
+                resolution
+                for resolution in load_context_gap_resolutions(
+                    program_id, programs_root=programs_root,
+                )
+                if resolution.proposal_id == proposal.proposal_id
+            ),
+            None,
+        )
+        if existing is not None:
+            return proposal
+        if dry_run:
+            return proposal
+        resolution = ContextGapResolution(
+            resolved_at=datetime.now(timezone.utc),
+            program=program_id,
+            gap_fingerprint=proposal.gap_fingerprint,
+            proposal_id=proposal.proposal_id,
+            solicitation_id=proposal.solicitation_id,
+            proposal_digest=proposal.approval_payload_digest(),
+            source_sha256=proposal.source_sha256,
+            verified_principal=verification.principal,
+            closed_by=identity.principal,
+            closure_reason=reason.strip(),
+            target_store=proposal.target_store,
+            target_key=proposal.target_key,
+            target_field=proposal.target_field,
+            applied_value_sha256=sha256(current_value.encode("utf-8")).hexdigest(),
+        )
+        with _queue_lock(program_id, programs_root):
+            retained = load_context_gap_resolutions(
+                program_id, programs_root=programs_root,
+            )
+            if any(row.proposal_id == proposal.proposal_id for row in retained):
+                return proposal
+            append_context_gap_resolution(
+                resolution, programs_root=programs_root,
+            )
+        return proposal
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        ConfigError,
+        yaml.YAMLError,
+    ) as error:
+        if isinstance(error, ContextGapReplyImportError):
+            raise
+        raise ContextGapReplyImportError(
+            f"Context reply closure unavailable ({type(error).__name__})."
         ) from error
 
 
@@ -379,6 +511,7 @@ def _isolate_new_content(body_text: str) -> str:
 
 __all__ = [
     "ContextGapReplyImportError", "import_context_gap_reply",
+    "close_context_gap_reply",
     "verify_context_reply_origin",
     "list_pending_replies", "parse_reply_eml", "replies_dir",
 ]

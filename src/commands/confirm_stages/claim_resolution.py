@@ -30,6 +30,7 @@ from src.core.claim_evidence_map import (
     FindingKind,
     TruthConsistencyMode,
     evaluate_truth_consistency,
+    grounding_refs,
 )
 from src.core.claim_tracker import (
     ClaimExtractionResult,
@@ -303,7 +304,7 @@ def evaluate_claim_evidence_gate(
             ClaimEvidenceLink(
                 claim_id=claim.id,
                 claim_text=claim.text,
-                evidence_refs=claim.entity_refs,
+                evidence_refs=grounding_refs(claim),
             )
             for claim in claims
         ),

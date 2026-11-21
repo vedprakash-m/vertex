@@ -25,7 +25,8 @@ from src.core.gather_state_store import build_gather_integration_summary, load_g
 from src.core.issue_projection import build_issue_projection
 from src.core.policy_evaluator import check_cadence, get_cadence_window
 from src.core.models import Confidence, WorkItem
-from src.core.models_v2 import ActionStatus, MilestoneStatus, RiskStatus
+from src.core.models_v2 import ActionStatus, MilestoneStatus
+from src.core.risk_dedupe import active_risk_entries
 from src.core.program_fact_store import load_program_facts, project_action_items, project_risk_entries
 from src.core.risk_register_engine import assess_risk_staleness
 from src.core.signal_review import signal_is_approved_for_evidence
@@ -444,11 +445,7 @@ def _build_status_risk_register_summary(
             "correct the program fact configuration before retrying status)"
         )
 
-    active_risks = tuple(
-        risk
-        for risk in risks
-        if risk.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}
-    )
+    active_risks = active_risk_entries(risks)
     if not active_risks:
         return None
 

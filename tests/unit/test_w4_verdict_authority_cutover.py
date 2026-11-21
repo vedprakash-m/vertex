@@ -120,6 +120,42 @@ def _high_risk() -> RiskEntry:
     )
 
 
+def _write_published_verdict(
+    programs_root: Path,
+    *,
+    program_id: str = "foreign",
+    health: RiskLevel = RiskLevel.HIGH,
+    issue: int = 7,
+) -> None:
+    publication = programs_root / program_id / "publications" / "weekly" / f"issue_{issue:03d}"
+    publication.mkdir(parents=True)
+    (publication / f"issue_{issue:03d}.manifest.json").write_text(
+        json.dumps({
+            "started_at": NOW.isoformat(),
+            "metadata": {
+                "program_verdict_observation": {
+                    "mode": "observe",
+                    "verdict": {
+                        "schema_version": "program-verdict.v1",
+                        "program_id": program_id,
+                        "snapshot_id": f"snapshot-{issue}",
+                        "as_of": NOW.isoformat(),
+                        "health": health.value,
+                        "schedule_risk": health.value,
+                        "confidence": "none",
+                        "completion_phase": "unknown",
+                        "reasons": [{"code": "risk_register_high_floor"}],
+                        "evidence_gaps": [{"code": "risk_register_coverage_unqualified"}],
+                        "leadership_asks": [],
+                        "source_refs": [f"PROGRAM:{program_id}"],
+                    },
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+
+
 def _missed_milestone() -> tuple[Milestone, MilestoneAssessment]:
     ms = Milestone(
         id="ms-1",
@@ -195,6 +231,27 @@ def test_w41_contradiction_fixture_resolves_conservatively_and_passes_oracle(adv
         verify_program_verdict_oracle(obs.inputs, replace(obs.verdict, health=RiskLevel.LOW))
     with pytest.raises(ConfigError, match="oracle"):
         verify_program_verdict_oracle(obs.inputs, replace(obs.verdict, contradictions=()))
+
+
+def test_unconfirmed_verdict_cannot_become_cross_program_authority(tmp_path: Path) -> None:
+    from src.core.program_verdict import load_authoritative_program_risk
+    from src.commands.report_scorecards import _load_latest_program_overall_risk as report_risk
+    from src.commands.triage import _load_latest_program_overall_risk as triage_risk
+
+    programs_root = tmp_path / "programs"
+    _write_published_verdict(programs_root, health=RiskLevel.HIGH)
+
+    assert load_authoritative_program_risk("foreign", programs_root=programs_root) is None
+    assert report_risk("foreign", programs_root=programs_root) is None
+    assert triage_risk("foreign", programs_root=programs_root) is None
+
+
+def test_shared_confirmed_verdict_risk_reader_does_not_republish_archive_as_current() -> None:
+    from src.core.program_verdict import load_authoritative_program_risk
+
+    # No current publication and no indexed confirmation: retained risk archive history
+    # cannot become a live cross-program ProgramVerdict.
+    assert load_authoritative_program_risk("missing", programs_root=Path("not-created")) is None
 
 
 def _seed_confirmed_and_draft_workspace(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -291,6 +348,7 @@ def _seed_confirmed_and_draft_workspace(tmp_path: Path) -> tuple[Path, Path, Pat
 
 
 def test_w41_confirmed_verdict_never_shadowed_by_unconfirmed_draft(tmp_path: Path) -> None:
+    from src.core.program_verdict import load_authoritative_program_risk
     _, programs_root, _, archive_root = _seed_confirmed_and_draft_workspace(tmp_path)
 
     retained = load_latest_program_verdict(
@@ -299,6 +357,9 @@ def test_w41_confirmed_verdict_never_shadowed_by_unconfirmed_draft(tmp_path: Pat
     assert retained is not None
     assert retained.health == RiskLevel.HIGH
     assert retained.as_of == NOW
+    assert load_authoritative_program_risk(
+        "acme", programs_root=programs_root, archive_root=archive_root
+    ) == RiskLevel.HIGH
     doctor = doctor_cmd.run_doctor(
         edition_name=EDITION_NAME,
         reports_root=programs_root.parent / "reports",
