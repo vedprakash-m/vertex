@@ -17,7 +17,7 @@ from src.core.exceptions import ConfigError
 from src.core.journal import PROGRAMS_ROOT
 from src.core.jsonl_utils import append_jsonl_line, parse_jsonl_line, read_jsonl_records
 from src.core.models import RiskLevel, WorkItem
-from src.core.models_v2 import RiskCategory, RiskDerivedLevel, RiskEntry, RiskImpact, RiskKind, RiskProbability, RiskStatus
+from src.core.models_v2 import LifecycleEvent, LifecycleEventKind, RiskCategory, RiskDerivedLevel, RiskEntry, RiskImpact, RiskKind, RiskProbability, RiskStatus
 from src.core.risk_dedupe import parse_risk_lifecycle_fields, risk_lifecycle_record
 
 
@@ -444,6 +444,139 @@ def load_risk_history(program_id: str, risk_id: str | None, programs_root: Path 
     if not path.exists():
         return ()
     return tuple(record for record in read_jsonl_records(path) if str(record.get("risk_id") or "") == risk_id)
+
+
+def record_risk_lifecycle(
+    program_id: str,
+    risk_id: str,
+    kind: LifecycleEventKind,
+    *,
+    actor: str,
+    note: str | None = None,
+    effective: bool | None = None,
+    next_review_at: datetime | None = None,
+    evidence_refs: tuple[str, ...] = (),
+    occurred_at: datetime | None = None,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> LifecycleEvent:
+    at = occurred_at or datetime.now(timezone.utc)
+    entries = list(load_risk_register(program_id, programs_root))
+    index = next((index for index, entry in enumerate(entries) if entry.id == risk_id), None)
+    if index is None:
+        raise ValueError(f"Unknown risk '{risk_id}' for program '{program_id}'.")
+    event = _write_lifecycle_event(
+        program_id, "risk.lifecycle", risk_id, kind, actor=actor, note=note,
+        effective=effective, next_review_at=next_review_at, evidence_refs=evidence_refs,
+        occurred_at=at, programs_root=programs_root,
+    )
+    current = entries[index]
+    if kind is LifecycleEventKind.ESCALATION:
+        entries[index] = replace(current, status=RiskStatus.ESCALATED, escalation_state="active")
+    elif kind is LifecycleEventKind.MITIGATION_EFFECTIVENESS:
+        entries[index] = replace(current, effectiveness="effective" if effective is True else "ineffective")
+    elif kind is LifecycleEventKind.REVISIT:
+        entries[index] = replace(current, last_reviewed_date=at.date())
+    elif kind is LifecycleEventKind.CLOSURE:
+        entries[index] = replace(current, status=RiskStatus.CLOSED, outcome=note or "closed")
+    save_risk_register(program_id, tuple(entries), programs_root=programs_root)
+    return event
+
+
+def load_risk_lifecycle(
+    program_id: str,
+    risk_id: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+    as_of: datetime | None = None,
+) -> tuple[LifecycleEvent, ...]:
+    return _load_lifecycle_events(
+        program_id,
+        "risk.lifecycle",
+        risk_id,
+        programs_root=programs_root,
+        as_of=as_of,
+    )
+
+
+def _write_lifecycle_event(
+    program_id: str,
+    fact_type: str,
+    object_id: str,
+    kind: LifecycleEventKind,
+    *,
+    actor: str,
+    note: str | None,
+    effective: bool | None,
+    next_review_at: datetime | None,
+    evidence_refs: tuple[str, ...],
+    occurred_at: datetime,
+    programs_root: Path,
+) -> LifecycleEvent:
+    from src.core.program_fact_store import FactPrecedence, ProgramFactInput, ProgramFactStore
+    if occurred_at.utcoffset() is None:
+        raise ValueError("Lifecycle event occurred_at must be timezone-aware.")
+    if not actor.strip():
+        raise ValueError("Lifecycle event actor must be nonempty.")
+    if next_review_at is not None and next_review_at.utcoffset() is None:
+        raise ValueError("Lifecycle event next_review_at must be timezone-aware.")
+    event = LifecycleEvent(
+        object_id=object_id, kind=kind, occurred_at=occurred_at, actor=actor,
+        note=note, effective=effective, next_review_at=next_review_at, evidence_refs=evidence_refs,
+    )
+    ProgramFactStore(program_id, db_root=_resolve_fact_db_root(programs_root)).append_fact(
+        ProgramFactInput(
+            fact_type=fact_type,
+            entity_refs=(f"{fact_type.split('.', 1)[0].upper()}:{object_id}",),
+            payload={
+                "object_id": object_id, "event_kind": kind.value, "occurred_at": occurred_at.isoformat(),
+                "actor": actor, "note": note, "effective": effective,
+                "next_review_at": next_review_at.isoformat() if next_review_at else None,
+                "evidence_refs": list(evidence_refs),
+            },
+            source_signal_ids=evidence_refs,
+            precedence=FactPrecedence.ACTIVE_PM_JUDGMENT,
+            valid_from=occurred_at,
+            natural_key=f"{fact_type}:{object_id}:{occurred_at.isoformat()}:{kind.value}",
+            created_by=f"vertex.{fact_type}.lifecycle",
+        ),
+        recorded_at=occurred_at,
+    )
+    return event
+
+
+def _load_lifecycle_events(
+    program_id: str,
+    fact_type: str,
+    object_id: str,
+    *,
+    programs_root: Path,
+    as_of: datetime | None = None,
+) -> tuple[LifecycleEvent, ...]:
+    from src.core.program_fact_store import ProgramFactStore
+    selected_at = as_of or datetime.now(timezone.utc)
+    if selected_at.utcoffset() is None:
+        raise ValueError("Lifecycle history as_of must be timezone-aware.")
+    facts = ProgramFactStore(
+        program_id, db_root=_resolve_fact_db_root(programs_root)
+    ).snapshot(as_of=selected_at, valid_at=selected_at).facts
+    events: list[LifecycleEvent] = []
+    for fact in facts:
+        if fact.fact_type != fact_type or fact.payload.get("object_id") != object_id:
+            continue
+        occurred_at = datetime.fromisoformat(str(fact.payload["occurred_at"])).astimezone(timezone.utc)
+        if occurred_at <= selected_at.astimezone(timezone.utc):
+            events.append(LifecycleEvent(
+                object_id=object_id, kind=LifecycleEventKind(str(fact.payload["event_kind"])),
+                occurred_at=occurred_at, actor=str(fact.payload["actor"]),
+                note=fact.payload.get("note") if isinstance(fact.payload.get("note"), str) else None,
+                effective=fact.payload.get("effective") if isinstance(fact.payload.get("effective"), bool) else None,
+                next_review_at=(
+                    datetime.fromisoformat(str(fact.payload["next_review_at"])).astimezone(timezone.utc)
+                    if fact.payload.get("next_review_at") else None
+                ),
+                evidence_refs=tuple(str(value) for value in fact.payload.get("evidence_refs", ())),
+            ))
+    return tuple(sorted(events, key=lambda event: (event.occurred_at, event.kind.value)))
 
 
 def is_unsourced(entry: RiskEntry) -> bool:

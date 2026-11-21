@@ -135,6 +135,7 @@ def _build_report_config_document(resolved: ResolvedEdition, knowledge: Knowledg
         "type_scale_v2": resolved.edition.type_scale_v2,
         "executive_style": resolved.edition.executive_style,
         "calibration_pilot": resolved.edition.calibration_pilot,
+        "communication_budget": edition_raw.get("communication_budget", {}),
     }
     return config_document
 

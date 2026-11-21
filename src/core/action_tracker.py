@@ -13,11 +13,12 @@ import portalocker
 from src.core.exceptions import StateError
 from src.core.jsonl_utils import (
     append_jsonl_line,
+    list_rotated_jsonl_paths,
     read_jsonl_records,
     validate_jsonl_row,
     write_checksum_file,
 )
-from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, ActionStatusUpdate, TrajectoryPoint
+from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, ActionStatusUpdate, LifecycleEvent, LifecycleEventKind, TrajectoryPoint
 from src.core.operation_trace import REF_TYPE_FACT, record_trace_link
 from src.core.store_factory import build_trajectory_store_for_program_id
 from src.core.workspace_paths import PROGRAMS_ROOT
@@ -51,6 +52,38 @@ def get_actions_path(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> Pa
     return programs_root / program_id / "journal" / "actions.jsonl"
 
 
+def _action_log_paths(
+    program_id: str,
+    programs_root: Path,
+    *,
+    include_rotated: bool,
+) -> tuple[Path, ...]:
+    current = get_actions_path(program_id, programs_root)
+    paths: list[Path] = []
+    if include_rotated:
+        paths.extend(
+            list_rotated_jsonl_paths(current.parent / "rotated", stem=current.stem)
+        )
+    if current.is_file():
+        paths.append(current)
+    return tuple(paths)
+
+
+def has_action_history(
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+    *,
+    include_rotated: bool = True,
+) -> bool:
+    return bool(
+        _action_log_paths(
+            program_id,
+            programs_root,
+            include_rotated=include_rotated,
+        )
+    )
+
+
 def build_action_id(
     program_id: str,
     *,
@@ -75,6 +108,57 @@ def build_action_id(
     return str(uuid5(NAMESPACE_URL, seed))
 
 
+def record_action_lifecycle(
+    program_id: str,
+    action_id: str,
+    kind: LifecycleEventKind,
+    **kwargs: Any,
+) -> LifecycleEvent:
+    from src.core.risk_register_engine import _write_lifecycle_event
+    roots = kwargs.pop("programs_root", PROGRAMS_ROOT)
+    current = next(
+        (
+            action
+            for action in load_actions(program_id, roots, repair_corruption=False)
+            if action.id == action_id
+        ),
+        None,
+    )
+    if current is None:
+        raise StateError(f"Unknown action '{action_id}' for program '{program_id}'.")
+    event = _write_lifecycle_event(
+        program_id, "action.lifecycle", action_id, kind, actor=str(kwargs.pop("actor")),
+        note=kwargs.pop("note", None), effective=kwargs.pop("effective", None),
+        next_review_at=kwargs.pop("next_review_at", None),
+        evidence_refs=tuple(kwargs.pop("evidence_refs", ())),
+        occurred_at=kwargs.pop("occurred_at", None) or datetime.now(timezone.utc),
+        programs_root=roots,
+    )
+    if kind is LifecycleEventKind.CLOSURE:
+        update_action_status(
+            program_id, action_id, ActionStatus.DONE, event.note,
+            updated_by=event.actor, updated_at=event.occurred_at, programs_root=roots,
+        )
+    return event
+
+
+def load_action_lifecycle(
+    program_id: str,
+    action_id: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+    as_of: datetime | None = None,
+) -> tuple[LifecycleEvent, ...]:
+    from src.core.risk_register_engine import _load_lifecycle_events
+    return _load_lifecycle_events(
+        program_id,
+        "action.lifecycle",
+        action_id,
+        programs_root=programs_root,
+        as_of=as_of,
+    )
+
+
 def append_action(
     program_id: str, action: ActionItem, programs_root: Path = PROGRAMS_ROOT, *, correlation_id: str = "",
     gather_run_id: str | None = None,
@@ -90,67 +174,95 @@ def append_action(
 
 
 def read_action_log(
-    program_id: str, programs_root: Path = PROGRAMS_ROOT, *, repair_corruption: bool = True,
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+    *,
+    repair_corruption: bool = True,
+    include_rotated: bool = False,
 ) -> tuple[ActionLogEntry, ...]:
-    path = get_actions_path(program_id, programs_root)
-    if repair_corruption and not path.exists():
+    paths = _action_log_paths(
+        program_id, programs_root, include_rotated=include_rotated,
+    )
+    if not paths and repair_corruption:
         return ()
     entries: list[ActionLogEntry] = []
-    for record in _read_action_records(path, repair_corruption=repair_corruption):
-        raw_record_type = record.get("record_type", "action")
-        if not isinstance(raw_record_type, str):
-            raise TypeError("record_type must be a string")
-        record_type = raw_record_type
-        if record_type == "status_update":
-            entries.append(_status_update_from_record(record))
-        elif record_type == "action":
-            entries.append(_action_from_record(record, program_id=program_id))
-        else:
-            raise ValueError(f"Unknown action log record_type '{record_type}'")
+    for path in paths or (get_actions_path(program_id, programs_root),):
+        for record in _read_action_records(path, repair_corruption=repair_corruption):
+            raw_record_type = record.get("record_type", "action")
+            if not isinstance(raw_record_type, str):
+                raise TypeError("record_type must be a string")
+            record_type = raw_record_type
+            if record_type == "status_update":
+                entries.append(_status_update_from_record(record))
+            elif record_type == "action":
+                entries.append(_action_from_record(record, program_id=program_id))
+            else:
+                raise ValueError(f"Unknown action log record_type '{record_type}'")
     return tuple(entries)
 
 
 def load_latest_action_statuses(
-    program_id: str, programs_root: Path = PROGRAMS_ROOT, *, repair_corruption: bool = True,
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+    *,
+    repair_corruption: bool = True,
+    include_rotated: bool = False,
 ) -> dict[str, ActionStatusUpdate]:
     latest: dict[str, ActionStatusUpdate] = {}
-    for entry in read_action_log(program_id, programs_root, repair_corruption=repair_corruption):
+    for entry in read_action_log(
+        program_id,
+        programs_root,
+        repair_corruption=repair_corruption,
+        include_rotated=include_rotated,
+    ):
         if isinstance(entry, ActionStatusUpdate):
             latest[entry.action_id] = entry
     return latest
 
 
 def load_actions(
-    program_id: str, programs_root: Path = PROGRAMS_ROOT, *, repair_corruption: bool = True,
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+    *,
+    repair_corruption: bool = True,
+    include_rotated: bool = False,
 ) -> tuple[ActionItem, ...]:
-    path = get_actions_path(program_id, programs_root)
-    if repair_corruption and not path.exists():
+    paths = _action_log_paths(
+        program_id, programs_root, include_rotated=include_rotated,
+    )
+    if not paths and repair_corruption:
         return ()
     base_entries: dict[str, ActionItem] = {}
-    for record in _read_action_records(path, repair_corruption=repair_corruption):
-        record_type = record.get("record_type", "action")
-        if record_type != "action":
-            continue
-        # Strict field-presence gate: every action row must at least carry id, program_id,
-        # text, owner_alias, status, source_type, and created_at. The deeper parsers below
-        # will enforce type correctness; this is the top-level presence assertion.
-        validate_jsonl_row(
-            record,
-            required_fields=(
-                "id",
-                "program_id",
-                "text",
-                "owner_alias",
-                "status",
-                "source_type",
-                "created_at",
-            ),
-            field_name="action row",
-        )
-        action = _action_from_record(record, program_id=program_id)
-        if action.id not in base_entries:
-            base_entries[action.id] = action
-    latest_statuses = load_latest_action_statuses(program_id, programs_root, repair_corruption=repair_corruption)
+    for path in paths or (get_actions_path(program_id, programs_root),):
+        for record in _read_action_records(path, repair_corruption=repair_corruption):
+            record_type = record.get("record_type", "action")
+            if record_type != "action":
+                continue
+            # Strict field-presence gate: every action row must at least carry id, program_id,
+            # text, owner_alias, status, source_type, and created_at. The deeper parsers below
+            # will enforce type correctness; this is the top-level presence assertion.
+            validate_jsonl_row(
+                record,
+                required_fields=(
+                    "id",
+                    "program_id",
+                    "text",
+                    "owner_alias",
+                    "status",
+                    "source_type",
+                    "created_at",
+                ),
+                field_name="action row",
+            )
+            action = _action_from_record(record, program_id=program_id)
+            if action.id not in base_entries:
+                base_entries[action.id] = action
+    latest_statuses = load_latest_action_statuses(
+        program_id,
+        programs_root,
+        repair_corruption=repair_corruption,
+        include_rotated=include_rotated,
+    )
     return tuple(
         _apply_status_update(entry, latest_statuses.get(entry.id))
         for entry in base_entries.values()

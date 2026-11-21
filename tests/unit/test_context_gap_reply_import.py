@@ -33,7 +33,10 @@ def _origin_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_reply_origin_verification_is_revision_bound_pending_and_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.core.context_gap_reply_import import verify_context_reply_origin
+    from src.core.context_gap_reply_import import (
+        close_context_gap_reply,
+        verify_context_reply_origin,
+    )
     from src.core.ncfl_proposal_store import load_proposals, update_proposal_status
     from src.core.context_proposal_review import load_pending_context_proposal_rows
     from src.core.manual_registry_diff import render_workstream_registry_manual_diff
@@ -69,6 +72,77 @@ def test_reply_origin_verification_is_revision_bound_pending_and_idempotent(
     )
     assert accepted.acceptance_binding_error() is None
     assert len(accepted.decision_history) == 2
+
+
+def test_verified_reply_apply_records_bound_gap_resolution_and_reopens_on_reversion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.context_gap_reply_import import (
+        close_context_gap_reply,
+        verify_context_reply_origin,
+    )
+    from src.core.context_gap_store import (
+        load_context_gap_resolutions,
+        load_context_gaps,
+        rank_context_gaps,
+    )
+    from src.core.ncfl_proposal_store import update_proposal_status
+
+    programs, arguments, packet, proposal = _origin_workspace(tmp_path, monkeypatch)
+    assert proposal.solicitation_id == packet.id
+    assert proposal.gap_fingerprint == arguments["gap_fingerprint"]
+    verified = verify_context_reply_origin(
+        program_id="sample",
+        issue_number=1,
+        proposal_id=proposal.proposal_id,
+        actor="display-label",
+        reason="Origin checked against the original conversation.",
+        programs_root=programs,
+    )
+    accepted = update_proposal_status(
+        "sample",
+        proposal_id=proposal.proposal_id,
+        issue_number=1,
+        new_status="accepted",
+        actor="separate-approver",
+        programs_root=programs,
+    )
+
+    registry = programs / "sample" / "workstream_registry.yaml"
+    registry.write_text(
+        "workstreams:\n- id: deployment\n  deep_context:\n    why: The exact proposed answer.\n",
+        encoding="utf-8",
+    )
+    closed = close_context_gap_reply(
+        program_id="sample",
+        issue_number=1,
+        proposal_id=accepted.proposal_id,
+        actor="closure-operator",
+        reason="Manual edit independently verified against the accepted reply.",
+        programs_root=programs,
+    )
+
+    assert closed == accepted
+    resolution, = load_context_gap_resolutions(
+        "sample", programs_root=programs,
+    )
+    assert resolution.proposal_id == proposal.proposal_id
+    assert resolution.solicitation_id == packet.id
+    assert resolution.gap_fingerprint == arguments["gap_fingerprint"]
+    assert resolution.proposal_digest == verified.approval_payload_digest()
+    assert rank_context_gaps(
+        load_context_gaps("sample", programs_root=programs),
+        programs_root=programs,
+    ) == []
+
+    registry.write_text(
+        "workstreams:\n- id: deployment\n  deep_context:\n    why: null\n",
+        encoding="utf-8",
+    )
+    assert rank_context_gaps(
+        load_context_gaps("sample", programs_root=programs),
+        programs_root=programs,
+    )
 
 
 @pytest.mark.parametrize("problem", [

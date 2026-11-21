@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, TypedDict
 import os
@@ -21,6 +21,8 @@ from src.core.models_v2 import (
     DependencyStatus,
     DependencyType,
     LegacyDependency,
+    LifecycleEvent,
+    LifecycleEventKind,
     Signal,
 )
 from src.core.models import Confidence, WorkItem
@@ -39,6 +41,51 @@ def get_dependencies_path(program_id: str, programs_root: Path = PROGRAMS_ROOT) 
 
 def get_shared_dependencies_path(programs_root: Path = PROGRAMS_ROOT) -> Path:
     return programs_root / "dependencies.yaml"
+
+
+def record_dependency_lifecycle(
+    program_id: str,
+    dependency_id: str,
+    kind: LifecycleEventKind,
+    **kwargs: Any,
+) -> LifecycleEvent:
+    from src.core.risk_register_engine import _write_lifecycle_event
+    roots = kwargs.pop("programs_root", PROGRAMS_ROOT)
+    dependencies = list(load_dependencies(program_id, roots))
+    index = next((index for index, item in enumerate(dependencies) if item.id == dependency_id), None)
+    if index is None:
+        raise ConfigError(f"Unknown dependency '{dependency_id}' for program '{program_id}'.")
+    event = _write_lifecycle_event(
+        program_id, "dependency.lifecycle", dependency_id, kind,
+        actor=str(kwargs.pop("actor")), note=kwargs.pop("note", None),
+        effective=kwargs.pop("effective", None), next_review_at=kwargs.pop("next_review_at", None),
+        evidence_refs=tuple(kwargs.pop("evidence_refs", ())), occurred_at=kwargs.pop("occurred_at", None) or datetime.now(timezone.utc),
+        programs_root=roots,
+    )
+    current = dependencies[index]
+    if kind is LifecycleEventKind.BREACH:
+        dependencies[index] = replace(current, schedule_status=DependencyScheduleStatus.BLOCKED)
+    elif kind is LifecycleEventKind.CLOSURE:
+        dependencies[index] = replace(current, status=DependencyStatus.RESOLVED)
+    save_dependencies(program_id, tuple(dependencies), programs_root=roots)
+    return event
+
+
+def load_dependency_lifecycle(
+    program_id: str,
+    dependency_id: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+    as_of: datetime | None = None,
+) -> tuple[LifecycleEvent, ...]:
+    from src.core.risk_register_engine import _load_lifecycle_events
+    return _load_lifecycle_events(
+        program_id,
+        "dependency.lifecycle",
+        dependency_id,
+        programs_root=programs_root,
+        as_of=as_of,
+    )
 
 
 def load_dependencies(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[Dependency, ...]:

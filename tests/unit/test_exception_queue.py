@@ -393,11 +393,10 @@ def test_cli_exceptions_discloses_action_journal_rotation_limit(
     after = runner.invoke(app, args)
 
     assert after.exit_code == 0, after.output
-    assert "[overdue_action] old" not in after.output
-    assert "No matching exceptions in available inputs." in after.output
+    assert "[overdue_action] old" in after.output
     limitation = (
-        "Only the current action journal is read; rotated or pruned actions and status updates may be omitted. "
-        "Action statuses may be stale."
+        "Retained action journal segments are read in recorded filename order; pruned history "
+        "cannot establish completeness and concurrent rotation remains unqualified."
     )
     assert limitation in before.output
     assert limitation in after.output
@@ -410,7 +409,7 @@ def test_cli_exceptions_lists_ranked_queue_without_writing(tmp_path: Path, monke
     monkeypatch.setattr(cockpit_module, "PROGRAMS_ROOT", root)
     monkeypatch.setattr(cockpit_module, "load_risk_register", lambda *_a, **_k: (_risk("r1", reviewed=date(2026, 9, 1)),))
     monkeypatch.setattr(cockpit_module, "load_actions", lambda *_a, **_k: (_action("a1", due=date(2026, 11, 1)),))
-    monkeypatch.setattr(cockpit_module, "get_actions_path", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(cockpit_module, "has_action_history", lambda *_a, **_k: True)
     monkeypatch.setattr(cockpit_module, "get_risk_register_path", lambda *_a, **_k: tmp_path)
     result = runner.invoke(app, ["exceptions", "--program", "acme", "--as-of", "2026-11-15"])
     assert result.exit_code == 0, result.output
@@ -424,8 +423,8 @@ def test_cli_exceptions_lists_ranked_queue_without_writing(tmp_path: Path, monke
     )
     assert lines[4] == "  Risk exceptions use the risk register; primary judgment facts are not evaluated."
     assert lines[5] == (
-        "  Only the current action journal is read; rotated or pruned actions and status updates may be omitted. "
-        "Action statuses may be stale."
+        "  Retained action journal segments are read in recorded filename order; pruned history "
+        "cannot establish completeness and concurrent rotation remains unqualified."
     )
     assert lines[6] == "  Current files are evaluated using this date; historical state is not reconstructed."
     assert list(root.rglob("*")) == [root / "acme"]
@@ -444,8 +443,8 @@ def test_cli_exceptions_empty_program_reports_none(tmp_path: Path, monkeypatch: 
         "  Scope: unresolved dispatch reconciliation, unassessed risks, overdue actions, and stale risks only; "
         "other exceptions and input completeness are not evaluated.",
         "  Risk exceptions use the risk register; primary judgment facts are not evaluated.",
-        "  Only the current action journal is read; rotated or pruned actions and status updates may be omitted. "
-        "Action statuses may be stale.",
+        "  Retained action journal segments are read in recorded filename order; pruned history "
+        "cannot establish completeness and concurrent rotation remains unqualified.",
         "  Current files are evaluated using this date; historical state is not reconstructed.",
     ]
     assert list(root.rglob("*")) == [root / "acme"]

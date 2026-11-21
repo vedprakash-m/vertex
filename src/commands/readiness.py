@@ -116,6 +116,30 @@ def study_command(
     raise typer.Exit(code=0 if result.accepted else 1)
 
 
+@app.command("vertical-evaluate")
+def vertical_evaluate_command(
+    protocol: Path = typer.Option(..., "--protocol", help="Vertical comparison protocol JSON."),
+) -> None:
+    """Evaluate the local program artifact protocol without certifying external evidence."""
+    from src.core.vertical_artifact_evaluation import (
+        evaluate_vertical_artifact_protocol,
+        vertical_artifact_report_to_json,
+    )
+
+    try:
+        payload = json.loads(protocol.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("protocol must be a JSON object")
+        report = evaluate_vertical_artifact_protocol(payload)
+    except (UnicodeError, OSError, ValueError) as error:
+        typer.echo(f"Invalid vertical protocol: {error}", err=True)
+        raise typer.Exit(code=2) from error
+    typer.echo(
+        json.dumps(vertical_artifact_report_to_json(report), indent=2, sort_keys=True)
+    )
+    raise typer.Exit(code=0 if report.qualification_status.value == "qualified" else 1)
+
+
 def _study_rows(
     value: object, name: str, required: dict[str, tuple[type, ...]], optional: dict[str, tuple[type, ...]],
 ) -> list[dict[str, Any]]:

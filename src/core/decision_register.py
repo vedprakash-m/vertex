@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ import yaml
 
 from src.core.exceptions import ConfigError
 from src.core.journal import PROGRAMS_ROOT
-from src.core.models_v2 import DecisionEntry, DecisionStatus
+from src.core.models_v2 import DecisionEntry, DecisionStatus, LifecycleEvent, LifecycleEventKind
 from src.core.operation_trace import REF_TYPE_FACT, record_trace_link
 from src.core.signal_ref_utils import extract_work_item_refs
 
@@ -21,6 +22,51 @@ _STALE_PROPOSED_DAYS = 14
 
 def get_decisions_path(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> Path:
     return programs_root / program_id / "decisions.yaml"
+
+
+def record_decision_lifecycle(
+    program_id: str,
+    decision_id: str,
+    kind: LifecycleEventKind,
+    **kwargs: Any,
+) -> LifecycleEvent:
+    from src.core.risk_register_engine import _write_lifecycle_event
+    roots = kwargs.pop("programs_root", PROGRAMS_ROOT)
+    entries = list(load_decisions(program_id, roots))
+    index = next((index for index, item in enumerate(entries) if item.id == decision_id), None)
+    if index is None:
+        raise ConfigError(f"Unknown decision '{decision_id}' for program '{program_id}'.")
+    event = _write_lifecycle_event(
+        program_id, "decision.lifecycle", decision_id, kind, actor=str(kwargs.pop("actor")),
+        note=kwargs.pop("note", None), effective=kwargs.pop("effective", None),
+        next_review_at=kwargs.pop("next_review_at", None),
+        evidence_refs=tuple(kwargs.pop("evidence_refs", ())),
+        occurred_at=kwargs.pop("occurred_at", None) or datetime.now(timezone.utc),
+        programs_root=roots,
+    )
+    if kind is LifecycleEventKind.REVISIT:
+        entries[index] = replace(entries[index], last_reviewed_date=event.occurred_at.date())
+    elif kind is LifecycleEventKind.CLOSURE:
+        entries[index] = replace(entries[index], status=DecisionStatus.WITHDRAWN)
+    save_decisions(program_id, tuple(entries), roots)
+    return event
+
+
+def load_decision_lifecycle(
+    program_id: str,
+    decision_id: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+    as_of: datetime | None = None,
+) -> tuple[LifecycleEvent, ...]:
+    from src.core.risk_register_engine import _load_lifecycle_events
+    return _load_lifecycle_events(
+        program_id,
+        "decision.lifecycle",
+        decision_id,
+        programs_root=programs_root,
+        as_of=as_of,
+    )
 
 
 def load_decisions(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[DecisionEntry, ...]:

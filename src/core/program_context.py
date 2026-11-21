@@ -154,6 +154,14 @@ class RiskEntry:
     linked_workstream_ids: tuple[str, ...] = field(default_factory=tuple)
     linked_milestone_ids: tuple[str, ...] = field(default_factory=tuple)
     last_reviewed_date: date | None = None
+    dedupe_key: str | None = None
+    supersedes: str | None = None
+    superseded_by: str | None = None
+    escalation_state: str | None = None
+    contingency_trigger: str | None = None
+    residual_risk: str | None = None
+    outcome: str | None = None
+    effectiveness: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1356,6 +1364,14 @@ def _risk_entry_from_model(entry: FactRiskEntry) -> RiskEntry:
         linked_workstream_ids=entry.linked_workstream_ids,
         linked_milestone_ids=entry.linked_milestone_ids,
         last_reviewed_date=entry.last_reviewed_date,
+        dedupe_key=entry.dedupe_key,
+        supersedes=entry.supersedes,
+        superseded_by=entry.superseded_by,
+        escalation_state=entry.escalation_state,
+        contingency_trigger=entry.contingency_trigger,
+        residual_risk=entry.residual_risk,
+        outcome=entry.outcome,
+        effectiveness=entry.effectiveness,
     )
 
 
@@ -1477,6 +1493,14 @@ def _parse_risk(r: dict[str, Any]) -> RiskEntry:
         linked_workstream_ids=tuple(str(w) for w in r.get("linked_workstream_ids", [])),
         linked_milestone_ids=tuple(str(m) for m in r.get("linked_milestone_ids", [])),
         last_reviewed_date=lrd,
+        **{
+            field: str(r[field])
+            for field in (
+                "dedupe_key", "supersedes", "superseded_by", "escalation_state",
+                "contingency_trigger", "residual_risk", "outcome", "effectiveness",
+            )
+            if r.get(field) not in (None, "")
+        },
     )
 
 

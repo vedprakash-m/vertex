@@ -17,6 +17,7 @@ from src.core.claim_evidence_map import (
     ClaimEvidenceLink,
     FindingKind,
     evaluate_truth_consistency,
+    grounding_refs,
 )
 from src.core.jsonl_utils import (
     compute_file_checksum,
@@ -29,7 +30,7 @@ from src.core.jsonl_utils import (
 )
 from src.core.models import Confidence
 from src.core.models import WorkItem
-from src.core.models_v2 import ClaimEntry, ClaimStatusUpdate, DecisionAsk, ResurfacingPolicy
+from src.core.models_v2 import ClaimEntry, ClaimStatusUpdate, DecisionAsk, LifecycleEvent, LifecycleEventKind, ResurfacingPolicy
 from src.core.workspace_paths import PROGRAMS_ROOT
 
 
@@ -112,6 +113,10 @@ TrackedEntry = ClaimEntry | DecisionAsk
 ClaimLogEntry = ClaimEntry | DecisionAsk | ClaimStatusUpdate
 
 
+class ClaimJournalReadError(ValueError):
+    """The claim journal cannot be read without mutating it."""
+
+
 @dataclass(frozen=True, slots=True)
 class ClaimExtractionResult:
     claims: tuple[ClaimEntry, ...]
@@ -180,6 +185,61 @@ def append_claim_status_update(program_id: str, update: ClaimStatusUpdate, progr
     return target
 
 
+def record_claim_lifecycle(
+    program_id: str,
+    claim_id: str,
+    kind: LifecycleEventKind,
+    **kwargs: Any,
+) -> LifecycleEvent:
+    from src.core.risk_register_engine import _write_lifecycle_event
+    roots = kwargs.pop("programs_root", PROGRAMS_ROOT)
+    current = next(
+        (
+            claim
+            for claim in load_claim_entries(program_id, roots, repair_corruption=False)
+            if claim.id == claim_id
+        ),
+        None,
+    )
+    if current is None:
+        raise ValueError(f"Unknown claim '{claim_id}' for program '{program_id}'.")
+    event = _write_lifecycle_event(
+        program_id, "claim.lifecycle", claim_id, kind, actor=str(kwargs.pop("actor")),
+        note=kwargs.pop("note", None), effective=kwargs.pop("effective", None),
+        next_review_at=kwargs.pop("next_review_at", None),
+        evidence_refs=tuple(kwargs.pop("evidence_refs", ())),
+        occurred_at=kwargs.pop("occurred_at", None) or datetime.now(timezone.utc),
+        programs_root=roots,
+    )
+    if kind is LifecycleEventKind.CLOSURE:
+        append_claim_status_update(
+            program_id,
+            ClaimStatusUpdate(
+                claim_id=claim_id, new_status="resolved", updated_at=event.occurred_at,
+                updated_by=event.actor, note=event.note,
+            ),
+            roots,
+        )
+    return event
+
+
+def load_claim_lifecycle(
+    program_id: str,
+    claim_id: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+    as_of: datetime | None = None,
+) -> tuple[LifecycleEvent, ...]:
+    from src.core.risk_register_engine import _load_lifecycle_events
+    return _load_lifecycle_events(
+        program_id,
+        "claim.lifecycle",
+        claim_id,
+        programs_root=programs_root,
+        as_of=as_of,
+    )
+
+
 def touch_decision_ask(
     program_id: str,
     decision_ask_id: str,
@@ -202,12 +262,17 @@ def touch_decision_ask(
     )
 
 
-def read_claim_log(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[ClaimLogEntry, ...]:
+def read_claim_log(
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+    *,
+    repair_corruption: bool = True,
+) -> tuple[ClaimLogEntry, ...]:
     path = get_claims_path(program_id, programs_root)
     if not path.exists():
         return ()
     entries: list[ClaimLogEntry] = []
-    for record in _read_jsonl(path):
+    for record in _read_jsonl(path, repair_corruption=repair_corruption):
         raw_record_type = record.get("record_type", "claim")
         if not isinstance(raw_record_type, str):
             raise TypeError("record_type must be a string")
@@ -223,12 +288,17 @@ def read_claim_log(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tupl
     return tuple(entries)
 
 
-def load_claim_entries(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[ClaimEntry, ...]:
+def load_claim_entries(
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+    *,
+    repair_corruption: bool = True,
+) -> tuple[ClaimEntry, ...]:
     path = get_claims_path(program_id, programs_root)
     if not path.exists():
         return ()
     entries: list[ClaimEntry] = []
-    for raw_record in _read_jsonl(path):
+    for raw_record in _read_jsonl(path, repair_corruption=repair_corruption):
         raw_record_type = raw_record.get("record_type", "claim")
         if not isinstance(raw_record_type, str):
             raise TypeError("record_type must be a string")
@@ -250,13 +320,20 @@ def load_claim_entries(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> 
     return tuple(entries)
 
 
-def load_decision_asks(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[DecisionAsk, ...]:
+def load_decision_asks(
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+    *,
+    repair_corruption: bool = True,
+) -> tuple[DecisionAsk, ...]:
     path = get_claims_path(program_id, programs_root)
     if not path.exists():
         return ()
-    latest_statuses = load_latest_claim_statuses(program_id, programs_root)
+    latest_statuses = load_latest_claim_statuses(
+        program_id, programs_root, repair_corruption=repair_corruption,
+    )
     parsed: list[DecisionAsk] = []
-    for raw_record in _read_jsonl(path):
+    for raw_record in _read_jsonl(path, repair_corruption=repair_corruption):
         record_type = raw_record.get("record_type", "claim")
         if record_type != "decision_ask":
             continue
@@ -271,13 +348,31 @@ def load_decision_asks(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> 
     return tuple(_project_decision_ask_last_touch(entry, latest_statuses) for entry in parsed)
 
 
-def load_claim_status_updates(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[ClaimStatusUpdate, ...]:
-    return tuple(entry for entry in read_claim_log(program_id, programs_root) if isinstance(entry, ClaimStatusUpdate))
+def load_claim_status_updates(
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+    *,
+    repair_corruption: bool = True,
+) -> tuple[ClaimStatusUpdate, ...]:
+    return tuple(
+        entry
+        for entry in read_claim_log(
+            program_id, programs_root, repair_corruption=repair_corruption,
+        )
+        if isinstance(entry, ClaimStatusUpdate)
+    )
 
 
-def load_latest_claim_statuses(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> dict[str, ClaimStatusUpdate]:
+def load_latest_claim_statuses(
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+    *,
+    repair_corruption: bool = True,
+) -> dict[str, ClaimStatusUpdate]:
     latest: dict[str, ClaimStatusUpdate] = {}
-    for entry in read_claim_log(program_id, programs_root):
+    for entry in read_claim_log(
+        program_id, programs_root, repair_corruption=repair_corruption,
+    ):
         if isinstance(entry, ClaimStatusUpdate):
             latest[entry.claim_id] = entry
     return latest
@@ -290,20 +385,38 @@ def resolve_entry_status(entry: TrackedEntry, latest_statuses: dict[str, ClaimSt
     return entry.status
 
 
-def load_open_claims(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[ClaimEntry, ...]:
-    latest_statuses = load_latest_claim_statuses(program_id, programs_root)
+def load_open_claims(
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+    *,
+    repair_corruption: bool = True,
+) -> tuple[ClaimEntry, ...]:
+    latest_statuses = load_latest_claim_statuses(
+        program_id, programs_root, repair_corruption=repair_corruption,
+    )
     return tuple(
         entry
-        for entry in load_claim_entries(program_id, programs_root)
+        for entry in load_claim_entries(
+            program_id, programs_root, repair_corruption=repair_corruption,
+        )
         if resolve_entry_status(entry, latest_statuses) == "open"
     )
 
 
-def load_open_decision_asks(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[DecisionAsk, ...]:
-    latest_statuses = load_latest_claim_statuses(program_id, programs_root)
+def load_open_decision_asks(
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+    *,
+    repair_corruption: bool = True,
+) -> tuple[DecisionAsk, ...]:
+    latest_statuses = load_latest_claim_statuses(
+        program_id, programs_root, repair_corruption=repair_corruption,
+    )
     return tuple(
         entry
-        for entry in load_decision_asks(program_id, programs_root)
+        for entry in load_decision_asks(
+            program_id, programs_root, repair_corruption=repair_corruption,
+        )
         if resolve_entry_status(entry, latest_statuses) == "open"
     )
 
@@ -459,6 +572,7 @@ def extract_claims_from_confirmed_narratives(
                         entity_refs=refs,
                         ask_date=claim_date,
                         owner_alias=owner_alias,
+                        evidence_refs=refs,
                     )
                 )
                 continue
@@ -485,6 +599,7 @@ def extract_claims_from_confirmed_narratives(
                     claim_date=claim_date,
                     owner_alias=owner_alias,
                     due_date=due_date,
+                    evidence_refs=refs,
                 )
             )
 
@@ -548,7 +663,7 @@ def record_confirmed_claims(
             ClaimEvidenceLink(
                 claim_id=claim.id,
                 claim_text=claim.text,
-                evidence_refs=claim.entity_refs,
+                evidence_refs=grounding_refs(claim),
             )
             for claim in extracted.claims
         ),
@@ -858,7 +973,7 @@ def _normalize_claim_extraction_result(
                 issue_number=issue_number,
                 workstream_id=entry.workstream_id,
                 text=entry.text,
-                refs=tuple(entry.entity_refs),
+                refs=grounding_refs(entry),
                 due_date=entry.due_date,
             ),
             program_id=program_id,
@@ -866,10 +981,11 @@ def _normalize_claim_extraction_result(
             issue_number=issue_number,
             workstream_id=entry.workstream_id,
             text=entry.text,
-            entity_refs=tuple(entry.entity_refs),
+            entity_refs=grounding_refs(entry),
             claim_date=claim_date,
             owner_alias=entry.owner_alias,
             due_date=entry.due_date,
+            evidence_refs=grounding_refs(entry),
         )
         for entry in extraction_result.claims
     )
@@ -882,14 +998,14 @@ def _normalize_claim_extraction_result(
                 issue_number=issue_number,
                 workstream_id=None,
                 text=entry.text,
-                refs=tuple(entry.entity_refs),
+                refs=grounding_refs(entry),
                 due_date=None,
             ),
             program_id=program_id,
             edition_id=edition_id,
             issue_number=issue_number,
             text=entry.text,
-            entity_refs=tuple(entry.entity_refs),
+            entity_refs=grounding_refs(entry),
             ask_date=claim_date,
             owner_alias=entry.owner_alias,
             status=entry.status,
@@ -898,6 +1014,7 @@ def _normalize_claim_extraction_result(
             resurfacing_policy=entry.resurfacing_policy,
             affected_milestone_ids=tuple(entry.affected_milestone_ids),
             last_touched_at=entry.last_touched_at,
+            evidence_refs=grounding_refs(entry),
         )
         for entry in extraction_result.decision_asks
     )
@@ -983,7 +1100,9 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
     write_checksum_file(path)
 
 
-def _read_jsonl(path: Path) -> tuple[dict[str, Any], ...]:
+def _read_jsonl(
+    path: Path, *, repair_corruption: bool = True,
+) -> tuple[dict[str, Any], ...]:
     entries: list[dict[str, Any]] = []
     valid_lines: list[str] = []
     invalid_found = False
@@ -1003,6 +1122,10 @@ def _read_jsonl(path: Path) -> tuple[dict[str, Any], ...]:
             entries.append(payload)
             valid_lines.append(raw_line if raw_line.endswith("\n") else raw_line + "\n")
 
+    if invalid_found and not repair_corruption:
+        raise ClaimJournalReadError(
+            "claim journal contains invalid JSON; read-only inspection refused repair."
+        )
     if invalid_found:
         quarantine_and_rewrite_jsonl(path, valid_lines)
 
@@ -1033,6 +1156,7 @@ def _claim_to_record(entry: ClaimEntry) -> dict[str, Any]:
         "workstream_id": entry.workstream_id,
         "text": entry.text,
         "entity_refs": list(entry.entity_refs),
+        "evidence_refs": list(grounding_refs(entry)),
         "claim_date": entry.claim_date.isoformat(),
         "owner_alias": entry.owner_alias,
         "due_date": entry.due_date.isoformat() if entry.due_date is not None else None,
@@ -1064,7 +1188,10 @@ def _claim_from_record(record: dict[str, Any]) -> ClaimEntry:
         issue_number=_required_int(record["issue_number"], field_name="issue_number"),
         workstream_id=_optional_string(record.get("workstream_id"), field_name="workstream_id"),
         text=_required_string(record["text"], field_name="text"),
-        entity_refs=_string_tuple(record.get("entity_refs"), field_name="entity_refs"),
+        entity_refs=_string_tuple(
+            record.get("entity_refs", record.get("evidence_refs")),
+            field_name="entity_refs",
+        ),
         claim_date=_parse_date(record["claim_date"]),
         owner_alias=_optional_string(record.get("owner_alias"), field_name="owner_alias"),
         due_date=_parse_optional_date(record.get("due_date")),
@@ -1077,6 +1204,10 @@ def _claim_from_record(record: dict[str, Any]) -> ClaimEntry:
             _optional_string(record.get("claimed_status_family"), field_name="claimed_status_family"),
         ),
         claimed_status_value=_optional_string(record.get("claimed_status_value"), field_name="claimed_status_value"),
+        evidence_refs=_string_tuple(
+            record.get("evidence_refs", record.get("entity_refs")),
+            field_name="evidence_refs",
+        ),
     )
 
 
@@ -1089,6 +1220,7 @@ def _decision_ask_to_record(entry: DecisionAsk) -> dict[str, Any]:
         "issue_number": entry.issue_number,
         "text": entry.text,
         "entity_refs": list(entry.entity_refs),
+        "evidence_refs": list(grounding_refs(entry)),
         "ask_date": entry.ask_date.isoformat(),
         "owner_alias": entry.owner_alias,
         "status": entry.status,
@@ -1110,7 +1242,10 @@ def _decision_ask_from_record(record: dict[str, Any]) -> DecisionAsk:
         edition_id=_required_string(record["edition_id"], field_name="edition_id"),
         issue_number=_required_int(record["issue_number"], field_name="issue_number"),
         text=_required_string(record["text"], field_name="text"),
-        entity_refs=_string_tuple(record.get("entity_refs"), field_name="entity_refs"),
+        entity_refs=_string_tuple(
+            record.get("entity_refs", record.get("evidence_refs")),
+            field_name="entity_refs",
+        ),
         ask_date=_parse_date(record["ask_date"]),
         owner_alias=_optional_string(record.get("owner_alias"), field_name="owner_alias"),
         status=cast(Literal["open", "resolved", "deferred"], _status_val),
@@ -1119,6 +1254,10 @@ def _decision_ask_from_record(record: dict[str, Any]) -> DecisionAsk:
         resurfacing_policy=_resurfacing_policy_from_record(record.get("resurfacing_policy")),
         affected_milestone_ids=_string_tuple(record.get("affected_milestone_ids"), field_name="affected_milestone_ids"),
         last_touched_at=_parse_optional_datetime(record.get("last_touched_at")),
+        evidence_refs=_string_tuple(
+            record.get("evidence_refs", record.get("entity_refs")),
+            field_name="evidence_refs",
+        ),
     )
 
 

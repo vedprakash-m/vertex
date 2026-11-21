@@ -69,9 +69,13 @@ from src.core.nudge_query import NudgeADOClient, fetch_section_candidates
 from src.core.nudge_resolution import build_subject_prefix, resolve_sections
 from src.core.nudge_state_store import (
     compute_prune_before,
+    load_nudge_state,
     record_nudge_state,
     reset_nudge_item_state,
     update_nudge_state,
+)
+from src.core.communication_budget import (
+    assert_nudge_communication_budget,
 )
 from src.core.people_enrichment import maybe_alert_enrichment_due
 from src.core.program_fact_store import append_nudge_event
@@ -461,7 +465,6 @@ def _orchestrate(
     exempt_by_section: dict[int, int] = defaultdict(int)
 
     # State file retention: derive from max stale threshold × 3 (≥30 days)
-    # cooldown_days config is preserved for backward-compat but no longer drives filtering.
     max_stale_bd = max(
         (resolved_overrides.get(s.id, s.stale_business_days) for s in active_sections),
         default=7,
@@ -471,6 +474,11 @@ def _orchestrate(
     # Assign first-section ownership; apply exemptions and waivers only
     owned_by_section: dict[int, int] = {}  # item_id → owner section index
     total_waiver_filtered = 0
+    prior_nudge_state = {
+        entry.work_item_id: entry
+        for entry in load_nudge_state(state_path)
+        if entry.origin in {"mark_sent", "import_sent", "legacy_unknown"}
+    }
     for item_id, indices in item_memberships.items():
         if not indices:
             continue
@@ -481,6 +489,15 @@ def _orchestrate(
         if item_id in active_waiver_ids:
             waiver_by_section[first_idx] += 1
             total_waiver_filtered += 1
+            continue
+        prior = prior_nudge_state.get(item_id)
+        cooldown_days = active_sections[first_idx].cooldown_days or config.evaluation.cooldown_days
+        if (
+            prior is not None
+            and cooldown_days > 0
+            and now_utc - prior.nudged_at < timedelta(days=cooldown_days)
+        ):
+            exempt_by_section[first_idx] += 1
             continue
         owned_by_section[item_id] = first_idx
 
@@ -1357,6 +1374,20 @@ def _cmd_mark_sent(
     prior_index = _load_published_index(np.published_eml_index_path)
     source_run_id, item_ids = _extract_generated_item_ids_for_draft(np.audit_path, draft_filename=draft_path.name)
     content_hash, audience_manifest = _parse_eml_audience_manifest(draft_path, prior_index=prior_index)
+    raw_edition = load_yaml_mapping(
+        programs_root / program_id / "editions" / f"{program_id}_nudge.yaml",
+        required=True,
+    )
+    try:
+        assert_nudge_communication_budget(
+            raw_edition=raw_edition,
+            audience_manifest=audience_manifest,
+            prior_index=prior_index,
+            work_item_ids=item_ids,
+            now=claimed_sent_at,
+        )
+    except StateError as error:
+        raise typer.BadParameter(str(error)) from error
     if bound_solicitation:
         approvals = _load_draft_approvals(_approval_index_path(np))
         if not any(

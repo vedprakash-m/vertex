@@ -89,6 +89,7 @@ from src.commands.gather_pipeline.slice_contract_helpers import slice_contract_s
 from src.commands.gather_pipeline.source_ingestion_stage import build_signal_ingestion_captured_window as _build_signal_ingestion_captured_window_impl
 from src.commands.gather_pipeline.source_ingestion_stage import build_signal_source_ingestion_run_id as _build_signal_source_ingestion_run_id_impl
 from src.commands.gather_pipeline.source_ingestion_stage import record_optional_source_ingestion_runs as _record_optional_source_ingestion_runs_impl
+from src.commands.gather_pipeline.source_ingestion_stage import build_sprint_planning_custom_fields as _sprint_planning_custom_fields
 from src.commands.gather_pipeline.support import (
     build_captured_window as _build_captured_window,
     confidence_from_string as _confidence_from_string,
@@ -344,6 +345,8 @@ _BATCH_FIELDS = (
     "System.IterationPath",
     "System.ChangedDate",
     "Microsoft.VSTS.Scheduling.TargetDate",
+    "Microsoft.VSTS.Scheduling.StoryPoints",
+    "Microsoft.VSTS.Scheduling.Effort",
     "System.Tags",
     ADO_RISK_ASSESSMENT_FIELD,
     ADO_RISK_ASSESSMENT_COMMENT_FIELD,
@@ -401,6 +404,8 @@ _SPRINT_SNAPSHOT_FIELDS = (
     "State",
     "AreaPath",
     "IterationPath",
+    "StoryPoints",
+    "Effort",
 )
 
 @dataclass(frozen=True, slots=True)
@@ -2656,7 +2661,7 @@ def _work_item_from_sources(
         target_date=_parse_date(fields.get("Microsoft.VSTS.Scheduling.TargetDate") or raw.get("TargetDate")),
         risk_level=_infer_risk_level(state, tags, risk_assessment),
         tags=tags,
-        custom_fields={},
+        custom_fields=_sprint_planning_custom_fields(fields),
         revisions=_parse_revisions(work_item_id, revision_rows),
         comments=_parse_comments(work_item_id, comment_rows),
         fetched_at=fetched_at,

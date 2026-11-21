@@ -71,6 +71,16 @@ from src.core.models_v2 import (
     Workstream,
 )
 
+
+@dataclass(frozen=True, slots=True)
+class LongHorizonOutcome:
+    family: str
+    object_id: str
+    entity_refs: tuple[str, ...]
+    summary: str
+    status: str
+    recorded_at: datetime
+
 # Chronicle ProgramEvent (the fact-store event type)
 # NOTE: chronicle.ProgramEvent is for program-level narrative events; we use
 # a local FactStoreEvent for the fact-store feed.
@@ -735,6 +745,7 @@ class ProgramReality:
         _ledger_triage_decisions: tuple[CandidateDecisionRecord, ...] = (),
         _knowledge_scope_chain: tuple[str, ...] = (),
         _knowledge_claim_revisions: tuple[Any, ...] = (),
+        _programs_root: Path = PROGRAMS_ROOT,
     ) -> None:
         self._program_id = program_id
         self._snapshot = snapshot
@@ -766,6 +777,7 @@ class ProgramReality:
         self.__ledger_triage_decisions = _ledger_triage_decisions
         self.__knowledge_scope_chain = _knowledge_scope_chain
         self.__knowledge_claim_revisions = _knowledge_claim_revisions
+        self.__programs_root = _programs_root
 
     @classmethod
     def load(
@@ -1174,6 +1186,7 @@ class ProgramReality:
                 _ledger_triage_decisions=ledger_triage_decisions,
                 _knowledge_scope_chain=knowledge_scope_chain,
                 _knowledge_claim_revisions=knowledge_claim_revisions,
+                _programs_root=programs_root,
             )
 
     # -------------------------------------------------------------------------
@@ -1268,6 +1281,65 @@ class ProgramReality:
         lineage is attached from the underlying ProgramFactRevision.
         """
         return self.__commitments
+
+    def long_horizon_outcomes(
+        self,
+        entity_refs: tuple[str, ...] | list[str] = (),
+        *,
+        max_items: int = 8,
+        as_of: datetime | None = None,
+    ) -> tuple[LongHorizonOutcome, ...]:
+        if max_items < 1:
+            return ()
+        selected_at = as_of or self._as_of
+        requested = frozenset(str(ref) for ref in entity_refs if str(ref))
+        store = ProgramFactStore(
+            self._program_id, db_root=_resolve_fact_db_root(self.__programs_root)
+        )
+        revisions = store.list_accepted_revisions_for_types(
+            ("milestone.entry", "risk.entry", "decision.entry", "dependency.link"),
+            as_of=selected_at,
+            valid_at=selected_at,
+            limit=max(40, max_items * 8),
+        )
+        outcomes: list[LongHorizonOutcome] = []
+        seen: set[tuple[str, str]] = set()
+        terminal = {
+            "milestone.entry": {"completed", "deferred"},
+            "risk.entry": {"closed", "mitigated", "accepted"},
+            "decision.entry": {"decided", "superseded", "reverted", "withdrawn"},
+            "dependency.link": {"resolved", "broken"},
+        }
+        for revision in revisions:
+            payload = revision.payload
+            status = str(payload.get("status") or "").strip().lower()
+            if status not in terminal[revision.fact_type]:
+                continue
+            refs = tuple(revision.entity_refs)
+            if requested and not requested.intersection(refs):
+                continue
+            object_id = str(payload.get("id") or revision.fact_id)
+            key = (revision.fact_type, object_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            summary = (
+                str(payload.get("outcome") or "").strip()
+                or str(payload.get("decision") or "").strip()
+                or str(payload.get("resolution_path") or "").strip()
+                or str(payload.get("title") or payload.get("name") or object_id).strip()
+            )
+            outcomes.append(LongHorizonOutcome(
+                family=revision.fact_type.split(".", 1)[0],
+                object_id=object_id,
+                entity_refs=refs,
+                summary=summary,
+                status=status,
+                recorded_at=revision.recorded_at,
+            ))
+            if len(outcomes) >= max_items:
+                break
+        return tuple(outcomes)
 
     def metric_observations(self) -> tuple[FactAssessment, ...]:
         """Phase-3 placeholder: metric observations from reality_store arrive in WI-3.x."""

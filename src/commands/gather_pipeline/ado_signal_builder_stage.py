@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Callable
 from uuid import NAMESPACE_URL, uuid5
 
@@ -27,6 +28,7 @@ from src.core.m365_payload_support import optional_string as _optional_string
 from src.core.models import Confidence, WorkItem
 from src.core.models_v2 import Signal, Workstream
 from src.core.signal_ref_utils import merge_entity_refs
+from src.core.sprint_plan import build_ado_sprint_plan
 from src.core.workstream_path_resolver import (
     resolve_workstream_id_strict_longest as _resolve_workstream_id,
 )
@@ -134,6 +136,26 @@ def build_sprint_signals(
                 open_item_count=open_item_count,
                 pace_summary=pace_summary,
                 completion_pct=completion_pct,
+            )
+            sprint_plan = build_ado_sprint_plan(
+                iteration_path=iteration_path,
+                items=tuple(iteration_workstream_items),
+                capacity_per_day=(
+                    Decimal(str(capacity_summary["total_capacity_per_day"]))
+                    if capacity_summary is not None
+                    else None
+                ),
+                total_business_days=(
+                    int(pace_summary["total_business_days"])
+                    if pace_summary is not None
+                    else 0
+                ),
+                capacity_source_ref=(
+                    f"ADO:capacity:{team_name or 'project'}:{iteration_id or iteration_path}"
+                ),
+                sprint_snapshot_rows=sprint_snapshot_rows,
+                team_name=team_name,
+                iteration_id=iteration_id,
             )
             summary_parts = [
                 f"ADO sprint {iteration_name}",
@@ -247,6 +269,38 @@ def build_sprint_signals(
                         "members_with_capacity": None if capacity_summary is None else capacity_summary["members_with_capacity"],
                         "total_capacity_per_day": None if capacity_summary is None else capacity_summary["total_capacity_per_day"],
                         "days_off_entry_count": None if capacity_summary is None else capacity_summary["days_off_entry_count"],
+                        "sprint_plan": {
+                            "point_capacity": (
+                                str(sprint_plan.point_capacity)
+                                if sprint_plan.point_capacity is not None
+                                else None
+                            ),
+                            "selected": [
+                                {
+                                    "work_item_id": entry.work_item_id,
+                                    "story_points": str(entry.story_points),
+                                    "source_ref": entry.source_ref,
+                                }
+                                for entry in sprint_plan.selected
+                            ],
+                            "deferred": [
+                                {
+                                    "work_item_id": entry.work_item_id,
+                                    "reason": entry.reason,
+                                    "source_ref": entry.source_ref,
+                                }
+                                for entry in sprint_plan.deferred
+                            ],
+                            "omitted_work_item_ids": list(sprint_plan.omitted_work_item_ids),
+                            "selected_story_points": str(sprint_plan.selected_story_points),
+                            "remaining_story_points": (
+                                str(sprint_plan.remaining_story_points)
+                                if sprint_plan.remaining_story_points is not None
+                                else None
+                            ),
+                            "capacity_source_ref": sprint_plan.capacity_source_ref,
+                            "completed_sprint_refs": list(sprint_plan.completed_sprint_refs),
+                        },
                     },
                 )
             )

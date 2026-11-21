@@ -6,7 +6,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from src.ai.meeting_action_extractor import extract_llm_meeting_actions, run_meeting_action_extraction_pipeline
+from src.ai.meeting_action_extractor import (
+    _compute_residual_text,
+    extract_llm_meeting_actions,
+    run_meeting_action_extraction_pipeline,
+)
+from src.core.meeting_action import extract_deterministic_meeting_actions
 from src.core.ledger.event_log import read_events
 from src.core.models import RiskLevel, WorkItem
 
@@ -50,6 +55,23 @@ def test_empty_residual_text_short_circuits_without_calling_the_provider(tmp_pat
     )
     assert result == ()
     assert client.calls == 0
+
+
+def test_residual_preserves_malformed_markers_and_removes_only_exact_valid_markers() -> None:
+    valid = "  Action: Ship the doc | owner=alex  "
+    malformed = "Action: Follow up | owner=alex | owner=priya"
+    transcript = f"{valid}\n{malformed}\nPriya will follow up with legal."
+    deterministic = extract_deterministic_meeting_actions(
+        program_id="samplealpha",
+        meeting_ref="m1",
+        transcript_text=transcript,
+    )
+
+    residual = _compute_residual_text(transcript, deterministic)
+
+    assert valid not in residual
+    assert malformed in residual
+    assert "Priya will follow up with legal." in residual
 
 
 def test_valid_response_with_verbatim_source_span_is_released(tmp_path: Path) -> None:

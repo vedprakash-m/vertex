@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
-from typing import Any, TypedDict, cast
+from typing import Any, TypeVar, TypedDict, cast
 
-from src.core.models_v2 import RiskEntry
+from src.core.models_v2 import RiskEntry, RiskStatus
+
+_T = TypeVar("_T")
 
 RISK_LIFECYCLE_FIELDS = (
     "dedupe_key",
@@ -36,6 +38,60 @@ class RiskLifecycleFields(TypedDict, total=False):
     residual_risk: str
     outcome: str
     effectiveness: str
+
+
+def active_risk_entries(entries: tuple[RiskEntry, ...] | list[RiskEntry]) -> tuple[RiskEntry, ...]:
+    """Return the compact current risk working set used by reporting consumers."""
+    return tuple(
+        entry
+        for entry in entries
+        if entry.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}
+    )
+
+
+def merge_inactive_duplicate_provenance(
+    entries: tuple[RiskEntry, ...],
+) -> tuple[tuple[RiskEntry, ...], dict[str, str]]:
+    """Merge provenance from inactive duplicates into one unambiguous active record."""
+    groups: dict[str, list[RiskEntry]] = {}
+    for entry in entries:
+        groups.setdefault(entry.dedupe_key or derive_risk_dedupe_key(entry), []).append(entry)
+
+    merged_into: dict[str, str] = {}
+    replacement: dict[str, RiskEntry] = {}
+    for group in groups.values():
+        active = [entry for entry in group if entry.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}]
+        inactive = [entry for entry in group if entry.status in {
+            RiskStatus.CLOSED, RiskStatus.MITIGATED, RiskStatus.ACCEPTED,
+        }]
+        if len(active) != 1 or not inactive:
+            continue
+        current = active[0]
+        for previous in sorted(inactive, key=lambda entry: entry.id):
+            current = replace(
+                current,
+                linked_workstream_ids=_merge_unique(current.linked_workstream_ids, previous.linked_workstream_ids),
+                linked_work_item_ids=_merge_unique(current.linked_work_item_ids, previous.linked_work_item_ids),
+                linked_milestone_ids=_merge_unique(current.linked_milestone_ids, previous.linked_milestone_ids),
+                linked_claim_ids=_merge_unique(current.linked_claim_ids, previous.linked_claim_ids),
+                linked_action_ids=_merge_unique(current.linked_action_ids, previous.linked_action_ids),
+                entity_refs=_merge_unique(current.entity_refs, previous.entity_refs),
+                source_signal_ids=_merge_unique(current.source_signal_ids, previous.source_signal_ids),
+                supersedes=current.supersedes or previous.id,
+                residual_risk=current.residual_risk or previous.residual_risk,
+                outcome=current.outcome or previous.outcome,
+                effectiveness=current.effectiveness or previous.effectiveness,
+            )
+            merged_into[previous.id] = current.id
+        replacement[current.id] = current
+    return (
+        tuple(replacement.get(entry.id, entry) for entry in entries),
+        merged_into,
+    )
+
+
+def _merge_unique(current: tuple[_T, ...], retained: tuple[_T, ...]) -> tuple[_T, ...]:
+    return tuple(dict.fromkeys((*current, *retained)))
 
 
 def risk_lifecycle_record(entry: RiskEntry) -> dict[str, str]:

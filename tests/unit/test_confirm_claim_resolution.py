@@ -233,6 +233,34 @@ def test_evaluate_claim_evidence_gate_accepts_attributable_claims() -> None:
     assert report.results[0].forceable is False
 
 
+def test_evaluate_claim_evidence_gate_uses_shared_grounding_and_excludes_decision_asks() -> None:
+    extraction_result = ClaimExtractionResult(
+        claims=(
+            SimpleNamespace(
+                id="claim-1",
+                text="Ship the change.",
+                evidence_refs=("WI:1001",),
+                entity_refs=("WI:999",),
+            ),
+        ),
+        decision_asks=(
+            SimpleNamespace(
+                id="ask-1",
+                text="Choose the option.",
+                evidence_refs=(),
+                entity_refs=("WI:999",),
+            ),
+        ),
+    )
+
+    report = evaluate_claim_evidence_gate(
+        extraction_result,
+        items=(SimpleNamespace(id=1001),),
+    )
+
+    assert report.qg_results == {"RELO-QG-05": True}
+
+
 def test_prepare_claim_extraction_unresolved_edition_returns_empty(tmp_path: Path) -> None:
     reports_root = tmp_path / "repo" / "reports"
     reports_root.mkdir(parents=True)

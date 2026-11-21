@@ -1518,6 +1518,43 @@ class ProgramFactStore:
             ).fetchall()
         return tuple(self._row_to_revision(row) for row in rows)
 
+    def list_accepted_revisions_for_types(
+        self,
+        fact_types: tuple[str, ...],
+        *,
+        as_of: datetime,
+        valid_at: datetime | None = None,
+        limit: int = 200,
+    ) -> tuple[ProgramFactRevision, ...]:
+        if not fact_types or limit < 1 or not self._db_path.exists():
+            return ()
+        placeholders = ", ".join("?" for _ in fact_types)
+        world_time = valid_at or as_of
+        with open_program_db(self._db_path, read_only=True) as connection:
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'program_fact_revisions'"
+            ).fetchone() is None:
+                return ()
+            rows = connection.execute(
+                f"""
+                SELECT * FROM program_fact_revisions
+                WHERE program_id = ?
+                  AND review_state = ?
+                  AND fact_type IN ({placeholders})
+                  AND recorded_at <= ?
+                  AND (valid_from IS NULL OR valid_from <= ?)
+                  AND (valid_until IS NULL OR valid_until > ?)
+                ORDER BY recorded_at DESC, revision_id DESC
+                LIMIT ?
+                """,
+                (
+                    self._program_id, FactReviewState.ACCEPTED.value, *fact_types,
+                    _serialize_datetime(as_of), _serialize_datetime(world_time),
+                    _serialize_datetime(world_time), limit,
+                ),
+            ).fetchall()
+        return tuple(self._row_to_revision(row) for row in rows)
+
     def pin_snapshot(
         self,
         *,
