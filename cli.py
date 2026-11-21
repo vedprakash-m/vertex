@@ -320,6 +320,21 @@ def _parsed_startup_scope(
         parent, command = probe, child
 
 
+def _wrapped_target_is(fn: object, target: object) -> bool:
+    """Return True when ``fn`` unwraps to ``target`` via bounded ``__wrapped__`` links."""
+    seen: set[int] = set()
+    cur = fn
+    for _ in range(8):
+        if cur is target:
+            return True
+        seen.add(id(cur))
+        nxt = getattr_static(cur, "__wrapped__", None)
+        if nxt is None or id(nxt) in seen:
+            return False
+        cur = nxt
+    return cur is target
+
+
 class VertexRootGroup(TyperGroup):
     def resolve_command(
         self,
@@ -341,7 +356,7 @@ class VertexRootGroup(TyperGroup):
             if (
                 resolved[0] in {"report", "draft"}
                 and type(report) is TyperCommand
-                and getattr_static(report.callback, "__wrapped__", None) is report_command
+                and _wrapped_target_is(report.callback, report_command)
                 and report.context_class is click.Context
                 and type(report.context_settings) is dict
                 and report.context_settings.get("default_map") is None

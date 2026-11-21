@@ -501,7 +501,8 @@ commands:
         - --program
         - --to
       exceptions:
-        flags: []
+        flags:
+        - --extended
         value_options:
         - --as-of
         - --program

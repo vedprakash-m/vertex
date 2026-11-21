@@ -745,3 +745,50 @@ def test_milestone_observation_retains_coverage_and_replays_canonically():
     assert VerdictReason("milestone_evidence_incomplete", ("MILESTONE:m1",)) in observed.verdict.evidence_gaps
     assert VerdictReason("milestone_evidence_incomplete", ("MILESTONE:m2",)) not in observed.verdict.evidence_gaps
     assert {"MILESTONE:m1", "MILESTONE:m2"} <= set(observed.verdict.source_refs)
+
+
+def test_load_latest_program_verdict_picks_newest_across_archive_and_pub_confirmed(tmp_path: Path) -> None:
+    import json
+    from src.core.program_verdict import load_latest_program_verdict
+
+    root = tmp_path / "programs"
+    archive_base = root / "acme" / "archive" / "weekly"
+    (archive_base / "manifests").mkdir(parents=True)
+    (archive_base / "index.json").write_text(
+        json.dumps({"issues": [{"kind": "confirmed", "issue_number": 1}]}),
+        encoding="utf-8",
+    )
+    verdict_old = {
+        "schema_version": "program-verdict.v1",
+        "program_id": "acme",
+        "snapshot_id": "snap-1",
+        "as_of": "2026-10-01T00:00:00Z",
+        "health": "low",
+        "schedule_risk": "low",
+        "completion_phase": "unknown",
+        "confidence": "medium",
+        "reasons": [],
+        "evidence_gaps": [],
+        "leadership_asks": [],
+        "source_refs": [],
+    }
+    verdict_new = dict(verdict_old, health="high", as_of="2026-10-02T00:00:00Z")
+    (archive_base / "manifests" / "issue_001.manifest.json").write_text(
+        json.dumps({
+            "started_at": "2026-10-01T00:00:00Z",
+            "metadata": {"program_verdict_observation": {"mode": "observe", "verdict": verdict_old}},
+        }),
+        encoding="utf-8",
+    )
+    pub_dir = root / "acme" / "publications" / "weekly" / "issue_001"
+    pub_dir.mkdir(parents=True)
+    (pub_dir / "issue_001.manifest.json").write_text(
+        json.dumps({
+            "started_at": "2026-10-02T00:00:00Z",
+            "metadata": {"program_verdict_observation": {"mode": "observe", "verdict": verdict_new}},
+        }),
+        encoding="utf-8",
+    )
+    loaded = load_latest_program_verdict("acme", programs_root=root, confirmed_only=True)
+    assert loaded is not None
+    assert loaded.health == RiskLevel.HIGH

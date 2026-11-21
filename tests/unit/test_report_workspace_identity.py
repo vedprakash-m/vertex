@@ -476,11 +476,14 @@ def test_installed_cli_preserves_coherent_reports_and_unrelated_help(
     else:
         assert report._HISTORICAL_ISSUE_GUARD_MESSAGE in result.stdout
         loader.assert_called_once_with("weekly", reports_root=tmp_path / "reports", programs_root=root)
-    for hook in hooks:
-        if command == "config":
+    if command == "config":
+        for hook in hooks:
             hook.assert_not_called()
-        else:
-            hook.assert_called_once()
+    else:
+        hooks[0].assert_called_once()
+        # R0-FR-02: --dry-run skips scheduled DB maintenance and session catchup.
+        hooks[1].assert_not_called()
+        hooks[2].assert_not_called()
     assert not list(tmp_path.iterdir())
 
 

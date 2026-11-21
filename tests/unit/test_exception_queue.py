@@ -1030,3 +1030,77 @@ def test_cli_exceptions_extended_signals_read_only(
     assert "[unvalidated_binding] b-unvalidated" in ext_res.output
     assert "knowledge proposals" in ext_res.output
     assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == files_before
+
+
+def test_blocked_draft_skips_malformed_index_and_handles_missing_started_at(tmp_path: Path) -> None:
+    from src.core.exception_queue import load_blocked_draft_exceptions
+
+    root = tmp_path / "programs"
+    archive_dir = root / "synthetic" / "archive"
+    (archive_dir / "ed1").mkdir(parents=True)
+    (archive_dir / "ed1" / "index.json").write_text("{corrupt", encoding="utf-8")
+    (archive_dir / "ed2").mkdir(parents=True)
+    (archive_dir / "ed2" / "index.json").write_text(json.dumps({"issues": "invalid"}), encoding="utf-8")
+
+    pubs = root / "synthetic" / "publications"
+    pubs.mkdir(parents=True)
+    (pubs / "no_qg.manifest.json").write_text(json.dumps({"edition": "ed1", "issue_number": 1}), encoding="utf-8")
+    (pubs / "blocked.manifest.json").write_text(
+        json.dumps({"edition": "ed1", "issue_number": 2, "qg_results": {"QG-2": False}}),
+        encoding="utf-8",
+    )
+
+    items = load_blocked_draft_exceptions("synthetic", programs_root=root, as_of=AS_OF)
+    assert len(items) == 1
+    assert items[0].age_days == 0
+    assert "QG-2" in items[0].reason
+
+
+def test_exception_queue_missing_tables_and_naive_timestamps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlite3
+    from src.core.actuation_outbox import outbox_db_path
+    from src.core.exception_queue import (
+        get_program_reality_db_path,
+        load_approval_expiry_exceptions,
+        load_unvalidated_binding_exceptions,
+    )
+
+    monkeypatch.delenv("VERTEX_DB_PATH", raising=False)
+    root = tmp_path / "programs"
+    root.mkdir(parents=True)
+    db_path = get_program_reality_db_path("synthetic", programs_root=root)
+    db_path.parent.mkdir(parents=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE other (id TEXT)")
+    assert load_unvalidated_binding_exceptions("synthetic", programs_root=root, as_of=AS_OF) == ()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE reality_metric_source_bindings "
+            "(binding_id TEXT, program_id TEXT, metric_id TEXT, source_kind TEXT, valid_until TEXT, validated INTEGER, valid_from TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO reality_metric_source_bindings VALUES ('b1', 'synthetic', 'm1', 'ado', NULL, 0, '2026-10-01T00:00:00')"
+        )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        load_unvalidated_binding_exceptions("synthetic", programs_root=root, as_of=AS_OF)
+
+    ob_path = outbox_db_path("synthetic", programs_root=root)
+    ob_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(ob_path) as conn:
+        conn.execute("CREATE TABLE other (id TEXT)")
+    assert load_approval_expiry_exceptions("synthetic", programs_root=root, as_of=AS_OF) == ()
+
+    with sqlite3.connect(ob_path) as conn:
+        conn.execute(
+            "CREATE TABLE outbox_approvals (approval_id TEXT, intent_id TEXT, revision INTEGER, expires_at TEXT, evidence_expires_at TEXT, revoked_at TEXT)"
+        )
+        conn.execute("CREATE TABLE outbox_current_approvals (approval_id TEXT)")
+        conn.execute(
+            "INSERT INTO outbox_approvals VALUES ('ap1', 'i1', 1, '2026-10-01T00:00:00', '2026-10-01T00:00:00Z', NULL)"
+        )
+        conn.execute("INSERT INTO outbox_current_approvals VALUES ('ap1')")
+    with pytest.raises(ValueError, match="timezone-aware"):
+        load_approval_expiry_exceptions("synthetic", programs_root=root, as_of=AS_OF)

@@ -2247,7 +2247,7 @@ open.
 
 **ADO actuation outbox (RELO-W5.1, partial):** Only `create_task.v1` is dispatchable through the actuation outbox. `add_comment`, `add_tag` and `set_field` retain their existing direct-write path pending an owner ruling and operation-specific reconciliation; tag removal/replacement also call ADO directly. Uncertain create-task effects are reconciled only by marker lookup, never by blind resend.
 
-**Action-extraction parity (RELO-W4.5, partial):** `src/core/action_extraction_parity.py` provides a pure observe-only checker that normalizes outputs of the meeting and signal action-extraction pipelines and reports `missing_in_a`, `missing_in_b`, `owner_mismatch` and `due_mismatch` findings. Characterization tests pin the current pipeline differences; no pipeline is consolidated yet and the checker is not wired into any report.
+**Action-extraction parity (RELO-W4.5, partial):** `tests/support/action_extraction_parity.py` provides a pure observe-only checker that normalizes outputs of the meeting and signal action-extraction pipelines and reports `missing_in_a`, `missing_in_b`, `owner_mismatch` and `due_mismatch` findings. Characterization tests pin the current pipeline differences; no pipeline is consolidated yet and the checker is not wired into any report.
 
 **Snapshot gather provenance (RELO-W2.3, partial):** When persisting a fact
 snapshot, pass each fact's `gather_run_id` to newly created, superseding or

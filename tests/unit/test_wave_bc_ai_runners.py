@@ -483,3 +483,368 @@ def test_summary_generator_and_synthesizer_runners_and_commands(
             programs_root=tmp_path / "synth_bad",
         )
     assert SummaryGeneratorError is not SynthesizerError
+
+
+def test_runner_bridge_error_branches_and_cache_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.ai import _runner_bridge as bridge
+    from src.ai import summary_generator as sg_mod
+    from src.ai._pipeline import AIPipelineError
+
+    monkeypatch.setattr(bridge, "capture_operator_identity", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("no id")))
+    with pytest.raises(StateError, match="native OS principal"):
+        bridge.build_pinned_runner_context(program_id="demo", caller="test", feature="f", policy_version="v1", programs_root=tmp_path)
+
+    monkeypatch.setattr(bridge, "capture_operator_identity", lambda *_a, **_kw: SimpleNamespace(principal="  "))
+    with pytest.raises(StateError, match="native OS principal"):
+        bridge.build_pinned_runner_context(program_id="demo", caller="test", feature="f", policy_version="v1", programs_root=tmp_path)
+
+    monkeypatch.setattr(bridge, "capture_operator_identity", lambda *_a, **_kw: SimpleNamespace(principal="op@example.com"))
+    monkeypatch.setattr(
+        bridge.ProgramFactStore,
+        "pin_snapshot",
+        lambda self, **_kw: (_ for _ in ()).throw(ValueError("bad pin")),
+    )
+    with pytest.raises(StateError, match="snapshot could not be pinned"):
+        bridge.build_pinned_runner_context(program_id="demo", caller="test", feature="f", policy_version="v1", programs_root=tmp_path)
+
+    monkeypatch.setattr(
+        bridge.ProgramFactStore,
+        "pin_snapshot",
+        lambda self, **_kw: SimpleNamespace(program_id="other", content_sha256="a" * 64, snapshot_id="s1"),
+    )
+    monkeypatch.setattr(bridge.ProgramFactStore, "detect_drift", lambda self, _sid: False)
+    with pytest.raises(StateError, match="does not match"):
+        bridge.build_pinned_runner_context(program_id="demo", caller="test", feature="f", policy_version="v1", programs_root=tmp_path)
+
+    monkeypatch.setattr(
+        bridge.ProgramFactStore,
+        "pin_snapshot",
+        lambda self, **_kw: SimpleNamespace(program_id="demo", content_sha256="a" * 64, snapshot_id="s1"),
+    )
+    monkeypatch.setattr(bridge.ProgramFactStore, "detect_drift", lambda self, _sid: True)
+    with pytest.raises(StateError, match="changed before"):
+        bridge.build_pinned_runner_context(program_id="demo", caller="test", feature="f", policy_version="v1", programs_root=tmp_path)
+
+    program = Program(schema_version="2.0", id="demo", name="Demo")
+    workstream = Workstream(id="networking", name="Networking", description="Networking lane")
+    signal = Signal(
+        id="sig-1",
+        timestamp=datetime(2026, 5, 10, 10, 0, tzinfo=timezone.utc),
+        source="manual",
+        program_id="demo",
+        workstream_id="networking",
+        entity_refs=("WI:1234",),
+        text="Servicing validation moved to 2026-05-17.",
+        raw_ref=None,
+        confidence=Confidence.HIGH,
+    )
+
+    assert SummaryGenerator(client=None).generate_via_runner(
+        context=_ctx("demo", SUMMARY_POLICY_VERSION), program=program, workstream=workstream,
+        prior_summary=None, signals=(signal,), drift_patterns=(), programs_root=tmp_path,
+    ) is None
+    assert SummaryGenerator(client=_StaticClient({"text": "ok"})).generate_via_runner(
+        context=_ctx("demo", SUMMARY_POLICY_VERSION), program=program, workstream=workstream,
+        prior_summary="  ", signals=(), drift_patterns=(), programs_root=tmp_path,
+    ) is None
+
+    monkeypatch.setattr(sg_mod, "process_generated_text", lambda _t: (_ for _ in ()).throw(AIPipelineError("bad ai text")))
+    with pytest.raises(SummaryGeneratorError, match="bad ai text"):
+        SummaryGenerator(client=_StaticClient({"text": "Networking status WI:1234."})).generate_via_runner(
+            context=_ctx("demo", SUMMARY_POLICY_VERSION), program=program, workstream=workstream,
+            prior_summary=None, signals=(signal,), drift_patterns=(), programs_root=tmp_path / "sg_err",
+        )
+    monkeypatch.setattr(sg_mod, "process_generated_text", lambda t: SimpleNamespace(text=""))
+    assert SummaryGenerator(client=_StaticClient({"text": "Networking status WI:1234."})).generate_via_runner(
+        context=_ctx("demo", SUMMARY_POLICY_VERSION), program=program, workstream=workstream,
+        prior_summary=None, signals=(signal,), drift_patterns=(), programs_root=tmp_path / "sg_empty",
+    ) is None
+    monkeypatch.setattr(sg_mod, "process_generated_text", lambda t: SimpleNamespace(text=t))
+    monkeypatch.setattr(sg_mod, "_validate_semantics", lambda _t, **_kw: ["semantic finding"])
+    with pytest.raises(SummaryGeneratorError, match="semantic finding"):
+        SummaryGenerator(client=_StaticClient({"text": "Networking status WI:1234."})).generate_via_runner(
+            context=_ctx("demo", SUMMARY_POLICY_VERSION), program=program, workstream=workstream,
+            prior_summary=None, signals=(signal,), drift_patterns=(), programs_root=tmp_path / "sg_sem",
+        )
+
+    readers = (LeadershipReader(name="Jordan Lee", cares_about=("ramp timeline",)),)
+    assert anticipate_questions_via_runner(
+        context=_ctx("demo", ANTICIPATION_POLICY_VERSION),
+        readers=readers,
+        signals=(),
+        drift_patterns=(),
+        summaries={},
+        workstreams=(),
+        client=None,
+        program_id="demo",
+        programs_root=tmp_path,
+    ) == ()
+    drift = (
+        DriftPattern(
+            work_item_id=900001,
+            pattern="eta_drift",
+            severity="high",
+            detail="Target date slipped 3 times in the last 90 days.",
+            occurrences=3,
+            window_days=90,
+        ),
+    )
+
+    workstreams = (
+        WorkstreamData(
+            section_id="deployment_readiness",
+            title="Deployment Readiness",
+            blurb="Ramp timeline remains conditional.",
+            dependency_cascades=(),
+            items=(
+                WorkItem(
+                    id=900001,
+                    type="Feature",
+                    title="UD chunking rollout",
+                    state="Active",
+                    assigned_to="Operator",
+                    assigned_to_email="operator@example.com",
+                    area_path="One\\Adventure\\Acme\\Deployment",
+                    iteration_path="FY26\\Sprint 20",
+                    target_date=None,
+                    risk_level=RiskLevel.MEDIUM,
+                    tags=[],
+                    custom_fields={},
+                    revisions=[],
+                    comments=[],
+                    fetched_at=datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc),
+                ),
+            ),
+            citations=(),
+            review_state=ReviewState.PENDING,
+            risk=RiskLevel.MEDIUM,
+            prior_risk=RiskLevel.MEDIUM,
+            total_items=1,
+        ),
+    )
+
+    class _BoomClient:
+        deployment = "synthetic-deployment"
+
+        def structured(self, *_a, **_kw):
+            raise RuntimeError("provider down")
+
+    out = anticipate_questions_via_runner(
+        context=_ctx("demo", ANTICIPATION_POLICY_VERSION),
+        readers=readers,
+        signals=(),
+        drift_patterns=drift,
+        summaries={"deployment_readiness": "Ramp timeline remains conditional."},
+        workstreams=workstreams,
+        client=_BoomClient(),
+        program_id="demo",
+        programs_root=tmp_path / "ant",
+    )
+    assert len(out) >= 1
+
+    replay_root = tmp_path / "replay"
+    client = _StaticClient({"text": "Networking tracking WI:1234 moved target date cleanly."})
+    monkeypatch.setattr(sg_mod, "_validate_semantics", lambda _t, **_kw: [])
+    first = SummaryGenerator(client=client).generate_via_runner(
+        context=_ctx("demo", SUMMARY_POLICY_VERSION), program=program, workstream=workstream,
+        prior_summary=None, signals=(signal,), drift_patterns=(), programs_root=replay_root,
+    )
+    assert first is not None and len(client.calls) == 1
+    second = SummaryGenerator(client=client).generate_via_runner(
+        context=_ctx("demo", SUMMARY_POLICY_VERSION), program=program, workstream=workstream,
+        prior_summary=None, signals=(signal,), drift_patterns=(), programs_root=replay_root,
+    )
+    assert second is not None and second.text == first.text and len(client.calls) == 1
+
+
+def test_runner_bridge_unbound_and_lifecycle_failure_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.ai import _runner_bridge as bridge
+    SchemaGatewayError = bridge.SchemaGatewayError
+
+    res_unbound = bridge.run_structured_feature_via_runner(
+        feature="f",
+        task_class="synthesis",
+        context=_ctx("unbound", "v1"),
+        program_id=None,
+        prompt_version="v1",
+        policy_version="v1",
+        programs_root=tmp_path / "u1",
+        system_prompt="sys",
+        user_prompt="usr",
+        output_schema_text="{}",
+        request_payload={"k": "v"},
+        deployment_fingerprint="dep",
+        validator_version="v1",
+        invoke_provider=lambda _c: {"ok": True},
+        parse_and_validate=lambda r: r,
+        serialize_result=lambda _r, v: v,
+        error_factory=RuntimeError,
+    )
+    assert res_unbound == {"ok": True}
+
+    res_empty = bridge.run_structured_feature_via_runner(
+        feature="f",
+        task_class="synthesis",
+        context=_ctx("demo", "v1"),
+        program_id="demo",
+        prompt_version="v1",
+        policy_version="v1",
+        programs_root=tmp_path / "e1",
+        system_prompt="sys",
+        user_prompt="usr",
+        output_schema_text="{}",
+        request_payload={"k": "v"},
+        deployment_fingerprint="dep",
+        validator_version="v1",
+        invoke_provider=lambda _c: {"ok": False},
+        parse_and_validate=lambda _r: None,
+        serialize_result=lambda r, _v: r,
+        error_factory=RuntimeError,
+        raise_on_rejection=False,
+        empty_value=None,
+    )
+    assert res_empty is None
+
+    with pytest.raises(RuntimeError, match="provider boom"):
+        bridge.run_structured_feature_via_runner(
+            feature="f",
+            task_class="synthesis",
+            context=_ctx("demo", "v1"),
+            program_id="demo",
+            prompt_version="v1",
+            policy_version="v1",
+            programs_root=tmp_path / "p1",
+            system_prompt="sys",
+            user_prompt="usr",
+            output_schema_text="{}",
+            request_payload={"k": "v"},
+            deployment_fingerprint="dep",
+            validator_version="v1",
+            invoke_provider=lambda _c: (_ for _ in ()).throw(RuntimeError("provider boom")),
+            parse_and_validate=lambda r: r,
+            serialize_result=lambda _r, v: v,
+            error_factory=RuntimeError,
+            provider_error_map=None,
+        )
+
+    monkeypatch.setattr(bridge, "record_ai_run_lifecycle", lambda **_kw: (_ for _ in ()).throw(RuntimeError("lc down")))
+    with pytest.raises(RuntimeError, match="lc down"):
+        bridge.run_structured_feature_via_runner(
+            feature="f",
+            task_class="synthesis",
+            context=_ctx("demo", "v1"),
+            program_id="demo",
+            prompt_version="v1",
+            policy_version="v1",
+            programs_root=tmp_path / "lc1",
+            system_prompt="sys",
+            user_prompt="usr",
+            output_schema_text="{}",
+            request_payload={"k": "v"},
+            deployment_fingerprint="dep",
+            validator_version="v1",
+            invoke_provider=lambda _c: {"ok": True},
+            parse_and_validate=lambda r: r,
+            serialize_result=lambda _r, v: v,
+            error_factory=RuntimeError,
+        )
+    monkeypatch.undo()
+    monkeypatch.setattr(bridge, "validate_bounded_payload", lambda _p: (_ for _ in ()).throw(SchemaGatewayError("bad gw")))
+    with pytest.raises(RuntimeError, match="bad gw"):
+        bridge.run_structured_feature_via_runner(
+            feature="f",
+            task_class="synthesis",
+            context=_ctx("demo", "v1"),
+            program_id="demo",
+            prompt_version="v1",
+            policy_version="v1",
+            programs_root=tmp_path / "sgw1",
+            system_prompt="sys",
+            user_prompt="usr",
+            output_schema_text="{}",
+            request_payload={"k": "v"},
+            deployment_fingerprint="dep",
+            validator_version="v1",
+            invoke_provider=lambda _c: {"ok": True},
+            parse_and_validate=lambda r: r,
+            serialize_result=lambda _r, v: v,
+            error_factory=RuntimeError,
+        )
+    monkeypatch.undo()
+
+    # Anticipation engine runner state mismatch propagation & non-state fallback logging.
+    from src.ai import anticipation_engine as ae_mod
+
+    readers = (LeadershipReader(name="Jordan Lee", cares_about=("ramp timeline",)),)
+    drift = (
+        DriftPattern(
+            work_item_id=900001,
+            pattern="eta_drift",
+            severity="high",
+            detail="Target date slipped 3 times in the last 90 days.",
+            occurrences=3,
+            window_days=90,
+        ),
+    )
+    workstreams = (
+        WorkstreamData(
+            section_id="deployment_readiness",
+            title="Deployment Readiness",
+            blurb="Ramp timeline remains conditional.",
+            dependency_cascades=(),
+            items=(
+                WorkItem(
+                    id=900001,
+                    type="Feature",
+                    title="UD chunking rollout",
+                    state="Active",
+                    assigned_to="Operator",
+                    assigned_to_email="operator@example.com",
+                    area_path="One\\Adventure\\Acme\\Deployment",
+                    iteration_path="FY26\\Sprint 20",
+                    target_date=None,
+                    risk_level=RiskLevel.MEDIUM,
+                    tags=[],
+                    custom_fields={},
+                    revisions=[],
+                    comments=[],
+                    fetched_at=datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc),
+                ),
+            ),
+            citations=(),
+            review_state=ReviewState.PENDING,
+            risk=RiskLevel.MEDIUM,
+            prior_risk=RiskLevel.MEDIUM,
+            total_items=1,
+        ),
+    )
+    with pytest.raises(StateError, match="program must match"):
+        anticipate_questions_via_runner(
+            context=_ctx("other", ANTICIPATION_POLICY_VERSION),
+            readers=readers,
+            signals=(),
+            drift_patterns=drift,
+            summaries={"deployment_readiness": "Ramp timeline remains conditional."},
+            workstreams=workstreams,
+            client=_StaticClient({"question": "Why?", "suggested_response": "Check dates."}),
+            program_id="demo",
+            programs_root=tmp_path / "ae_mismatch",
+        )
+    monkeypatch.setattr(ae_mod, "run_structured_feature_via_runner", lambda **_kw: (_ for _ in ()).throw(RuntimeError("soft")))
+    fallback_qs = anticipate_questions_via_runner(
+        context=_ctx("demo", ANTICIPATION_POLICY_VERSION),
+        readers=readers,
+        signals=(),
+        drift_patterns=drift,
+        summaries={"deployment_readiness": "Ramp timeline remains conditional."},
+        workstreams=workstreams,
+        client=_StaticClient({"question": "Why?", "suggested_response": "Check dates."}),
+        program_id="demo",
+        programs_root=tmp_path / "ae_soft",
+    )
+    assert len(fallback_qs) >= 1
+
