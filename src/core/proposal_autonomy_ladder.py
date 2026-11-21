@@ -40,6 +40,7 @@ from src.core.maturity_engine import (
     load_earned_autonomy_state,
     write_proposal_class_state,
 )
+from src.core.maturity_evidence import MaturityTransitionEvidence, append_maturity_transition
 from src.core.proposal_audit import ProposalType, read_proposal_audit
 
 #: The five proposal classes this ladder governs today -- exactly the
@@ -239,6 +240,20 @@ def advance_proposal_class_autonomy(
     write_proposal_class_state(program_id, proposal_class, new_entry, programs_root=programs_root)
 
     if changed:
+        append_maturity_transition(
+            MaturityTransitionEvidence(
+                program_id=program_id,
+                proposal_class=proposal_class,
+                from_level=evaluation.current_level,
+                to_level=evaluation.proposed_level,
+                action=evaluation.action,
+                reason=evaluation.reason,
+                evaluated_at=resolved_now,
+                counters=_counter_payload(counters),
+                ceiling=evaluation.ceiling,
+            ),
+            programs_root=programs_root,
+        )
         try:
             append_or_suppress_alert(
                 program_id=program_id,
@@ -305,6 +320,20 @@ def promote_proposal_class_explicit(
         sample_rate=resolved_sample_rate,
     )
     write_proposal_class_state(program_id, proposal_class, entry, programs_root=programs_root)
+    append_maturity_transition(
+        MaturityTransitionEvidence(
+            program_id=program_id,
+            proposal_class=proposal_class,
+            from_level=existing.level if existing else "l0",
+            to_level=to_level,
+            action="promoted",
+            reason=reason,
+            evaluated_at=resolved_now,
+            counters=_counter_payload(counters),
+            ceiling=ceiling,
+        ),
+        programs_root=programs_root,
+    )
     try:
         append_or_suppress_alert(
             program_id=program_id,
@@ -351,6 +380,24 @@ def demote_proposal_class_explicit(
         sample_rate=existing.sample_rate if existing else 1.0,
     )
     write_proposal_class_state(program_id, proposal_class, entry, programs_root=programs_root)
+    append_maturity_transition(
+        MaturityTransitionEvidence(
+            program_id=program_id,
+            proposal_class=proposal_class,
+            from_level=current_level,
+            to_level=new_level,
+            action="demoted",
+            reason=reason,
+            evaluated_at=resolved_now,
+            counters=_counter_payload(counters),
+            ceiling=resolve_ceiling(
+                proposal_class,
+                program_id=program_id,
+                programs_root=programs_root,
+            ),
+        ),
+        programs_root=programs_root,
+    )
     try:
         append_or_suppress_alert(
             program_id=program_id,
@@ -366,6 +413,17 @@ def demote_proposal_class_explicit(
     except Exception:
         pass
     return entry
+
+
+def _counter_payload(counters: ProposalClassCounters) -> dict[str, int]:
+    return {
+        "proposals": counters.proposals,
+        "accepted": counters.accepted,
+        "edited": counters.edited,
+        "rejected": counters.rejected,
+        "reversals": counters.reversals,
+        "material_errors": counters.material_errors,
+    }
 
 
 __all__ = [

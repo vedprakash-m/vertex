@@ -7,6 +7,7 @@
 
 ## Changelog
 
+- Last updated: 2026-11-21 — Add a reproducible, privacy-preserving RELO-W6 UAT package for Outlook Desktop/Web/iOS and projector review (§12.10). The package hashes local artifacts and renders a checklist but never copies private mail/client data; live observations, blind-review outcomes and owner approval remain external evidence.
 - Last updated: 2026-11-19 — Knowledge triage exposes class/review state, explicit review and renewal commands, verified resolution and retained lifecycle history (§12.10a).
 - Last updated: 2026-11-19 — RELO-D19 adds no newsletter or reader-facing chrome. Confirm may report that typed governed feedback was recorded; proposal lifecycle refusal reports the missing governance stage, and active feedback policy is unavailable when its approved version is expired or absent.
 
@@ -1095,6 +1096,10 @@ Bounded backup creation refuses linked/reparse or unsupported roots/members and 
 Backup manifests with repeated decoded property names fail explicitly, even when values agree or the manifest is legacy. Verify uses the existing human/JSON/CSV exit-2 error; restore refuses before destination mutation even with skipped preflight, and reference search reports malformed input rather than silently discarding declarations. Valid uniquely declared manifests remain compatible; the error does not echo arbitrary values or imply authenticated inventory (RELO-W0.13g).
 
 The `verify_relo --closeout` operator report begins with `NOT ASSESSED`, separates generated traceability from evidence-packet completeness, and names only stable requirement/work-item/budget identifiers plus missing field names. It lists one remaining record for current staffing, one for current economics, and one per selected NFR budget; real values and owner identities remain outside public output unless an operator deliberately selects a private packet. Human and JSON forms never display approval success as qualification, and exit 6 remains insufficient-evidence behavior even when all packet fields are mechanically present (RELO-W0.12/W0.13/W0.14).
+
+RELO-W6 UAT is a two-part operator surface. `scripts/prepare_relo_w6_uat.py` creates `w6-uat-manifest.json` and `w6-uat-checklist.md` in an explicitly selected private output directory. The manifest contains only edition/issue identity, profile label, source file name, byte length and SHA-256; the checklist covers Outlook Desktop/Web/iOS, projector 1920x1080, 680px outer/640px content bounds, link/table/bullet readability, light/dark behavior, minimum projector text size, contrast, blind review, material non-regression and owner disposition. The script returns exit 2 when a required profile is absent. It does not copy mailboxes, recipients, source paths, private artifacts, tokens or reviewer content and does not itself establish client rendering or publication approval.
+
+Terminal-state verification is operator-facing, not reader-facing. Human mode prefixes a supplied W6 terminal packet with `EXACT terminal state` but still prints the governance `NOT ASSESSED` projection and `not product-vision completion`; JSON carries the exact state, failed predicates and limitations separately. Missing or malformed live evidence remains unassessed and must never be rendered as a warning-free success.
 
 Status shows risk-fact configuration failures as unavailable with correction-before-retry guidance, consistently in human/JSON/CSV. Successful empty risk facts keep their existing absent summary; unrelated available status facts remain visible and raw exception details are not displayed. This does not change status exit codes or publication gates (RELO-W0.15k).
 

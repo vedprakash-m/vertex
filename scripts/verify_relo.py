@@ -2060,6 +2060,12 @@ def _decision_projection(spec_path: Path) -> dict:
 
 
 def _print_terminal_state(report: dict) -> None:
+    if "w6_terminal_evidence" in report:
+        evidence = report["w6_terminal_evidence"]
+        print(
+            f"EXACT terminal state: {evidence['terminal_state']} "
+            f"({evidence['assessment']}; not product-vision completion)"
+        )
     print(f"NOT ASSESSED terminal state: {report['reason']}")
     for key in _TERMINAL_SECTIONS:
         print(f"{key}: {json.dumps(report[key], sort_keys=True)}")
@@ -2090,6 +2096,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--as-of", help="Explicit UTC timestamp used for reproducible evidence-packet freshness checks.")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable results.")
     parser.add_argument("--terminal-state", action="store_true", help="Report the read-only terminal-state evidence gap (never certifies).")
+    parser.add_argument(
+        "--w6-evidence",
+        type=Path,
+        help="Optional explicit W6.12 evidence packet used to evaluate the exact terminal-state predicates.",
+    )
     parser.add_argument("--closeout", action="store_true", help="Assess RELO-W0.12/W0.13/W0.14 mechanical closeout (never certifies).")
     parser.add_argument("--packet", type=Path, help="Optional evidence packet for --closeout.")
     args = parser.parse_args(argv)
@@ -2097,6 +2108,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--closeout and --terminal-state are mutually exclusive")
     if args.packet is not None and not args.closeout:
         parser.error("--packet requires --closeout")
+    if args.w6_evidence is not None and not args.terminal_state:
+        parser.error("--w6-evidence requires --terminal-state")
     if args.closeout:
         report = assess_closeout(
             args.repo_root,
@@ -2114,6 +2127,23 @@ def main(argv: list[str] | None = None) -> int:
         ) else 6
     if args.terminal_state:
         report = assess_terminal_state(args.repo_root, spec_path=args.spec, budgets_path=args.budgets)
+        if args.w6_evidence is not None:
+            try:
+                from src.core.relo_w6 import terminal_state_from_evidence
+
+                selected = json.loads(args.w6_evidence.read_text(encoding="utf-8"))
+                if not isinstance(selected, dict):
+                    raise ValueError("terminal evidence must be an object")
+                report["w6_terminal_evidence"] = terminal_state_from_evidence(selected)
+            except (ImportError, OSError, UnicodeError, json.JSONDecodeError, ValueError):
+                report["w6_terminal_evidence"] = {
+                    "terminal_state": None,
+                    "assessment": "not_assessed",
+                    "missing_fields": ["input"],
+                    "invalid_fields": ["w6_evidence"],
+                    "failed_gates": [],
+                    "limitations": ["The selected W6 evidence packet was unavailable or invalid."],
+                }
         if args.json:
             print(json.dumps(report, indent=2))
         else:

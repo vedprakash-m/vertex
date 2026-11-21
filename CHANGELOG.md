@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-21
+
+| Feature | Change |
+|---|---|
+| RELO-W6 local qualification infrastructure | Add strict, value-free enrollment templates and evidence verification for RELO-W6.1 through W6.12, including dual-label/kappa and matched-cycle gates, separated deterministic/local/cache/routing economics, blind UAT rubric enrollment, dependency-gated retirement and canonical traceability, maturity/feedback/continuity evidence, frozen scale/restore profiles, typed learning dispositions and exact terminal-state predicates. Mechanically complete packets remain `owner_review`; live labels, owner approval, provider qualification, Outlook/projector UAT, private evidence and restore drills are not fabricated. |
+| W6 telemetry and UAT evidence preparation | Add a read-only tier-measurement shadow reducer that preserves missing/unclassified decisions, a privacy-preserving UAT manifest/checklist preparer, repository-path and artifact-hash checks, and canonical owner runbook guidance. |
+| Maturity transition evidence | Append digest-bound per-proposal-class promotion/demotion evidence with counters, ceiling, reason and UTC transition time while preserving the existing earned-autonomy state file. |
+| W6 terminal-state semantics | Extend `verify_relo.py --terminal-state` with an explicit `--w6-evidence` predicate packet. Exact RELO terminal states are reported separately from the existing governance gap projection and always keep product-vision completion false. |
+
+Modified/added files: `src/core/relo_w6.py`, `src/core/maturity_evidence.py`, `src/core/proposal_autonomy_ladder.py`, `src/core/study_evaluator.py`, `src/commands/readiness.py`, `scripts/verify_relo_w6.py`, `scripts/run_relo_w6_shadow_harness.py`, `scripts/prepare_relo_w6_uat.py`, `scripts/verify_relo.py`, `tests/contracts/cli_reference_snapshot.md`, `governance/runbooks/relo-w6-qualification-runbook.md`, and the canonical PRD/Tech/UX specs. Tests: `tests/unit/test_relo_w6_qualification.py`, `tests/unit/test_study_evaluator_and_metric_parity.py`, `tests/unit/test_verify_relo_terminal_state.py`, and `tests/unit/test_proposal_autonomy_ladder.py`.
+
+Qualification boundary: this change completes local enrollment, mechanical verification, deterministic reducer, transition evidence, UAT packaging, retirement/traceability, holdout/scale and terminal-state tooling. It does not execute the eight-cycle study, blind live evaluation, owner decisions, private-data copy, Outlook/projector UAT, restore drill or provider qualification; those remain explicit nonlocal evidence and blocker states.
+
 ## 2026-11-20
 
 | Feature | Change |

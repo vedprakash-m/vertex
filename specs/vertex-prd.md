@@ -7,6 +7,7 @@
 
 ## Changelog
 
+- Last updated: 2026-11-21 — Add RELO-W6 local qualification enrollment and evidence contracts for dual-label study, matched cycles, routing/economics, blind UAT, dependency-gated retirement, canonical traceability, maturity transitions, governed feedback, continuity holdouts, scale/restore profiles and terminal-state predicates (§18.1, §19.2). These tools enroll and verify owner-selected evidence; live labels, client/projector UAT, private-data review, owner decisions, provider qualification and restore execution remain separate acceptance gates.
 - Last updated: 2026-11-19 — Knowledge candidates cover the eight required maintained-context classes and retain explicit OS-principal review/renewal plus verified resolution history; live policy population and qualification remain gated (§7.4, §10.2).
 - Last updated: 2026-11-19 — Ratified RELO-D19 (ADR-0020 decision 17): only typed, approved, evidence-linked feedback remains reusable. Confirm now records hash-only governed telemetry, while offline proposals require privacy, contamination, development, frozen-holdout, human-approval and shadow gates before promotion; rollback restores a governed prior version. Raw edit-pattern learning and confirm-time distillation are no longer runtime prompt inputs.
 
@@ -2286,6 +2287,10 @@ These are properties that must hold at all times. Violations are bugs.
 
 **Two-lane evaluation harness:** promotion/demotion evidence is gathered through two separated lanes, per `(program_id, proposal_class)`. A **CI regression lane** gates every code/prompt merge against a synthetic fixture corpus — fast, deterministic, always-on. A **human-holdout lane** gates enforce-mode promotion itself — real labeled outcomes from a human reviewer, never a synthetic fixture. An LLM-as-judge may assist the holdout lane's diagnostics (surfacing likely-mislabeled cases for human review) but is never treated as sole ground truth for a promotion decision — only a human holdout label counts. `vertex cockpit`'s trust view (§9.28) surfaces current level, precision, acceptance rate, and promotion evidence per proposal class.
 
+**RELO-W6 qualification evidence:** `scripts/verify_relo_w6.py` creates value-free enrollment packets and mechanically verifies RELO-W6.1-W6.12 without collecting or authenticating private evidence. Study enrollment requires frozen dual-label/model-assisted labeling, explicit human adjudication, risk and dependency strata, post-RELO source diversity, and at least eight complete matched cycles. Routing enrollment keeps deterministic/local coverage separate from cache reuse and reports the unavailable or below-floor case rather than claiming avoidance. Blind output UAT records only artifact identity and checklist state locally; live Outlook/projector observations and reviewer decisions remain owner evidence.
+
+Retirement packets must name replacement paths, caller inventories, shadow/tests, dependency readiness and rollback evidence. Maturity transitions are append-only per proposal/action class; governed feedback remains typed and cannot self-update. Continuity, scale/restore and terminal-state packets fail closed on missing frozen profiles, hash parity, owner decisions or operator proficiency. A mechanically complete packet is `owner_review`, not production qualification; synthetic tests never satisfy a live evidence gate.
+
 ---
 
 ## §19 Success Criteria
@@ -2327,6 +2332,7 @@ Evidence refresh: full execution evidence is recorded in `governance/test-eviden
 | `vertex doctor --kb` validates knowledge integrity | No structural errors |
 | Live dry-run smoke completes | `vertex report --edition acme_weekly --dry-run` succeeds |
 | V-11 production readiness | All coding-implementable workstreams (WS-1…WS-25) code-complete; contract tests + unit tests passing (exact counts derived at CI time by `scripts/derive_spec_counts.py`; as of 2026-06-16: ~1,259 contracts + ~4,700+ unit); remaining items are OPERATOR/HUMAN GATE/CALENDAR gates documented in `.archive/specs/gaps.md` (local-only) |
+| RELO-W6 local qualification enrollment | Every W6.1-W6.12 packet has a strict template/verifier; nonlocal owner/live/provider/UAT/restore evidence remains explicitly unassessed |
 
 ### 19.3 Phase Scope Boundaries
 

@@ -6511,6 +6511,7 @@ Manage launch readiness snapshots.
 | `fetch` |  |
 | `show` |  |
 | `study` | Evaluate local study evidence and emit the statistical result as JSON. |
+| `w6` | Verify one explicit W6 evidence packet without certifying external gates. |
 
 #### `vertex readiness fetch`
 
@@ -6545,6 +6546,18 @@ Evaluate local study evidence and emit the statistical result as JSON.
 | Option | Type | Required | Default | Description |
 |---|---|---|---|---|
 | --evidence PATH | path | Yes |  | Path to the matched-cycle and label-audit JSON. |
+
+#### `vertex readiness w6`
+
+**Usage:** `vertex readiness w6 [OPTIONS]`
+
+Verify one explicit W6 evidence packet without certifying external gates.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --evidence PATH | path | Yes |  | Path to a RELO-W6 evidence packet JSON. |
 
 ### `vertex registry`
 

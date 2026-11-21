@@ -26,6 +26,7 @@ from src.core.study_evaluator import (
     StudyEvaluationResult,
     evaluate_matched_cycles,
 )
+from src.core.relo_w6 import verify_w6_packet
 from src.core.readiness_engine import (
     ReadinessConfig,
     ReadinessDimensionConfig,
@@ -114,6 +115,24 @@ def study_command(
         raise typer.Exit(code=2) from error
     typer.echo(rendered)
     raise typer.Exit(code=0 if result.accepted else 1)
+
+
+@app.command("w6")
+def w6_evidence_command(
+    evidence: Path = typer.Option(..., "--evidence", help="Path to a RELO-W6 evidence packet JSON."),
+) -> None:
+    """Verify one explicit W6 evidence packet without certifying external gates."""
+    try:
+        document = json.loads(evidence.read_text(encoding="utf-8"))
+        result = verify_w6_packet(
+            document,
+            repo_root=Path(__file__).resolve().parents[2],
+        )
+    except (UnicodeError, OSError, ValueError, OverflowError) as error:
+        typer.echo(f"Invalid W6 evidence: {error}", err=True)
+        raise typer.Exit(code=2) from error
+    typer.echo(json.dumps(result.to_payload(), indent=2, allow_nan=False, sort_keys=True))
+    raise typer.Exit(code=0 if result.classification == "owner_review" else 1)
 
 
 def _study_rows(
