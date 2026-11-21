@@ -1505,6 +1505,10 @@ commands:
         flags: []
         value_options:
         - --evidence
+      w6:
+        flags: []
+        value_options:
+        - --evidence
   reconcile:
     callback:
       flags:
