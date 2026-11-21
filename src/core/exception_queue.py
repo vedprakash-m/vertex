@@ -5,6 +5,7 @@ Ranks existing signals only; computes nothing new and writes nothing.
 
 from __future__ import annotations
 
+from collections import defaultdict
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -13,7 +14,9 @@ from pathlib import Path
 from src.core.actuation_outbox import outbox_db_path
 from src.core._db import open_program_db
 from src.core.action_tracker import assess_action_staleness
+from src.core.context_gap_store import ContextGapRecord, load_context_gaps
 from src.core.models_v2 import ActionItem, RiskEntry, RiskImpact, RiskProbability, RiskStatus
+from src.core.reality_store import get_program_reality_db_path
 from src.core.risk_register_engine import assess_risk_staleness
 
 _ACTIVE_RISK_STATUSES = {RiskStatus.OPEN, RiskStatus.ESCALATED}
@@ -44,8 +47,9 @@ def build_exception_queue(
     as_of: date,
     *,
     dispatch_exceptions: tuple[DispatchException, ...] = (),
+    extended_exceptions: tuple[ExceptionItem, ...] = (),
 ) -> tuple[ExceptionItem, ...]:
-    """Rank: needs_input (0) > overdue_action (1) > stale_risk (2); ties by oldest, then id."""
+    """Rank: severity 0 (needs_input/dispatch/blocked_draft) > 1 (action/gap/binding) > 2 (stale); ties by oldest, then id."""
     items: list[ExceptionItem] = []
     for risk in risks:
         review_date = risk.last_reviewed_date or risk.identified_date
@@ -79,6 +83,7 @@ def build_exception_queue(
             dispatch.reason,
             dispatch.evidence,
         ))
+    items.extend(extended_exceptions)
     return tuple(sorted(items, key=lambda item: (item.severity_rank, -item.age_days, item.subject_id)))
 
 
@@ -149,9 +154,167 @@ def load_dispatch_exceptions(
     return tuple(exceptions)
 
 
+def _confirmed_issue_keys(program_id: str, *, programs_root: Path) -> set[tuple[str, int]]:
+    confirmed: set[tuple[str, int]] = set()
+    for base in (programs_root / program_id / "archive", programs_root.parent / "archive" / program_id):
+        if not base.is_dir():
+            continue
+        for index_path in sorted(base.glob("*/index.json")):
+            edition = index_path.parent.name
+            try:
+                payload = json.loads(index_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            raw_issues = payload.get("issues") if isinstance(payload, dict) else None
+            if not isinstance(raw_issues, list):
+                continue
+            for entry in raw_issues:
+                if isinstance(entry, dict) and entry.get("kind") == "confirmed":
+                    issue_number = entry.get("issue_number")
+                    if isinstance(issue_number, int) and not isinstance(issue_number, bool):
+                        confirmed.add((edition, issue_number))
+    return confirmed
+
+
+def load_blocked_draft_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only scan of unconfirmed draft manifests failing one or more quality gates."""
+    publications_dir = programs_root / program_id / "publications"
+    if not publications_dir.is_dir():
+        return ()
+    confirmed = _confirmed_issue_keys(program_id, programs_root=programs_root)
+    items: list[ExceptionItem] = []
+    for path in sorted(publications_dir.glob("*.manifest.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Publication manifest is not an object: {path.name}")
+        qg_results = payload.get("qg_results")
+        if not isinstance(qg_results, dict):
+            continue
+        failed_gates = sorted(str(gate) for gate, passed in qg_results.items() if passed is False)
+        if not failed_gates:
+            continue
+        edition = str(payload.get("edition") or "unknown")
+        issue_number = payload.get("issue_number")
+        if isinstance(issue_number, int) and not isinstance(issue_number, bool) and (edition, issue_number) in confirmed:
+            continue
+        raw_started = payload.get("started_at")
+        if isinstance(raw_started, str):
+            started = datetime.fromisoformat(raw_started.replace("Z", "+00:00"))
+            if started.utcoffset() is None:
+                raise ValueError(f"Publication manifest timestamp is naive: {path.name}")
+            age_days = max(0, (as_of - started.astimezone(timezone.utc).date()).days)
+        else:
+            age_days = 0
+        manifest_id = str(payload.get("manifest_id") or path.stem)
+        items.append(ExceptionItem(
+            kind="blocked_draft",
+            subject_id=manifest_id,
+            severity_rank=0,
+            age_days=age_days,
+            reason=f"Draft {edition}#{issue_number} blocked by {', '.join(failed_gates)}.",
+            evidence=f"publications/{path.name}",
+        ))
+    return tuple(items)
+
+
+def load_context_gap_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only projection of context/source gaps in _feedback/context_gaps.jsonl."""
+    records = load_context_gaps(program_id, programs_root=programs_root)
+    grouped: dict[tuple[str, str | None, str], list[ContextGapRecord]] = defaultdict(list)
+    for rec in records:
+        grouped[(rec.feature, rec.lane, rec.field)].append(rec)
+    items: list[ExceptionItem] = []
+    for (feature, lane, field_name), group in sorted(grouped.items(), key=lambda entry: (entry[0][0], entry[0][1] or "", entry[0][2])):
+        latest = max(group, key=lambda rec: rec.ts)
+        age_days = max(0, (as_of - latest.ts.astimezone(timezone.utc).date()).days)
+        severity_rank = 0 if latest.severity == "feature_blocked" else 1
+        suffix = f" ({len(group)} signals)" if len(group) > 1 else ""
+        items.append(ExceptionItem(
+            kind="source_gap",
+            subject_id=f"{feature}:{lane or 'global'}:{field_name}",
+            severity_rank=severity_rank,
+            age_days=age_days,
+            reason=f"[{latest.severity}] {latest.message}{suffix}",
+            evidence=f"_feedback/context_gaps.jsonl#{feature}:{field_name}",
+        ))
+    return tuple(items)
+
+
+def load_unvalidated_binding_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only check for active unvalidated metric source bindings in the reality DB."""
+    db_path = get_program_reality_db_path(program_id, programs_root=programs_root)
+    if not db_path.is_file():
+        return ()
+    wal_path = db_path.with_name(f"{db_path.name}-wal")
+    use_immutable = not wal_path.exists() or wal_path.stat().st_size == 0
+    with open_program_db(db_path, read_only=True, immutable=use_immutable) as connection:
+        has_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reality_metric_source_bindings'"
+        ).fetchone()
+        if has_table is None:
+            return ()
+        rows = connection.execute(
+            """
+            SELECT binding_id, metric_id, source_kind, valid_from
+            FROM reality_metric_source_bindings
+            WHERE program_id = ? AND valid_until IS NULL AND validated = 0
+            ORDER BY metric_id ASC, binding_id ASC
+            """,
+            (program_id,),
+        ).fetchall()
+    items: list[ExceptionItem] = []
+    for binding_id, metric_id, source_kind, valid_from_text in rows:
+        valid_from = datetime.fromisoformat(str(valid_from_text).replace("Z", "+00:00"))
+        if valid_from.utcoffset() is None:
+            raise ValueError("Stored metric source binding timestamp is not timezone-aware")
+        age_days = max(0, (as_of - valid_from.astimezone(timezone.utc).date()).days)
+        items.append(ExceptionItem(
+            kind="unvalidated_binding",
+            subject_id=str(binding_id),
+            severity_rank=1,
+            age_days=age_days,
+            reason=f"Metric binding for {metric_id} ({source_kind}) is unvalidated.",
+            evidence=f"vertex-db/{program_id}#binding:{binding_id}",
+        ))
+    return tuple(items)
+
+
+def load_extended_exception_signals(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only loader for RELO-W4.12 extended operational exception signals."""
+    return (
+        load_blocked_draft_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+        + load_context_gap_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+        + load_unvalidated_binding_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+    )
+
+
 __all__ = [
     "DispatchException",
     "ExceptionItem",
     "build_exception_queue",
+    "load_blocked_draft_exceptions",
+    "load_context_gap_exceptions",
     "load_dispatch_exceptions",
+    "load_extended_exception_signals",
+    "load_unvalidated_binding_exceptions",
 ]

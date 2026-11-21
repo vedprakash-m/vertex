@@ -2635,7 +2635,7 @@ evaluator cannot detect (Section 8.15.1).
 **Usage:** `vertex cockpit exceptions [OPTIONS]`
 
 RELO-W4.12: read-only prioritized exception queue ranked from existing
-risk-register and action-journal signals. Writes nothing.
+risk-register, action-journal, and optional extended operational signals. Writes nothing.
 
 **Options**
 
@@ -2643,6 +2643,7 @@ risk-register and action-journal signals. Writes nothing.
 |---|---|---|---|---|
 | --program TEXT | text | Yes |  | Program id, e.g. acme. |
 | --as-of TEXT | text | No |  | Date (YYYY-MM-DD) for age checks, not historical replay (default: today, UTC). |
+| --extended | boolean | No | False | Include blocked drafts, source/context gaps, and unvalidated metric bindings. |
 
 ### `vertex calibration`
 

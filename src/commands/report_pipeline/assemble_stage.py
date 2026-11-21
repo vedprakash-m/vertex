@@ -2163,6 +2163,7 @@ def _synthesize_v2_ai_content(
     ai_context: _DraftAIContext | None,
     trace_file: Path | None = None,
     archive_root: Path | None = None,
+    use_structured_runner: bool = False,
 ) -> _AISynthesisResult:
     return _synthesize_v2_ai_content_impl(
         bundle=bundle,
@@ -2185,6 +2186,7 @@ def _synthesize_v2_ai_content(
         ai_context=ai_context,
         trace_file=trace_file,
         archive_root=archive_root,
+        use_structured_runner=use_structured_runner,
         create_ai_client=_create_ai_client,
         draft_exec_summary_runner=draft_exec_summary,
         generate_workstream_blurb_runner=generate_workstream_blurb,

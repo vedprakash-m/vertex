@@ -682,3 +682,144 @@ def test_other_cockpit_commands_preserve_root_startup(monkeypatch: pytest.Monkey
     for hook in hooks:
         hook.assert_called_once()
     assert ai_mode._CURRENT_MODE is ai_mode.AIMode.ACTIVE
+
+
+def test_cli_exceptions_extended_signals_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.context_gap_store import append_context_gap
+    from src.core.exception_queue import (
+        load_blocked_draft_exceptions,
+        load_context_gap_exceptions,
+        load_unvalidated_binding_exceptions,
+    )
+    from src.core.metric_models import MetricSourceBinding
+
+    root = tmp_path / "programs"
+    prog_dir = root / "synthetic"
+    pubs_dir = prog_dir / "publications"
+    archive_edition_dir = prog_dir / "archive" / "synthetic_weekly"
+    pubs_dir.mkdir(parents=True)
+    archive_edition_dir.mkdir(parents=True)
+
+    # Already-confirmed draft is skipped even if its archived manifest had a soft gate fail;
+    # unconfirmed failing draft surfaces as blocked_draft.
+    (archive_edition_dir / "index.json").write_text(
+        json.dumps({"issues": [{"kind": "confirmed", "issue_number": 10}]}),
+        encoding="utf-8",
+    )
+    (pubs_dir / "draft-10.manifest.json").write_text(
+        json.dumps({
+            "manifest_id": "synthetic_weekly-10-confirmed",
+            "edition": "synthetic_weekly",
+            "issue_number": 10,
+            "started_at": "2026-11-10T00:00:00+00:00",
+            "qg_results": {"QG-9": False},
+        }),
+        encoding="utf-8",
+    )
+    (pubs_dir / "draft-11.manifest.json").write_text(
+        json.dumps({
+            "manifest_id": "synthetic_weekly-11-blocked",
+            "edition": "synthetic_weekly",
+            "issue_number": 11,
+            "started_at": "2026-11-12T00:00:00+00:00",
+            "qg_results": {"QG-8": False, "QG-1": True},
+        }),
+        encoding="utf-8",
+    )
+    (pubs_dir / "draft-ok.manifest.json").write_text(
+        json.dumps({
+            "manifest_id": "synthetic_weekly-13-passing",
+            "edition": "synthetic_weekly",
+            "issue_number": 13,
+            "started_at": "2026-11-12T00:00:00+00:00",
+            "qg_results": {"QG-1": True},
+        }),
+        encoding="utf-8",
+    )
+    assert load_blocked_draft_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
+    assert load_unvalidated_binding_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
+    (pubs_dir / "non-dict.manifest.json").write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="not an object"):
+        load_blocked_draft_exceptions("synthetic", programs_root=root, as_of=AS_OF)
+    (pubs_dir / "non-dict.manifest.json").unlink()
+
+    (pubs_dir / "naive.manifest.json").write_text(
+        json.dumps({
+            "manifest_id": "naive",
+            "edition": "synthetic_weekly",
+            "issue_number": 12,
+            "started_at": "2026-11-12T00:00:00",
+            "qg_results": {"QG-8": False},
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="naive"):
+        load_blocked_draft_exceptions("synthetic", programs_root=root, as_of=AS_OF)
+    (pubs_dir / "naive.manifest.json").unlink()
+
+    append_context_gap(
+        feature="report",
+        program="synthetic",
+        lane="core",
+        field="workiq_latest",
+        severity="feature_blocked",
+        message="Missing WorkIQ summary",
+        impact_estimate="high",
+        programs_root=root,
+        deduplicate=False,
+    )
+    append_context_gap(
+        feature="report",
+        program="synthetic",
+        lane="core",
+        field="workiq_latest",
+        severity="feature_blocked",
+        message="Missing WorkIQ summary",
+        impact_estimate="high",
+        programs_root=root,
+        deduplicate=False,
+    )
+
+    store = RealityStore("synthetic", db_root=tmp_path / "vertex-db")
+    store.initialize()
+    store.upsert_metric_source_binding(
+        MetricSourceBinding(
+            binding_id="b-unvalidated",
+            metric_id="synthetic.availability",
+            program_id="synthetic",
+            source_kind="kusto",
+            cluster="https://cluster.kusto.windows.net",
+            database="Db",
+            kql_template="T | count",
+            result_column="Count",
+            validated=False,
+            valid_from=datetime(2026, 11, 11, 0, 0, tzinfo=timezone.utc),
+        )
+    )
+
+    monkeypatch.setattr(cockpit_module, "PROGRAMS_ROOT", root)
+    monkeypatch.delenv("VERTEX_DB_PATH", raising=False)
+    files_before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    assert len(load_context_gap_exceptions("synthetic", programs_root=root, as_of=AS_OF)) == 1
+    assert len(load_unvalidated_binding_exceptions("synthetic", programs_root=root, as_of=AS_OF)) == 1
+
+    default_res = runner.invoke(app, ["exceptions", "--program", "synthetic", "--as-of", AS_OF.isoformat()])
+    assert default_res.exit_code == 0, default_res.output
+    assert "[blocked_draft]" not in default_res.output
+
+    ext_res = runner.invoke(
+        app,
+        ["exceptions", "--program", "synthetic", "--as-of", AS_OF.isoformat(), "--extended"],
+    )
+    assert ext_res.exit_code == 0, ext_res.output
+    assert "[blocked_draft] synthetic_weekly-11-blocked" in ext_res.output
+    assert "synthetic_weekly-10-confirmed" not in ext_res.output
+    assert "[source_gap] report:core:workiq_latest" in ext_res.output
+    assert "(2 signals)" in ext_res.output
+    assert "[unvalidated_binding] b-unvalidated" in ext_res.output
+    assert "source/context gaps, unvalidated bindings" in ext_res.output
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == files_before

@@ -49,7 +49,11 @@ from src.core.cockpit_models import (
 )
 from src.core.workspace_paths import is_bare_identifier
 from src.core.action_tracker import get_actions_path, load_actions
-from src.core.exception_queue import build_exception_queue, load_dispatch_exceptions
+from src.core.exception_queue import (
+    build_exception_queue,
+    load_dispatch_exceptions,
+    load_extended_exception_signals,
+)
 from src.core.risk_register_engine import get_risk_register_path, load_risk_register
 from src.core.alerts import StateError, append_or_suppress_alert, read_alerts
 from src.core.edition_resolver import PROGRAMS_ROOT
@@ -951,9 +955,14 @@ def cockpit_exceptions(
     as_of: str | None = typer.Option(
         None, "--as-of", help="Date (YYYY-MM-DD) for age checks, not historical replay (default: today, UTC).",
     ),
+    extended: bool = typer.Option(
+        False,
+        "--extended",
+        help="Include blocked drafts, source/context gaps, and unvalidated metric bindings.",
+    ),
 ) -> None:
     """RELO-W4.12: read-only prioritized exception queue ranked from existing
-    risk-register and action-journal signals. Writes nothing."""
+    risk-register, action-journal, and optional extended operational signals. Writes nothing."""
     _validate_cockpit_selection(program, PROGRAMS_ROOT)
     try:
         as_of_date = datetime.now(timezone.utc).date() if as_of is None else date.fromisoformat(as_of)
@@ -967,11 +976,17 @@ def cockpit_exceptions(
     dispatch_exceptions = load_dispatch_exceptions(
         program, programs_root=PROGRAMS_ROOT, as_of=as_of_date,
     )
+    extended_exceptions = (
+        load_extended_exception_signals(program, programs_root=PROGRAMS_ROOT, as_of=as_of_date)
+        if extended
+        else ()
+    )
     queue = build_exception_queue(
         load_risk_register(program, PROGRAMS_ROOT),
         actions,
         as_of_date,
         dispatch_exceptions=dispatch_exceptions,
+        extended_exceptions=extended_exceptions,
     )
     lines = [f"Exception queue ({program}, as of {as_of_date.isoformat()}): {len(queue)}"]
     lines.extend(
@@ -987,10 +1002,17 @@ def cockpit_exceptions(
         missing_inputs.append("action journal")
     if missing_inputs:
         lines.append(f"  Inputs not detected when checked: {', '.join(missing_inputs)}.")
-    lines.append(
-        "  Scope: unresolved dispatch reconciliation, unassessed risks, overdue actions, and stale risks only; "
-        "other exceptions and input completeness are not evaluated."
-    )
+    if extended:
+        lines.append(
+            "  Scope: unresolved dispatch reconciliation, blocked drafts, unassessed risks, "
+            "source/context gaps, unvalidated bindings, overdue actions, and stale risks; "
+            "input completeness is not evaluated."
+        )
+    else:
+        lines.append(
+            "  Scope: unresolved dispatch reconciliation, unassessed risks, overdue actions, and stale risks only; "
+            "other exceptions and input completeness are not evaluated."
+        )
     lines.append("  Risk exceptions use the risk register; primary judgment facts are not evaluated.")
     lines.append(
         "  Only the current action journal is read; rotated or pruned actions and status updates may be omitted. "
