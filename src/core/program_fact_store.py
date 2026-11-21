@@ -2530,6 +2530,7 @@ def _build_claim_entry_facts(
                 "workstream_id": entry.workstream_id,
                 "text": entry.text,
                 "entity_refs": list(entry.entity_refs),
+                "evidence_refs": list(entry.evidence_refs or entry.entity_refs),
                 "claim_date": _serialize_date(entry.claim_date),
                 "owner_alias": entry.owner_alias,
                 "due_date": _serialize_date(entry.due_date),
@@ -2589,6 +2590,7 @@ def _build_decision_ask_facts(
                 "issue_number": entry.issue_number,
                 "text": entry.text,
                 "entity_refs": list(entry.entity_refs),
+                "evidence_refs": list(entry.evidence_refs or entry.entity_refs),
                 "ask_date": _serialize_date(entry.ask_date),
                 "owner_alias": entry.owner_alias,
                 "status": entry.status,
@@ -3038,6 +3040,12 @@ def _claim_entry_from_fact(fact: ProgramFactRevision) -> ClaimEntry:
         workstream_id=_deserialize_optional_string(payload.get("workstream_id")),
         text=str(payload["text"]),
         entity_refs=tuple(str(value) for value in payload.get("entity_refs") or ()),
+        evidence_refs=tuple(
+            str(value)
+            for value in (
+                payload.get("evidence_refs") or payload.get("entity_refs") or ()
+            )
+        ),
         claim_date=_deserialize_required_date(payload.get("claim_date"), field_name="claim_date"),
         owner_alias=_deserialize_optional_string(payload.get("owner_alias")),
         due_date=_deserialize_date(payload.get("due_date")),
@@ -3096,6 +3104,12 @@ def _decision_ask_from_fact(fact: ProgramFactRevision) -> DecisionAsk:
         issue_number=int(payload["issue_number"]),
         text=str(payload["text"]),
         entity_refs=tuple(str(value) for value in payload.get("entity_refs") or ()),
+        evidence_refs=tuple(
+            str(value)
+            for value in (
+                payload.get("evidence_refs") or payload.get("entity_refs") or ()
+            )
+        ),
         ask_date=_deserialize_required_date(payload.get("ask_date"), field_name="ask_date"),
         owner_alias=_deserialize_optional_string(payload.get("owner_alias")),
         status=status,  # type: ignore[arg-type]
