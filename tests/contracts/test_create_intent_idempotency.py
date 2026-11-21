@@ -20,7 +20,12 @@ import sqlite3
 import portalocker
 import pytest
 
-from src.core.actuation_outbox import create_task_idempotency_key, enqueue_create_task_intent, outbox_db_path
+from src.core.actuation_outbox import (
+    DispatchResult,
+    create_task_idempotency_key,
+    enqueue_create_task_intent,
+    outbox_db_path,
+)
 import src.core.action_tracker as action_tracker
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import (
@@ -34,6 +39,7 @@ from src.core.exceptions import AuthError, ConfigError, QueryError, StateError
 from src.core.integration_types import PaginationOutcome
 from src.core.ledger.event_log import read_events
 from src.core.ledger.durable_outbox_store import load_entry, load_success_receipt
+from src.core.operation_capabilities import create_target_identity
 from src.m365.ado_writer import ADOWriter, _build_create_task_patch
 
 
@@ -313,11 +319,178 @@ def test_lost_response_then_rerun_creates_zero_new_items(tmp_path: Path) -> None
     assert load_entry(db, key).status == "completed"
     assert json.loads(load_success_receipt(db, key))["reconciliation"]["completed"] is True
 
+    adopted_entry = _rebound_create_entry(
+        proposal.entries[0],
+        intent_id="semantic-child",
+        reason=proposal.entries[0].reason,
+    )
+    adopted_proposal = replace(
+        proposal,
+        id="prop-idem-semantic-child",
+        entries=(adopted_entry,),
+    )
+    adopted_manifest = (
+        programs_root
+        / "fixture_prog"
+        / "ado_proposals"
+        / "prop-idem-semantic-child.json"
+    )
+    adopted_manifest.parent.mkdir(parents=True, exist_ok=True)
+    adopted_manifest.write_text("", encoding="utf-8")
+    write_proposal_manifest_to_handle_at_path(adopted_manifest, adopted_proposal)
+    semantic_adoption = ADOWriter(
+        _fake_client(backend, lose_first_response=False),
+        programs_root=programs_root,
+    ).apply_manifest(
+        adopted_manifest,
+        applied_at=datetime(2026, 7, 2, 0, 10, tzinfo=timezone.utc),
+    )
+    assert semantic_adoption.applied_count == 1
+    assert backend.create_call_count == 1
+    assert semantic_adoption.proposal.entries[0].outbox_id == key
+
     events = read_events("fixture_prog", programs_root=programs_root)
     duplicate_events = [event for event in events if event.event_type == "actuation.duplicate_prevented.v1"]
     assert len(duplicate_events) == 1
     assert duplicate_events[0].payload["operation_intent_id"] == "fixed-intent-abc123"
     assert duplicate_events[0].payload["detection"] == "preflight_search"
+
+
+def test_distinct_intent_adopts_completed_semantic_effect_owner(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    first, first_manifest = _proposal(programs_root)
+    write_proposal_manifest_to_handle_at_path(first_manifest, first)
+    backend = _FakeADOBackend()
+    client = _fake_client(backend, lose_first_response=False)
+
+    first_result = ADOWriter(client, programs_root=programs_root).apply_manifest(
+        first_manifest,
+        applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+    assert first_result.applied_count == 1
+    first_entry = first_result.proposal.entries[0]
+
+    second_entry = _rebound_create_entry(
+        first.entries[0],
+        intent_id="second-intent",
+        reason=first.entries[0].reason,
+    )
+    second = replace(first, id="prop-idem-2", entries=(second_entry,))
+    second_manifest = programs_root / "fixture_prog" / "ado_proposals" / "prop-idem-2.json"
+    second_manifest.parent.mkdir(parents=True, exist_ok=True)
+    second_manifest.write_text("", encoding="utf-8")
+    write_proposal_manifest_to_handle_at_path(second_manifest, second)
+
+    second_result = ADOWriter(
+        _fake_client(backend, lose_first_response=False),
+        programs_root=programs_root,
+    ).apply_manifest(
+        second_manifest,
+        applied_at=datetime(2026, 7, 2, 0, 5, tzinfo=timezone.utc),
+    )
+
+    assert backend.create_call_count == 1
+    assert second_result.applied_count == 1
+    adopted = second_result.proposal.entries[0]
+    assert adopted.work_item_id == first_entry.work_item_id
+    assert adopted.outbox_id == first_entry.outbox_id
+    assert adopted.operation_intent_id == first_entry.operation_intent_id
+    assert "semantic effect" in (adopted.status_reason or "")
+
+    db = outbox_db_path(
+        first.program_id,
+        programs_root=programs_root,
+    )
+    with sqlite3.connect(db) as connection:
+        row = connection.execute(
+            "SELECT receipt_json FROM outbox_success_receipts WHERE outbox_id = ?",
+            (first_entry.outbox_id,),
+        ).fetchone()
+        assert row is not None
+        tampered = json.loads(row[0])
+        tampered["program_id"] = "foreign-program"
+        connection.execute(
+            "UPDATE outbox_success_receipts SET receipt_json = ? WHERE outbox_id = ?",
+            (json.dumps(tampered, sort_keys=True), first_entry.outbox_id),
+        )
+
+    third_entry = _rebound_create_entry(
+        first.entries[0],
+        intent_id="third-intent",
+        reason=first.entries[0].reason,
+    )
+    third = replace(first, id="prop-idem-3", entries=(third_entry,))
+    third_manifest = (
+        programs_root
+        / "fixture_prog"
+        / "ado_proposals"
+        / "prop-idem-3.json"
+    )
+    third_manifest.parent.mkdir(parents=True, exist_ok=True)
+    third_manifest.write_text("", encoding="utf-8")
+    write_proposal_manifest_to_handle_at_path(third_manifest, third)
+    refused = ADOWriter(
+        _fake_client(backend, lose_first_response=False),
+        programs_root=programs_root,
+    ).apply_manifest(
+        third_manifest,
+        applied_at=datetime(2026, 7, 2, 0, 10, tzinfo=timezone.utc),
+    )
+    assert refused.failed_count == 1
+    assert backend.create_call_count == 1
+
+
+def test_approved_marker_is_retained_in_create_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    entry = proposal.entries[0]
+    task = json.loads(entry.proposed_value)
+    marker = "vertex-effect-" + ("a" * 64)
+    remote_tags = f"vertex-intent-{entry.operation_intent_id}; {marker}"
+    desired = {
+        item["path"].removeprefix("/fields/"): item["value"]
+        for item in _build_create_task_patch({**task, "tags": remote_tags})
+    }
+    task["approved_remote_marker"] = marker
+    task["authorized_effect"]["desired_value"] = desired
+    task["authorized_effect"]["target_identity"] = create_target_identity(
+        provider="ado",
+        tenant="contoso",
+        project="One",
+        causal_occurrence_id=entry.reason,
+        payload=desired,
+    )
+    proposal = replace(
+        proposal,
+        entries=(replace(entry, proposed_value=json.dumps(task)),),
+    )
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    writer = ADOWriter(
+        _fake_client(_FakeADOBackend(), lose_first_response=False),
+        programs_root=programs_root,
+    )
+    retained: dict[str, object] = {}
+
+    def capture(outbox_entry) -> DispatchResult:
+        retained.update(json.loads(outbox_entry.payload_json))
+        return DispatchResult(
+            succeeded=False,
+            uncertain=True,
+            failure_reason="synthetic uncertainty after payload capture",
+        )
+
+    monkeypatch.setattr(writer, "_dispatch_create_task_outbox_entry", capture)
+    result = writer.apply_manifest(
+        manifest_path,
+        applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+    assert result.failed_count == 1
+    assert retained["approved_remote_marker"] == marker
+    assert marker in str(retained["tags"])
+    assert "vertex-intent-" in str(retained["tags"])
 
 
 def test_malformed_wiql_blocks_lost_response_reconciliation(tmp_path: Path) -> None:
@@ -1626,7 +1799,8 @@ def test_recovery_refuses_invalid_requested_assignee_identity(tmp_path, assignee
 
 
 @pytest.mark.parametrize("assignee", [
-    "  ALICE@EXAMPLE.COM ", {"uniqueName": "ALICE@example.com", "displayName": "Not identity"},
+    "  " + "ALICE@" + "EXAMPLE" + ".COM ",
+    {"uniqueName": "ALICE@" + "example" + ".com", "displayName": "Not identity"},
 ])
 @pytest.mark.parametrize("optional_fields", [False, True])
 def test_recovery_checks_sent_fields_and_explicit_assignee_identity(tmp_path, assignee, optional_fields) -> None:

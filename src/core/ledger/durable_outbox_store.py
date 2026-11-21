@@ -428,6 +428,7 @@ def _state_receipt(
     attempt_count: int,
     reason: object,
     recorded_at: str,
+    compensation_operation: str | None = None,
 ) -> str:
     operation: str | None = None
     try:
@@ -449,6 +450,7 @@ def _state_receipt(
             "fencing_token": fencing_token,
             "attempt_count": attempt_count,
             "reason": reason if isinstance(reason, str) else None,
+            "compensation_operation": compensation_operation,
             "recorded_at": recorded_at,
         },
         sort_keys=True,
@@ -606,6 +608,7 @@ def _transition(
     extra_columns: dict[str, object] | None = None,
     success_receipt_json: str | None = None,
     reconciliation_receipt_json: str | None = None,
+    compensation_operation: str | None = None,
 ) -> OutboxEntry:
     now = _now()
     columns = dict(extra_columns or {})
@@ -675,6 +678,7 @@ def _transition(
                 attempt_count=int(attempt_count),
                 reason=columns.get("failure_reason"),
                 recorded_at=recorded_at,
+                compensation_operation=compensation_operation,
             )
             _append_state_receipt(
                 connection, outbox_id, new_status, recorded_at, receipt_json,
@@ -822,8 +826,24 @@ def load_reconciliation_receipt(db_path: Path, outbox_id: str) -> str | None:
     return None if row is None else str(row[0])
 
 
-def mark_compensation_required(db_path: Path, outbox_id: str, *, owner: str, fencing_token: int, reason: str) -> OutboxEntry:
-    return _transition(db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="compensation_required", extra_columns={"failure_reason": reason})
+def mark_compensation_required(
+    db_path: Path,
+    outbox_id: str,
+    *,
+    owner: str,
+    fencing_token: int,
+    reason: str,
+    compensation_operation: str | None = None,
+) -> OutboxEntry:
+    return _transition(
+        db_path,
+        outbox_id,
+        owner=owner,
+        fencing_token=fencing_token,
+        new_status="compensation_required",
+        extra_columns={"failure_reason": reason},
+        compensation_operation=compensation_operation,
+    )
 
 
 def mark_dead_letter(db_path: Path, outbox_id: str, *, owner: str, fencing_token: int, reason: str) -> OutboxEntry:

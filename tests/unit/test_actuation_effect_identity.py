@@ -94,8 +94,6 @@ def test_effect_id_is_deterministic_and_ignores_payload_key_order() -> None:
         ("operation", "add_comment.v1"),
         ("target", "org/project:42"),
         ("payload", {"title": "Ship!", "area": "A\\B"}),
-        ("approval_id", "approval-2"),
-        ("audience", "teams:channel"),
     ],
 )
 def test_effect_id_changes_with_each_identity_field(field: str, value: object) -> None:

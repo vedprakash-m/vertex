@@ -7,6 +7,7 @@
 
 ## Changelog
 
+- Last updated: 2026-11-21 — RELO-W5 adds no reader-visible actuation controls. CLI/refusal text continues to distinguish blocked, failed, uncertain, compensation-required and completed outcomes; restart consumes retained local receipts without claiming a new provider action. Teams/email, recipient delivery and live inverse-effect execution remain outside the visible/control qualification boundary.
 - Last updated: 2026-11-19 — Knowledge triage exposes class/review state, explicit review and renewal commands, verified resolution and retained lifecycle history (§12.10a).
 - Last updated: 2026-11-19 — RELO-D19 adds no newsletter or reader-facing chrome. Confirm may report that typed governed feedback was recorded; proposal lifecycle refusal reports the missing governance stage, and active feedback policy is unavailable when its approved version is expired or absent.
 
@@ -1065,6 +1066,8 @@ Backup creation failures, including SQLite capture failures, return exit 2 with 
 Actuation execute, including dry-run, refuses disabled/missing/mismatched rule admission, unapproved/gap-blocked proposals and invalid/future/stale proposal times before rendering an execution payload. Review and execute report invalid policy enablement or retained approval/time/TTL as blocked, exit 2, with correction-before-review guidance and no raw malformed payload. Dry-run remains write-free. Expiry detected at actual dispatch after CLI admission reports failure, exit 3, with review guidance rather than success or automatic renewal. Existing not-found/expired exclusion behavior remains exit 1. These bounded checks preserve the default live-write kill switch; a successful preview is not authority to enable it or evidence of generalized effectively-once delivery.
 
 Outbox out-of-order transitions are errors, not successful completion or silent retries. The shared store reports refusal without changing retained status/attempt/receipt fields; actual create dispatch refuses a changed state before its provider callback and releases its workspace lease. No automatic repair, inferred remote success or new operator approval action is introduced. Existing local-registry delivery and replay behavior remain unchanged.
+
+Qualified approval/marker, exact authorized-effect reconciliation and durable receipt restart use the same existing CLI failure categories. A changed payload/approval/marker, missing terminal receipt or mismatched provider evidence is blocked/uncertain rather than rendered as completed; `compensation_required` names the retained inverse operation without claiming execution. The operator sees no new Teams/email send control and no live write is inferred from a successful dry run.
 
 Create success is no longer reported without a durable remote-ID acknowledgement receipt. A successful request with a missing/malformed/nonpositive ID uses the existing uncertain outcome and operator reconciliation guidance, not completion or automatic retry. Receipt storage/readback failures propagate explicitly without advancing to completed or repeating the provider call; the workspace lease is released. Secondary ledger failure does not erase the outbox receipt. This introduces no new operator approval UI, legacy-row certification or full desired-effect correctness claim.
 

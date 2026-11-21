@@ -75,7 +75,12 @@ from src.core.ledger.durable_outbox_store import (
     mark_succeeded,
     mark_uncertain_remote_state,
 )
-from src.core.operation_capabilities import provider_request_key
+from src.core.operation_capabilities import (
+    OPERATION_CAPABILITIES,
+    OperationCapability,
+    lookup_capability,
+    provider_request_key,
+)
 from src.core.operator_identity import OperatorIdentity
 from src.core.workspace_lease import (
     ACTUATION_DISPATCH_DOMAIN,
@@ -111,8 +116,12 @@ def create_task_idempotency_key(*, program_id: str, org: str, project: str, oper
     )
 
 
-# Only registered ADO capabilities may leave the outbox; unregistered operations stay draft/manual.
-DISPATCHABLE_OPERATIONS = frozenset({"create_task.v1"})
+# Only capabilities carrying the explicit live flag may leave the outbox.
+DISPATCHABLE_OPERATIONS = frozenset(
+    operation
+    for operation, capability in OPERATION_CAPABILITIES.items()
+    if capability.dispatchable
+)
 
 _EFFECT_STATES = {
     "pending": "intent", "leased": "intent", "failed_retryable": "intent",
@@ -123,9 +132,9 @@ _EFFECT_STATES = {
 
 
 def effect_id_v1(*, operation: str, target: str, payload: dict[str, object], approval_id: str, audience: str) -> str:
-    """sha256 over canonical JSON (sorted keys, compact separators, UTF-8) of the effect identity."""
+    """Hash the semantic effect while retaining the historical signature."""
     canonical = json.dumps(
-        {"operation": operation, "target": target, "payload": payload, "approval_id": approval_id, "audience": audience},
+        {"operation": operation, "target": target, "payload": payload},
         sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -290,6 +299,26 @@ def enqueue_create_task_intent(
     is returned and no second effect is enqueued.
     """
     db_path = outbox_db_path(program_id, programs_root=programs_root)
+    if effect_id is not None:
+        entry, created = enqueue_with_effect(
+            db_path,
+            idempotency_key,
+            domain=ACTUATION_DISPATCH_DOMAIN,
+            correlation_id=idempotency_key,
+            payload_json=payload_json,
+            effect_id=effect_id,
+        )
+        if created:
+            _emit_intent_created_best_effort(
+                program_id=program_id,
+                operation_intent_id=operation_intent_id,
+                idempotency_key=idempotency_key,
+                proposal_id=proposal_id,
+                programs_root=programs_root,
+                operation=operation,
+                target_identity=target_identity,
+            )
+        return entry
     semantic_effect_id = _semantic_effect_id(
         program_id=program_id,
         operation=operation,
@@ -305,7 +334,6 @@ def enqueue_create_task_intent(
             payload_json=payload_json,
             effect_id=semantic_effect_id,
         )
-        _bind_effect_or_raise(db_path, effect_id, entry.outbox_id)
         if created:
             _emit_intent_created_best_effort(
                 program_id=program_id,
@@ -317,13 +345,6 @@ def enqueue_create_task_intent(
                 target_identity=target_identity,
             )
         return entry
-    if effect_id is not None:
-        bound_id = load_effect_outbox_id(db_path, effect_id)
-        if bound_id is not None:
-            bound = load_entry(db_path, bound_id)
-            if bound is None:
-                raise OutboxError("Effect id is bound to a missing outbox row")
-            return bound
     existing = load_entry(db_path, idempotency_key)
     if existing is not None:
         if (
@@ -332,7 +353,6 @@ def enqueue_create_task_intent(
             or existing.payload_json != payload_json
         ):
             raise OutboxError("Existing outbox key has different domain, correlation or payload")
-        _bind_effect_or_raise(db_path, effect_id, existing.outbox_id)
         return existing
     entry = enqueue(
         db_path,
@@ -363,8 +383,6 @@ def _semantic_effect_id(
     target_identity: str,
     payload_json: str,
 ) -> str | None:
-    if operation == "create_task.v1":
-        return None
     try:
         payload = json.loads(payload_json)
     except (TypeError, ValueError):
@@ -384,7 +402,11 @@ def _semantic_effect_id(
             project=str(payload.get("project") or "unknown-project"),
             operation=operation,
             target_identity=target_identity,
-            causal_occurrence_id=f"{operation}:{target_identity}",
+            causal_occurrence_id=str(
+                payload.get("causal_occurrence_id")
+                or payload.get("operation_intent_id")
+                or f"{operation}:{target_identity}"
+            ),
             payload=normalize_semantic_payload(operation, payload),
         )
     except (TypeError, ValueError):
@@ -497,11 +519,12 @@ def dispatch_leased_create_task(
         "leased",
         "dispatched",
         "succeeded",
+        "audited",
     }:
         raise OutboxError(f"Requested outbox row is not dispatchable ({observed.status!r})")
     resume_receipt: dict[str, object] | None = None
     resume_receipt_json: str | None = None
-    if observed.status == "succeeded":
+    if observed.status in {"succeeded", "audited"}:
         resume_receipt, resume_receipt_json = _load_valid_success_receipt(
             db_path,
             observed,
@@ -519,7 +542,7 @@ def dispatch_leased_create_task(
         or observed.lease_owner == owner
     ):
         raise OutboxError("Dispatched outbox row requires an expired recorded lease and a different owner")
-    if observed.status == "succeeded" and (
+    if observed.status in {"succeeded", "audited"} and (
         observed.lease_expires_at is None
         or observed.lease_expires_at.utcoffset() is None
         or observed.lease_owner == owner
@@ -537,7 +560,7 @@ def dispatch_leased_create_task(
     )
     fence_lost = False
     try:
-        if observed.status == "succeeded":
+        if observed.status in {"succeeded", "audited"}:
             assert resume_receipt is not None and resume_receipt_json is not None
             return _resume_success(
                 db_path,
@@ -746,8 +769,6 @@ def _drive_one(
             failure_reason="Provider success contains an invalid remote revision; manual reconciliation required.",
         )
     if result.compensation_required:
-        from src.core.operation_capabilities import OperationCapability, lookup_capability
-
         capability = lookup_capability(str(payload_fields.get("operation") or "create_task.v1"))
         if (
             not result.succeeded
@@ -873,9 +894,12 @@ def _drive_one(
     if retained_receipt != receipt_json:
         raise OutboxError("Create success receipt is missing or changed; manual reconciliation required")
     if result.compensation_required:
+        if not isinstance(capability, OperationCapability):
+            raise OutboxError("Compensation operation capability is unavailable")
         compensated_entry = mark_compensation_required(
             db_path, leased.outbox_id, owner=owner, fencing_token=fencing,
             reason=result.failure_reason or "provider effect requires compensation",
+            compensation_operation=capability.compensation_operation,
         )
         receipt = json.loads(retained_receipt)
         return ActuationDispatchOutcome(
@@ -912,12 +936,39 @@ def _resume_success(
     owner = observed.lease_owner
     if owner is None:
         raise OutboxError("Create success evidence has no retained lease owner")
-    retained = mark_audited(
-        db_path,
-        observed.outbox_id,
-        owner=owner,
-        fencing_token=observed.lease_fencing_token,
-    )
+    retained = observed
+    if retained.status == "succeeded":
+        retained = mark_audited(
+            db_path,
+            observed.outbox_id,
+            owner=owner,
+            fencing_token=observed.lease_fencing_token,
+        )
+    if receipt.get("compensation_required") is True:
+        payload_fields = json.loads(observed.payload_json)
+        capability = lookup_capability(str(payload_fields.get("operation") or ""))
+        if (
+            not isinstance(capability, OperationCapability)
+            or not capability.compensable
+            or not capability.compensation_operation
+        ):
+            raise OutboxError(
+                "Retained compensation request has no approved compensation operation"
+            )
+        retained = mark_compensation_required(
+            db_path,
+            retained.outbox_id,
+            owner=owner,
+            fencing_token=retained.lease_fencing_token,
+            reason="Retained provider effect requires compensation",
+            compensation_operation=capability.compensation_operation,
+        )
+        return ActuationDispatchOutcome(
+            entry=retained,
+            remote_id=remote_id,
+            status="compensation_required",
+            remote_rev=remote_rev if type(remote_rev) is int else None,
+        )
     completed = mark_completed(
         db_path,
         retained.outbox_id,
@@ -974,6 +1025,8 @@ def _load_valid_success_receipt(
         "remote_id",
         "remote_rev",
         "acknowledged_at",
+        "compensation_required",
+        "reconciliation",
     }
     remote_id = receipt.get("remote_id")
     remote_rev = receipt.get("remote_rev")
@@ -1000,11 +1053,88 @@ def _load_valid_success_receipt(
         )
         or acknowledged is None
         or acknowledged.utcoffset() is None
+        or type(receipt.get("compensation_required")) is not bool
+        or not isinstance(receipt.get("reconciliation"), dict)
     ):
         raise OutboxError(
             "Create success receipt is invalid or no longer matches the retained intent"
         )
+    authorized = _load_authorized_effect(
+        payload_fields,
+        program_id=program_id,
+    )
+    if not _receipt_reconciliation_binds(
+        receipt=receipt,
+        authorized=authorized,
+        remote_id=remote_id,
+        remote_rev=remote_rev,
+    ):
+        raise OutboxError(
+            "Create success receipt does not certify the retained authorized effect"
+        )
     return receipt, receipt_json
+
+
+def _receipt_reconciliation_binds(
+    *,
+    receipt: dict[str, object],
+    authorized: AuthorizedEffect,
+    remote_id: int,
+    remote_rev: int | None,
+) -> bool:
+    reconciliation = receipt.get("reconciliation")
+    if not isinstance(reconciliation, dict):
+        return False
+    if (
+        reconciliation.get("status") != "completed"
+        or reconciliation.get("completed") is not True
+        or reconciliation.get("mismatches") != []
+    ):
+        return False
+    child_receipts = reconciliation.get("receipts")
+    recipients: list[str | None] = list(authorized.intended_recipients) or [None]
+    if not isinstance(child_receipts, list) or len(child_receipts) != len(recipients):
+        return False
+    expected_effect_hash = desired_effect_hash(authorized.desired_value)
+    expected_manifest_hash = audience_manifest_hash(authorized.audience_manifest)
+    for child, recipient in zip(child_receipts, recipients):
+        if not isinstance(child, dict):
+            return False
+        if (
+            child.get("recipient") != recipient
+            or child.get("terminal_status") != "completed"
+            or child.get("intent_id") != authorized.intent_id
+            or child.get("approval_id") != authorized.approval_id
+            or child.get("provider") != authorized.provider
+            or child.get("tenant_id") != authorized.tenant_id
+            or child.get("project") != authorized.project
+            or child.get("operation") != authorized.operation
+            or child.get("target_identity") != authorized.target_identity
+            or child.get("remote_effect_id") != str(remote_id)
+            or child.get("resulting_revision") != remote_rev
+            or child.get("desired_effect_hash") != expected_effect_hash
+            or child.get("preflight_revision") != authorized.preflight_revision
+            or child.get("execution_principal") != authorized.execution_principal
+            or child.get("audience_manifest_hash") != expected_manifest_hash
+            or child.get("authorized_audience_recipients")
+            != list(authorized.audience_manifest.included_person_entity_ids)
+            or child.get("evidence_version") != authorized.evidence_version
+            or child.get("policy_version") != authorized.policy_version
+            or child.get("rollback_mechanism") != authorized.rollback_mechanism
+            or child.get("observed_value_hash") != expected_effect_hash
+            or type(child.get("attempt_count")) is not int
+            or int(child["attempt_count"]) <= 0
+            or not isinstance(child.get("provider_request_id"), str)
+            or not str(child["provider_request_id"]).strip()
+            or not isinstance(child.get("provider_correlation_id"), str)
+            or not str(child["provider_correlation_id"]).strip()
+            or not isinstance(child.get("response_hash"), str)
+            or not str(child["response_hash"]).strip()
+            or type(child.get("resulting_revision")) is not int
+            or int(child["resulting_revision"]) <= 0
+        ):
+            return False
+    return True
 
 
 def _bind_effect_or_raise(db_path: Path, effect_id: str | None, outbox_id: str) -> None:
@@ -1157,8 +1287,10 @@ def reconcile_uncertain_create_task(
             "remote_id": found,
             "remote_rev": resulting_revision,
             "remote_response_hash": None,
+            "compensation_required": False,
             "acknowledged_at": datetime.now(timezone.utc).isoformat(),
             "attempt_count": entry.attempt_count,
+            "fencing_token": entry.lease_fencing_token,
             "reconciled_by_marker": True,
             "reconciled_by": reconciled_by,
             "reconciliation": reconciliation.to_dict(),

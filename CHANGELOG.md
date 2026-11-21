@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-21
+
+| Feature | Change |
+|---|---|
+| RELO-W5 governed actuation architecture | Complete the local admission/state/reconciliation architecture across registered operations: atomically bind semantic effects and approved markers, require exact retained approval/payload/principal/evidence binding, refuse marker-only confirmation without authorized target/value/principal/recipient evidence, retain universal terminal/compensation receipts, resume `succeeded` and `audited` rows without provider callbacks, deduplicate semantic retries, and record named compensation operations without executing them. Keep `create_task.v1` as the only dispatch-capable operation; ADO mutations and Teams/email remain fail-closed pending provider-specific qualification. |
+| Deterministic fault and record/replay qualification | Add an 11-scenario local synthetic fault harness covering pre/post lease, definite failure, response loss, marker confirmation/absence/conflict, pre-receipt and post-success/audit crashes, semantic duplicates and compensation. Replay verifies final state, receipt history, provider effect counts, callbacks and alerts with zero duplicate provider effects. |
+
+Modified files: `src/core/actuation_approval_store.py`, `src/core/actuation_outbox.py`, `src/core/actuation_reconciliation.py`, `src/core/ledger/durable_outbox_store.py`, `src/core/operation_capabilities.py`, `src/m365/ado_writer.py`, and the three canonical specifications. Tests: `tests/contracts/test_w5_fault_replay.py`, `tests/support/actuation_fault_harness.py`, `tests/unit/test_w5_governed_completion.py`, and affected actuation/capability/reconciler tests.
+
 ## 2026-11-20
 
 | Feature | Change |

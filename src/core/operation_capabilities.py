@@ -40,6 +40,8 @@ class OperationCapability:
     reconcilable: bool
     compensable: bool
     max_blast_radius: int
+    dispatchable: bool = False
+    compensation_operation: str | None = None
     marker_strategy: Literal["ado_tag_or_custom_field", "hidden_comment"] | None = None
 
 
@@ -57,20 +59,84 @@ OPERATION_CAPABILITIES: Mapping[str, OperationCapability] = MappingProxyType({
     capability.operation: capability
     for capability in (
         OperationCapability(
-            "create_task.v1", EffectClass.CREATE, True, True, False, 1,
-            "ado_tag_or_custom_field",
+            "create_task.v1",
+            EffectClass.CREATE,
+            True,
+            True,
+            False,
+            1,
+            dispatchable=True,
+            marker_strategy="ado_tag_or_custom_field",
         ),
         OperationCapability(
-            "add_comment.v1", EffectClass.APPEND, True, False, True, 1,
-            "hidden_comment",
+            "add_comment.v1",
+            EffectClass.APPEND,
+            True,
+            True,
+            True,
+            1,
+            compensation_operation="delete_comment.v1",
+            marker_strategy="hidden_comment",
         ),
         OperationCapability(
-            "add_tag.v1", EffectClass.MUTATE, True, False, True, 1,
-            "hidden_comment",
+            "add_tag.v1",
+            EffectClass.MUTATE,
+            True,
+            True,
+            True,
+            1,
+            compensation_operation="remove_tag.v1",
+            marker_strategy="hidden_comment",
         ),
         OperationCapability(
-            "set_field.v1", EffectClass.MUTATE, True, False, True, 1,
-            "hidden_comment",
+            "set_field.v1",
+            EffectClass.MUTATE,
+            True,
+            True,
+            True,
+            1,
+            compensation_operation="restore_field.v1",
+            marker_strategy="hidden_comment",
+        ),
+        OperationCapability(
+            "teams_message.v1",
+            EffectClass.APPEND,
+            False,
+            False,
+            False,
+            1,
+        ),
+        OperationCapability(
+            "email_message.v1",
+            EffectClass.APPEND,
+            False,
+            False,
+            False,
+            1,
+        ),
+        OperationCapability(
+            "delete_comment.v1",
+            EffectClass.MUTATE,
+            False,
+            False,
+            False,
+            1,
+        ),
+        OperationCapability(
+            "remove_tag.v1",
+            EffectClass.MUTATE,
+            False,
+            False,
+            False,
+            1,
+        ),
+        OperationCapability(
+            "restore_field.v1",
+            EffectClass.MUTATE,
+            False,
+            False,
+            False,
+            1,
         ),
     )
 })
@@ -123,7 +189,13 @@ def semantic_effect_key(
 def desired_effect_hash(payload: Mapping[str, object]) -> str:
     """Return the order/format-insensitive hash of one normalized desired effect."""
     try:
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
     except (TypeError, ValueError) as error:
         raise ValueError("desired effect must be JSON serializable") from error
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -159,12 +231,29 @@ def provider_request_key(
     return f"{program_id}:{org}/{project}:{operation}:{target_identity}:{operation_intent_id}"
 
 
+def approved_remote_marker(
+    *,
+    operation: str,
+    semantic_effect_key: str,
+) -> str | None:
+    """Return the approved local marker identity for a reconcilable effect."""
+    capability = lookup_capability(operation)
+    if not isinstance(capability, OperationCapability) or not capability.supports_remote_marker:
+        return None
+    if not semantic_effect_key.startswith(SEMANTIC_EFFECT_KEY_PREFIX):
+        raise ValueError("semantic effect key is invalid")
+    marker = semantic_effect_key.removeprefix(SEMANTIC_EFFECT_KEY_PREFIX)
+    return f"vertex-effect-{marker}"
+
+
 def _normalized_tags(value: object, *, allow_empty: bool = False) -> tuple[str, ...]:
     if not isinstance(value, str):
         raise TypeError("tags must be a string")
-    normalized = tuple(
-        dict.fromkeys(part.strip() for part in value.split(";") if part.strip())
-    )
+    normalized = tuple(sorted({
+        part.strip().casefold()
+        for part in value.split(";")
+        if part.strip()
+    }))
     if not normalized and not allow_empty:
         raise ValueError("tags must contain at least one value")
     return normalized
@@ -213,7 +302,14 @@ def normalize_semantic_payload(
         if payload.get("priority") is not None:
             semantic["priority"] = payload["priority"]
         if payload.get("tags"):
-            semantic["tags"] = _normalized_tags(payload["tags"])
+            semantic_tags = tuple(
+                tag
+                for tag in _normalized_tags(payload["tags"], allow_empty=True)
+                if not tag.startswith("vertex-intent-")
+                and not tag.startswith("vertex-effect-")
+            )
+            if semantic_tags:
+                semantic["tags"] = semantic_tags
         return semantic
     if operation == "add_comment.v1":
         text = payload.get("text", payload.get("proposed_value"))
@@ -255,6 +351,7 @@ __all__ = [
     "EffectClass",
     "OPERATION_CAPABILITIES",
     "OperationCapability",
+    "approved_remote_marker",
     "create_target_identity",
     "desired_effect_hash",
     "lookup_capability",

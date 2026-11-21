@@ -20,7 +20,12 @@ from src.core.actuation_outbox import (
     revoke_actuation_approval,
 )
 from src.core.ledger.durable_outbox_store import load_entry
-from src.core.operation_capabilities import create_target_identity, desired_effect_hash, semantic_effect_key
+from src.core.operation_capabilities import (
+    approved_remote_marker,
+    create_target_identity,
+    desired_effect_hash,
+    semantic_effect_key,
+)
 from src.core.operator_identity import OperatorIdentity
 from tests.support.actuation_reconciliation import (
     synthetic_authorized_effect_document,
@@ -59,6 +64,7 @@ def _request(
             payload=desired,
         )
     full_payload = {
+        "program_id": _PROGRAM,
         "operation": operation,
         "operation_intent_id": intent_id,
         "proposal_id": "proposal-1",
@@ -79,8 +85,24 @@ def _request(
         "target_identity": resolved_target,
         "desired_value": desired,
         "execution_principal": "CONTOSO\\reviewer",
+        "evidence_version": "snapshot-17",
+        "policy_version": "policy-7",
     })
     full_payload["authorized_effect"] = authorized_effect
+    semantic = semantic_effect_key(
+        program_id=_PROGRAM,
+        provider="ado",
+        tenant="contoso",
+        project="One",
+        operation=operation,
+        target_identity=resolved_target,
+        causal_occurrence_id=causal_occurrence_id,
+        payload=desired,
+    )
+    full_payload["approved_remote_marker"] = approved_remote_marker(
+        operation=operation,
+        semantic_effect_key=semantic,
+    )
     return ActuationAdmissionRequest(
         program_id=_PROGRAM,
         intent_id=intent_id,
@@ -184,15 +206,19 @@ def test_policy_revision_change_cannot_create_a_second_effect(tmp_path: Path) ->
     root = tmp_path / "programs"
     first_request = _request()
     first, _ = _enqueue(root, first_request)
+    second_payload = json.loads(first_request.payload_json)
+    second_payload["operation_intent_id"] = "intent-2"
+    second_payload["proposal_id"] = "proposal-2"
+    second_payload["authorized_effect"]["intent_id"] = "intent-2"
+    second_payload["authorized_effect"]["approval_id"] = "approval:intent-2"
+    second_payload["authorized_effect"]["policy_version"] = "policy-8"
     second_request = replace(
         first_request,
         intent_id="intent-2",
         proposal_id="proposal-2",
         rate_scope="proposal-2",
         approval_policy_version="policy-8",
-        payload_json=first_request.payload_json.replace("intent-1", "intent-2").replace(
-            "proposal-1", "proposal-2",
-        ),
+        payload_json=json.dumps(second_payload, sort_keys=True),
     )
     second_approval = _approve(root, second_request)
     duplicate = enqueue_approved_actuation_intent(
