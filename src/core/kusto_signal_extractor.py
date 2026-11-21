@@ -8,11 +8,15 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from typing import Callable
 
+from src.core.exceptions import QueryError
 from src.core.integration_types import (
     ExtractionResult,
     KustoHydrationOutput,
+    KustoResultKind,
+    KustoResultSchema,
     KustoResultSet,
 )
+from src.core.kusto_result_contract import validate_kusto_result_schema
 from src.core.kusto_ref_utils import extract_kusto_entity_refs
 from src.core.metric_binding_validator import coerce_metric_value
 from src.core.models import Confidence
@@ -49,6 +53,7 @@ class _UnboundKustoInterpretation:
     omitted_rows: int = 0
     data_as_of: datetime | None = None
     refusal: str | None = None
+    trend: str | None = None
 
 
 def kusto_source_event_time(rows: Iterable[Mapping[str, object]]) -> datetime | None:
@@ -131,15 +136,26 @@ def _empty_result_text(result_set: KustoResultSet) -> str | None:
 
 
 def format_kusto_result_text(result_set: KustoResultSet, *, waiver: object | None = None) -> str:
+    result_kind = (
+        result_set.schema.kind.value
+        if result_set.schema is not None
+        else KustoResultKind.TABLE.value
+    )
     if result_set.is_partial:
-        return _format_unbound_refusal(result_set, "partial result")
+        return _format_unbound_refusal(result_set, "partial result", result_kind)
     if result_set.row_count is not None and result_set.row_count != len(result_set.rows):
-        return _format_unbound_refusal(result_set, "row count mismatch")
+        return _format_unbound_refusal(result_set, "row count mismatch", result_kind)
+    if result_set.schema is not None:
+        try:
+            validate_kusto_result_schema(result_set.rows, result_set.schema)
+        except QueryError:
+            return _format_unbound_refusal(result_set, "schema drift", result_kind)
 
     if result_set.metric_id is None:
         interpretation = _interpret_unbound_kusto_result(
             result_set.rows,
             declared_measure=result_set.result_column,
+            schema=result_set.schema,
         )
         return _format_unbound_kusto_result(result_set.query_id, len(result_set.rows), interpretation)
 
@@ -165,9 +181,19 @@ def format_kusto_result_text(result_set: KustoResultSet, *, waiver: object | Non
     return _with_waiver_suffix(text, waiver)
 
 
-def _format_unbound_refusal(result_set: KustoResultSet, refusal: str) -> str:
+def _format_unbound_refusal(
+    result_set: KustoResultSet,
+    refusal: str,
+    result_kind: str | None = None,
+) -> str:
+    kind = result_kind or (
+        result_set.schema.kind.value
+        if result_set.schema is not None
+        else KustoResultKind.TABLE.value
+    )
     return (
-        f"Kusto query {result_set.query_id} [kind=table, interpretation=ambiguous]: "
+        f"Kusto query {result_set.query_id} "
+        f"[kind={_display_result_kind(kind)}, interpretation=ambiguous]: "
         f"admitted_rows={len(result_set.rows)}; refusal={refusal}."
     )
 
@@ -176,7 +202,16 @@ def _interpret_unbound_kusto_result(
     rows: tuple[dict[str, str | int | float | bool | None], ...],
     *,
     declared_measure: str | None = None,
+    schema: KustoResultSchema | None = None,
 ) -> _UnboundKustoInterpretation:
+    if schema is not None:
+        interpretation = _interpret_typed_kusto_result(
+            rows,
+            schema=schema,
+            declared_measure=declared_measure,
+        )
+        if interpretation is not None:
+            return interpretation
     columns = _stable_kusto_columns(rows)
     if columns is None:
         return _UnboundKustoInterpretation(
@@ -251,13 +286,109 @@ def _interpret_unbound_kusto_result(
     )
 
 
+def _interpret_typed_kusto_result(
+    rows: tuple[dict[str, str | int | float | bool | None], ...],
+    *,
+    schema: KustoResultSchema,
+    declared_measure: str | None,
+) -> _UnboundKustoInterpretation | None:
+    columns = tuple(column.name for column in schema.columns)
+    serialized_rows = tuple(_serialize_kusto_row(row, columns) for row in rows)
+    if any(row is None for row in serialized_rows):
+        return _ambiguous_table(
+            columns,
+            (),
+            "unsupported row value",
+            kind=schema.kind.value,
+        )
+    exact_rows = tuple(row for row in serialized_rows if row is not None)
+    if schema.kind is not KustoResultKind.TIME_SERIES:
+        return _UnboundKustoInterpretation(
+            kind=schema.kind.value,
+            qualification="unqualified",
+            columns=columns,
+            facts=exact_rows[:_MAX_KUSTO_FACT_ROWS],
+            omitted_rows=max(0, len(exact_rows) - _MAX_KUSTO_FACT_ROWS),
+        )
+
+    time_column = schema.time_column
+    if time_column is None or not schema.value_columns:
+        return _ambiguous_table(columns, (), "invalid time-series schema", kind=schema.kind.value)
+    value_columns = schema.value_columns
+    if declared_measure is not None:
+        if declared_measure not in value_columns:
+            return _ambiguous_table(
+                columns,
+                exact_rows,
+                "declared numeric measure unavailable",
+                kind=schema.kind.value,
+            )
+        value_columns = (declared_measure,)
+    point_columns = (time_column, *value_columns)
+    parsed_points: list[tuple[datetime, str]] = []
+    for row in rows:
+        parsed = _parse_kusto_time_value(row.get(time_column))
+        exact_point = _serialize_kusto_row(row, point_columns)
+        if parsed is None:
+            return _ambiguous_table(columns, exact_rows, "invalid time point", kind=schema.kind.value)
+        if exact_point is None:
+            return _ambiguous_table(columns, exact_rows, "unsupported point value", kind=schema.kind.value)
+        if any(coerce_metric_value(row.get(column)) is None for column in value_columns):
+            return _ambiguous_table(columns, exact_rows, "non-numeric series value", kind=schema.kind.value)
+        parsed_points.append((parsed, exact_point))
+    if len({point[0] for point in parsed_points}) != len(parsed_points):
+        return _ambiguous_table(columns, exact_rows, "duplicate time points", kind=schema.kind.value)
+    ordered_points = sorted(parsed_points, key=lambda point: point[0])
+    trend = _typed_series_trend(rows, time_column, value_columns)
+    return _UnboundKustoInterpretation(
+        kind=schema.kind.value,
+        qualification="unqualified",
+        columns=columns,
+        facts=tuple(point for _, point in ordered_points[:_MAX_KUSTO_FACT_ROWS]),
+        omitted_rows=max(0, len(ordered_points) - _MAX_KUSTO_FACT_ROWS),
+        data_as_of=max((point[0] for point in parsed_points), default=None),
+        trend=trend,
+    )
+
+
+def _typed_series_trend(
+    rows: tuple[dict[str, str | int | float | bool | None], ...],
+    time_column: str,
+    value_columns: tuple[str, ...],
+) -> str:
+    if len(rows) < 2:
+        return "insufficient_data"
+    ordered = sorted(
+        rows,
+        key=lambda row: _parse_kusto_time_value(row.get(time_column))
+        or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    trends: list[str] = []
+    for column in value_columns:
+        first = coerce_metric_value(ordered[0].get(column))
+        last = coerce_metric_value(ordered[-1].get(column))
+        if first is None or last is None:
+            trends.append(f"{column}:unknown")
+        elif last > first:
+            trends.append(f"{column}:increasing")
+        elif last < first:
+            trends.append(f"{column}:decreasing")
+        else:
+            trends.append(f"{column}:flat")
+    if len(trends) == 1:
+        return trends[0].split(":", 1)[1]
+    return "[" + ",".join(trends) + "]"
+
+
 def _ambiguous_table(
     columns: tuple[str, ...],
     exact_rows: tuple[str, ...],
     refusal: str,
+    *,
+    kind: str = "table",
 ) -> _UnboundKustoInterpretation:
     return _UnboundKustoInterpretation(
-        kind="table",
+        kind=kind,
         qualification="ambiguous",
         columns=columns,
         facts=exact_rows[:_MAX_KUSTO_FACT_ROWS],
@@ -319,23 +450,34 @@ def _format_unbound_kusto_result(
 ) -> str:
     prefix = (
         f"Kusto query {query_id} "
-        f"[kind={interpretation.kind}, interpretation={interpretation.qualification}]: "
+        f"[kind={_display_result_kind(interpretation.kind)}, "
+        f"interpretation={interpretation.qualification}]: "
     )
     parts = [f"admitted_rows={admitted_rows}"]
     if interpretation.columns:
         parts.append(f"columns=[{','.join(interpretation.columns)}]")
     if interpretation.facts:
-        label = "points" if interpretation.kind == "timeseries" else "facts"
+        label = (
+            "points"
+            if _display_result_kind(interpretation.kind) == "timeseries"
+            else "facts"
+        )
         parts.append(f"{label}=[{','.join(interpretation.facts)}]")
     if interpretation.omitted_rows:
         parts.append(f"omitted_rows={interpretation.omitted_rows}")
     if interpretation.data_as_of is not None:
         parts.append(f"data_as_of={interpretation.data_as_of.isoformat()}")
+    if interpretation.trend is not None:
+        parts.append(f"trend={interpretation.trend}")
     if interpretation.refusal is not None:
         parts.append(f"refusal={interpretation.refusal}")
     else:
         parts.append("no qualified trend or SLO verdict")
     return prefix + "; ".join(parts) + "."
+
+
+def _display_result_kind(kind: str) -> str:
+    return "timeseries" if kind == KustoResultKind.TIME_SERIES.value else kind
 
 
 def _normalize_kusto_column(column: str) -> str:

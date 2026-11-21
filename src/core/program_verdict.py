@@ -450,7 +450,10 @@ def evaluate_program_verdict(inputs: ProgramVerdictInputs) -> ProgramVerdict:
     capture, snapshot = inputs.capture, inputs.snapshot
     validate_run_evidence_snapshot(capture)
     if (
-        capture.schema_version != "run-evidence-capture.v2"
+        capture.schema_version not in {
+            "run-evidence-capture.v2",
+            "run-evidence-capture.v3",
+        }
         or hash_jsonable(snapshot) != capture.report_snapshot_hash
     ):
         raise ConfigError("Program verdict capture or report snapshot identity is inconsistent.")

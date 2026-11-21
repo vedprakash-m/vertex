@@ -7,6 +7,9 @@
 
 ## Changelog
 
+- Last updated: 2026-11-21 — RELO-W2/W3 adds hydrated-evidence checkpoints, shared fail-closed completeness, bounded WorkIQ/SharePoint restart semantics, typed Kusto interpretation and cancellation, and explicit scheduled-acquisition degradation. Live provider permission, revocation and operational evidence remain separate.
+
+- Last updated: 2026-11-21 — RELO W2/W3 local acquisition and capture acceptance is implemented: ADO evidence/checkpoint recovery, anti-entropy and shared completeness; immutable scope/binding/snapshot invalidation; bounded native-ID WorkIQ continuation with unqualified-time quarantine; typed Kusto evidence and cooperative cancellation; SharePoint restart/ACL/deletion fixtures; and fail-closed optional/scheduled readiness. Live provider, owner and scheduled-principal evidence remain independently gated.
 - Last updated: 2026-11-19 — Knowledge candidates cover the eight required maintained-context classes and retain explicit OS-principal review/renewal plus verified resolution history; live policy population and qualification remain gated (§7.4, §10.2).
 - Last updated: 2026-11-19 — Ratified RELO-D19 (ADR-0020 decision 17): only typed, approved, evidence-linked feedback remains reusable. Confirm now records hash-only governed telemetry, while offline proposals require privacy, contamination, development, frozen-holdout, human-approval and shadow gates before promotion; rollback restores a governed prior version. Raw edit-pattern learning and confirm-time distillation are no longer runtime prompt inputs.
 
@@ -972,6 +975,9 @@ Three contract files define structural rules:
 - Injected Kusto executors do not bypass authored row admission at hydration, direct/KPI signal/history, report primary/fallback or live chart-gather boundaries. Refused rows cannot become successful observations, refresh successful history/time or reach chart sanitization/cache writes. Previous valid history/cache bytes survive refusal and independent valid queries continue. Empty consumer-only lists and previously cached artifacts do not establish original SDK schema/completeness or current contract lineage.
 - Chart gather loads cache from the selected workspace only. Legacy undeclared zero-ok entries require exact program/query identity and nonnegative age below the query TTL; retention grace does not extend freshness. Declared limits or scalar-required cardinality require live admission until cache lineage exists. A refused cache write is an explicit integration failure, never a successful written-row claim; previous valid bytes and independent queries remain.
 - Chart-cache reuse also requires the current query-definition hash, binding source/KQL, render mode/renderer/configuration and authored admission. Gather and report writeback share this identity; missing/null legacy hashes remain readable but require live refresh, and malformed hashes are refused explicitly. Definition equality is not proof of original-result completeness or permission.
+- Gather commit, completeness and publication paths retain bounded evidence for exact source target, permission, checkpoint, page/quarantine and snapshot binding. Missing or degraded evidence is unknown/partial, never an inferred FULL population.
+- ADO detail checkpoints are per provider/item/subresource and persist canonical evidence atomically with verification. A crash after gather promotion is recoverable from replayable intent, and bounded anti-entropy refresh prevents stale checkpoints from suppressing independently changed history.
+- Kusto typed results preserve scalar/table/time-series semantics and compact value/trend/SLO evidence. Cooperative cancellation is bounded; an uncooperative timeout stops later work rather than silently overlapping provider calls.
 
 **UIL Channel Abstraction (Phases 0–5 complete):**
 
@@ -1797,6 +1803,8 @@ REV re-bases M365 discovery on delegated, deterministic Graph API surfaces so th
 **Phase 2 (implemented):** LLM extractor (`LLMRevExtractor`, `--extractor llm`) + judge harness (`judge_extractions()`); quality-floor gate (G-xtract-prec ≥80%, G-accept-prec ≥85%, per-type recall ≥50%, Cohen's kappa ≥0.70); corpus export (PII-scrubbed backup bundle); extraction + judge caches (90d TTL + LRU-500); pre-commit hook; gap-fill loop driver (`_drive_gap_lifecycle`); processed-dir rotation; local-import health telemetry in `doctor --rev-health`.
 
 **Phase 3 multi-surface (implemented, 2026-06-24):** calendar `.ics` events via `IcsEnumerator`+`IcsHydrator` (`icalendar>=5.0`; SEQUENCE-highest VEVENT wins; RRULE expansion ≤52; cancellation; organizer CN only — no `mailto:` per OA-9 privacy); SharePoint/local docs via `LocalFileEnumerator`+`LocalFileHydrator` (`python-docx>=1.1`; VBA macro denial; `pypdf` PDF text extraction; `pdf_no_text` quarantine). Teams export **BLOCKED** pending enterprise ZIP format feasibility spike (P3-2a).
+
+**RELO W2/W3 local acceptance:** `vertex rev run` now keeps exact native/cursor/tombstone/occurrence semantics through bounded restarts. Records rejected for identity or source time remain diagnostics only; a successful valid empty response is not mailbox completeness, and nullable chronology is retained only for independently admitted evidence. SharePoint fixture acquisition records ACL/deletion state plus version/offset provenance and is restart-safe. These mechanisms do not grant live provider access or certify population coverage.
 
 #### 12.7.2 Functional requirements (FR-PCI-1..13)
 

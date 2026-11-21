@@ -622,6 +622,11 @@ class ADODiscoveryProvider:
                     else "query_error" if partition_query_error
                     else None if pagination_verified else "unverified_pagination"
                 ),
+                page_count=(
+                    pagination.page_count
+                    if pagination_verified and pagination is not None
+                    else None
+                ),
             )
             for item in scopes
         )

@@ -738,6 +738,43 @@ def test_dependency_incremental_full_canonical_parity(
         assert canonical_projection_dump(incremental_path) == expected
 
 
+def test_dependency_incremental_updates_shared_projection_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    initial = _dependency_event(
+        "dependency.declared.v1", 1,
+        {"dependency_id": "dependency:d1", "from_entity": "milestone:a", "to_entity": "milestone:b"},
+    )
+    replacement = _dependency_event(
+        "dependency.declared.v1", 2,
+        {"dependency_id": "dependency:d1", "from_entity": "milestone:a", "to_entity": "milestone:c"},
+    )
+    path = tmp_path / "incremental.sqlite3"
+    full_path = tmp_path / "full.sqlite3"
+    base_result = project_events_incremental_to_sqlite(
+        "acme", (initial,), projection_path=path, programs_root=programs_root,
+    )
+    before_identity = base_result.projection_sha256
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            program_views,
+            "_project_events_to_sqlite_locked",
+            Mock(side_effect=AssertionError("Expected incremental dependency fold")),
+        )
+        changed_result = project_events_incremental_to_sqlite(
+            "acme", (initial, replacement), projection_path=path, programs_root=programs_root,
+        )
+    project_events_to_sqlite(
+        "acme", (initial, replacement), projection_path=full_path, programs_root=programs_root,
+    )
+
+    assert changed_result.projection_sha256
+    assert changed_result.projection_sha256 != before_identity
+    assert canonical_projection_dump(path) == canonical_projection_dump(full_path)
+    assert canonical_projection_dump(path)["projection_meta"][0]["derived_state_sha256"] == changed_result.projection_sha256
+
+
 def test_old_projector_rebuilds_stale_dependency_links_without_new_events(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -770,7 +807,7 @@ def test_old_projector_rebuilds_stale_dependency_links_without_new_events(
     rebuild.assert_called_once()
     assert result.event_watermark == replacement.event_id
     assert canonical_projection_dump(incremental_path) == canonical_projection_dump(full_path)
-    assert canonical_projection_dump(incremental_path)["projection_meta"][0]["projector_version"] == "5"
+    assert canonical_projection_dump(incremental_path)["projection_meta"][0]["projector_version"] == "6"
 
 
 @pytest.mark.parametrize("via_incremental", [False, True])

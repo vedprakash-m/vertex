@@ -524,6 +524,12 @@ def _extract_per_thread_evidence(
         )
     if not retrieval.response_usable:
         typer.echo(" [WorkIQ: structured discovery response unavailable or invalid]", err=True)
+    empty_unverified = retrieval.response_usable and retrieval.enumeration_count == 0
+    if empty_unverified:
+        typer.echo(
+            " [WorkIQ: bounded discovery returned no records; coverage was not verified]",
+            err=True,
+        )
     evidences: list[WorkstreamEvidence] = []
     for enrichment in retrieval.enrichments:
         # The retriever already requested structured extraction. Reuse the parser
@@ -553,7 +559,7 @@ def _extract_per_thread_evidence(
     return tuple(evidences), bool(
         retrieval.rejected_identity_count or retrieval.rejected_source_time_count
         or retrieval.rejected_invalid_record_count or not retrieval.response_usable
-        or getattr(retrieval, "budget_exhausted", False)
+        or empty_unverified or getattr(retrieval, "budget_exhausted", False)
     )
 
 
@@ -923,15 +929,21 @@ def _record_enrich_provenance_and_quality(
         }.items()
         if present
     )
+    source_ref = next(iter(evidence.source_refs), None)
     prov = make_provenance_record(
         lane_id=lane_id,
         source_type="workiq_email",
-        source_id=f"enrich:{lane_id}:{as_of.date().isoformat()}",
-        source_date=as_of.date().isoformat(),
+        source_id=source_ref.canonical_id if source_ref is not None else None,
+        source_date=(
+            source_ref.source_date.isoformat()
+            if source_ref is not None and source_ref.source_date is not None
+            else None
+        ),
         confidence=evidence.confidence,
         fields_populated=fields_populated,
         operator="auto",
         run_at=as_of,
+        source_time=source_ref.source_time if source_ref is not None else None,
     )
     try:
         record_provenance(prov, program_id=program_id, programs_root=programs_root)

@@ -53,12 +53,38 @@ _RISK_LEVEL_RANK = {
 @dataclass(frozen=True, slots=True)
 class ReadinessSourceConfig:
     type: str
+    artifact_root: Path | None = None
     query_id: str | None = None
     alias: str | None = None
     attested_at: date | None = None
     attested_by: str | None = None
     notes: str | None = None
     workstream_id: str | None = None
+    source_scopes: tuple["ReadinessSourceScope", ...] = ()
+    deployment_references: tuple["ReadinessDeploymentReference", ...] = ()
+    shadow_artifact_ref: str | None = None
+    shadow_artifact_sha256: str | None = None
+    measured_cycle_ref: str | None = None
+    measured_cycle_sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReadinessSourceScope:
+    source: str
+    scope_id: str
+    query_id: str
+    query_hash: str
+    evidence_ref: str
+    evidence_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReadinessDeploymentReference:
+    feature: str
+    model_id: str
+    deployment_id: str
+    approval_ref: str
+    approval_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +263,11 @@ def build_readiness_snapshot(
                     dimension,
                     incident_entries=incident_loader(dimension, resolved_fetched_at),
                 )
+            )
+            continue
+        if dimension.source.type == "offline_readiness":
+            results.append(
+                _evaluate_offline_readiness_dimension(dimension)
             )
             continue
         raise ConfigError(f"Unsupported readiness source type '{dimension.source.type}' for '{dimension.id}'.")
@@ -436,13 +467,119 @@ def _parse_source_config(dimension_id: str, raw_source: Any, *, path: Path) -> R
         raise ConfigError(f"Readiness dimension '{dimension_id}' in {path} is missing source.type.")
     return ReadinessSourceConfig(
         type=source_type,
+        artifact_root=path.parent,
         query_id=_optional_str(raw_source.get("query_id")),
         alias=_optional_str(raw_source.get("alias")),
         attested_at=_parse_optional_date(raw_source.get("attested_at"), field_name=f"{dimension_id}.source.attested_at", path=path),
         attested_by=_optional_str(raw_source.get("attested_by")),
         notes=_optional_str(raw_source.get("notes")),
         workstream_id=_optional_str(raw_source.get("workstream_id")),
+        source_scopes=_parse_offline_source_scopes(dimension_id, raw_source.get("source_scopes"), path=path),
+        deployment_references=_parse_offline_deployment_references(
+            dimension_id, raw_source.get("deployment_references"), path=path
+        ),
+        shadow_artifact_ref=_optional_str(raw_source.get("shadow_artifact_ref")),
+        shadow_artifact_sha256=_optional_str(raw_source.get("shadow_artifact_sha256")),
+        measured_cycle_ref=_optional_str(raw_source.get("measured_cycle_ref")),
+        measured_cycle_sha256=_optional_str(raw_source.get("measured_cycle_sha256")),
     )
+
+
+def _parse_offline_source_scopes(
+    dimension_id: str, raw_scopes: Any, *, path: Path
+) -> tuple[ReadinessSourceScope, ...]:
+    if raw_scopes is None:
+        return ()
+    if not isinstance(raw_scopes, list):
+        raise ConfigError(f"Readiness dimension '{dimension_id}' in {path} source_scopes must be a list.")
+    rows: list[ReadinessSourceScope] = []
+    for index, raw_scope in enumerate(raw_scopes):
+        if not isinstance(raw_scope, dict):
+            raise ConfigError(
+                f"Readiness dimension '{dimension_id}' in {path} source_scopes[{index}] must be a mapping."
+            )
+        rows.append(
+            ReadinessSourceScope(
+                source=_required_nonempty_scope_string(
+                    raw_scope.get("source"), field_name="source", index=index, dimension_id=dimension_id, path=path
+                ),
+                scope_id=_required_nonempty_scope_string(
+                    raw_scope.get("scope_id"), field_name="scope_id", index=index, dimension_id=dimension_id, path=path
+                ),
+                query_id=_required_nonempty_scope_string(
+                    raw_scope.get("query_id"), field_name="query_id", index=index, dimension_id=dimension_id, path=path
+                ),
+                query_hash=_required_nonempty_scope_string(
+                    raw_scope.get("query_hash"), field_name="query_hash", index=index, dimension_id=dimension_id, path=path
+                ),
+                evidence_ref=_required_nonempty_scope_string(
+                    raw_scope.get("evidence_ref"), field_name="evidence_ref", index=index,
+                    dimension_id=dimension_id, path=path,
+                ),
+                evidence_sha256=_required_nonempty_scope_string(
+                    raw_scope.get("evidence_sha256"), field_name="evidence_sha256", index=index,
+                    dimension_id=dimension_id, path=path,
+                ),
+            )
+        )
+    return tuple(rows)
+
+
+def _parse_offline_deployment_references(
+    dimension_id: str, raw_references: Any, *, path: Path
+) -> tuple[ReadinessDeploymentReference, ...]:
+    if raw_references is None:
+        return ()
+    if not isinstance(raw_references, list):
+        raise ConfigError(
+            f"Readiness dimension '{dimension_id}' in {path} deployment_references must be a list."
+        )
+    rows: list[ReadinessDeploymentReference] = []
+    for index, raw_reference in enumerate(raw_references):
+        if not isinstance(raw_reference, dict):
+            raise ConfigError(
+                f"Readiness dimension '{dimension_id}' in {path} deployment_references[{index}] must be a mapping."
+            )
+        rows.append(
+            ReadinessDeploymentReference(
+                feature=_required_nonempty_scope_string(
+                    raw_reference.get("feature"),
+                    field_name="feature",
+                    index=index,
+                    dimension_id=dimension_id,
+                    path=path,
+                ),
+                model_id=_required_nonempty_scope_string(
+                    raw_reference.get("model_id"),
+                    field_name="model_id",
+                    index=index,
+                    dimension_id=dimension_id,
+                    path=path,
+                ),
+                deployment_id=_required_nonempty_scope_string(
+                    raw_reference.get("deployment_id"),
+                    field_name="deployment_id",
+                    index=index,
+                    dimension_id=dimension_id,
+                    path=path,
+                ),
+                approval_ref=_required_nonempty_scope_string(
+                    raw_reference.get("approval_ref"),
+                    field_name="approval_ref",
+                    index=index,
+                    dimension_id=dimension_id,
+                    path=path,
+                ),
+                approval_sha256=_required_nonempty_scope_string(
+                    raw_reference.get("approval_sha256"),
+                    field_name="approval_sha256",
+                    index=index,
+                    dimension_id=dimension_id,
+                    path=path,
+                ),
+            )
+        )
+    return tuple(rows)
 
 
 def _parse_pass_condition(dimension_id: str, raw_condition: Any, *, path: Path) -> ReadinessPassCondition:
@@ -585,6 +722,209 @@ def _evaluate_manual_attestation_dimension(dimension: ReadinessDimensionConfig, 
             "notes": dimension.source.notes,
         },
     )
+
+
+def _evaluate_offline_readiness_dimension(
+    dimension: ReadinessDimensionConfig,
+) -> ReadinessDimensionResult:
+    if dimension.pass_condition.kind != "offline_readiness_complete":
+        raise ConfigError(
+            f"Readiness dimension '{dimension.id}' uses unsupported offline-readiness pass condition "
+            f"'{dimension.pass_condition.kind}'."
+        )
+    source = dimension.source
+    program_root = source.artifact_root
+    if program_root is None:
+        raise ConfigError(
+            f"Readiness dimension '{dimension.id}' has no artifact root for offline evidence."
+        )
+    blockers: list[str] = []
+    if not source.source_scopes:
+        blockers.append("source scopes missing")
+    scope_ids = [(scope.source, scope.scope_id) for scope in source.source_scopes]
+    if len(scope_ids) != len(set(scope_ids)):
+        blockers.append("duplicate source scopes")
+    unavailable: list[str] = []
+    invalid_scopes: list[str] = []
+    for scope in source.source_scopes:
+        payload, valid = _load_verified_readiness_artifact(
+            program_root=program_root,
+            artifact_ref=scope.evidence_ref,
+            expected_sha256=scope.evidence_sha256,
+        )
+        exact = bool(
+            valid
+            and payload
+            and payload.get("source") == scope.source
+            and payload.get("scope_id") == scope.scope_id
+            and payload.get("query_id") == scope.query_id
+            and payload.get("query_hash") == scope.query_hash
+            and payload.get("available") is True
+        )
+        if payload is not None and payload.get("available") is not True:
+            unavailable.append(f"{scope.source}:{scope.scope_id}")
+        if not exact:
+            invalid_scopes.append(f"{scope.source}:{scope.scope_id}")
+    if unavailable:
+        blockers.append("unavailable source scopes")
+    if invalid_scopes:
+        blockers.append("source scope evidence invalid")
+    if not source.deployment_references:
+        blockers.append("deployment references missing")
+    unapproved: list[str] = []
+    invalid_approvals: list[str] = []
+    for reference in source.deployment_references:
+        payload, valid = _load_verified_readiness_artifact(
+            program_root=program_root,
+            artifact_ref=reference.approval_ref,
+            expected_sha256=reference.approval_sha256,
+        )
+        if payload is not None and payload.get("approved") is not True:
+            unapproved.append(f"{reference.feature}:{reference.deployment_id}")
+        exact = bool(
+            valid
+            and payload
+            and payload.get("feature") == reference.feature
+            and payload.get("model_id") == reference.model_id
+            and payload.get("deployment_id") == reference.deployment_id
+            and payload.get("approved") is True
+        )
+        if not exact:
+            invalid_approvals.append(f"{reference.feature}:{reference.deployment_id}")
+    if unapproved:
+        blockers.append("unapproved deployment references")
+    if invalid_approvals:
+        blockers.append("deployment approval evidence invalid")
+    shadow_payload, shadow_valid = _load_verified_readiness_artifact(
+        program_root=program_root,
+        artifact_ref=source.shadow_artifact_ref or "",
+        expected_sha256=source.shadow_artifact_sha256 or "",
+    )
+    shadow_valid = bool(
+        shadow_valid
+        and shadow_payload
+        and shadow_payload.get("artifact_type") == "ai_shadow"
+        and shadow_payload.get("mode") == "shadow"
+        and shadow_payload.get("released") is True
+        and isinstance(shadow_payload.get("ai_run_id"), str)
+        and shadow_payload["ai_run_id"].strip()
+        and isinstance(shadow_payload.get("content_sha256"), str)
+        and shadow_payload["content_sha256"].strip()
+        and shadow_payload.get("deployment_ids")
+        == sorted(
+            {
+                reference.deployment_id
+                for reference in source.deployment_references
+            }
+        )
+    )
+    if not shadow_valid:
+        blockers.append("shadow artifact unavailable")
+    cycle_payload, cycle_valid = _load_verified_readiness_artifact(
+        program_root=program_root,
+        artifact_ref=source.measured_cycle_ref or "",
+        expected_sha256=source.measured_cycle_sha256 or "",
+    )
+    cycle_seconds = cycle_payload.get("measured_cycle_seconds") if cycle_payload else None
+    cycle_valid = bool(
+        cycle_valid
+        and cycle_payload
+        and cycle_payload.get("status") == "complete"
+        and cycle_payload.get("shadow_artifact_ref") == source.shadow_artifact_ref
+        and isinstance(cycle_seconds, (int, float))
+        and not isinstance(cycle_seconds, bool)
+        and cycle_seconds > 0
+    )
+    if not cycle_valid:
+        blockers.append("measured cycle evidence missing")
+    passed = not blockers
+    scopes_payload = [
+        {
+            "source": scope.source,
+            "scope_id": scope.scope_id,
+            "query_id": scope.query_id,
+            "query_hash": scope.query_hash,
+            "evidence_ref": scope.evidence_ref,
+            "evidence_sha256": scope.evidence_sha256,
+        }
+        for scope in source.source_scopes
+    ]
+    deployments_payload = [
+        {
+            "feature": reference.feature,
+            "model_id": reference.model_id,
+            "deployment_id": reference.deployment_id,
+            "approval_ref": reference.approval_ref,
+            "approval_sha256": reference.approval_sha256,
+        }
+        for reference in source.deployment_references
+    ]
+    evidence_refs = [f"{scope.source}:{scope.scope_id}" for scope in source.source_scopes]
+    if source.shadow_artifact_ref:
+        evidence_refs.append(source.shadow_artifact_ref)
+    if source.measured_cycle_ref:
+        evidence_refs.append(source.measured_cycle_ref)
+    return ReadinessDimensionResult(
+        id=dimension.id,
+        name=dimension.name,
+        gate_id=dimension.gate_id,
+        source_type=dimension.source.type,
+        passed=passed,
+        status="green" if passed else "red",
+        summary=(
+            "Offline readiness evidence is complete."
+            if passed
+            else f"Offline readiness is blocked by: {'; '.join(blockers)}."
+        ),
+        observed_value="complete" if passed else "blocked",
+        threshold="all exact scopes available, deployments approved, shadow artifact and measured cycle present",
+        evidence_refs=tuple(evidence_refs),
+        details={
+            "source_scopes": scopes_payload,
+            "deployment_references": deployments_payload,
+            "unavailable_source_scopes": unavailable,
+            "unapproved_deployment_references": unapproved,
+            "invalid_source_scope_evidence": invalid_scopes,
+            "invalid_deployment_approvals": invalid_approvals,
+            "shadow_artifact_ref": source.shadow_artifact_ref,
+            "shadow_artifact_sha256": source.shadow_artifact_sha256,
+            "shadow_artifact_valid": shadow_valid,
+            "measured_cycle_ref": source.measured_cycle_ref,
+            "measured_cycle_sha256": source.measured_cycle_sha256,
+            "measured_cycle_seconds": cycle_seconds if cycle_valid else None,
+            "blockers": blockers,
+        },
+    )
+
+
+def _load_verified_readiness_artifact(
+    *,
+    program_root: Path,
+    artifact_ref: str,
+    expected_sha256: str,
+) -> tuple[dict[str, Any] | None, bool]:
+    if not artifact_ref or not expected_sha256:
+        return None, False
+    relative = Path(artifact_ref)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None, False
+    try:
+        root = program_root.resolve()
+        artifact_path = (root / relative).resolve()
+        artifact_path.relative_to(root)
+        content = artifact_path.read_bytes()
+    except (OSError, ValueError):
+        return None, False
+    if not expected_sha256.startswith("sha256:"):
+        return None, False
+    digest = hashlib.sha256(content).hexdigest()
+    if digest != expected_sha256.removeprefix("sha256:"):
+        return None, False
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, False
+    return (payload, True) if isinstance(payload, dict) else (None, False)
 
 
 def _evaluate_people_directory_dimension(dimension: ReadinessDimensionConfig, *, alias_exists: bool) -> ReadinessDimensionResult:
@@ -971,6 +1311,28 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_bool(value: Any, *, field_name: str, path: Path) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"Invalid {field_name} in {path}: expected true or false.")
+    return value
+
+
+def _required_nonempty_scope_string(
+    value: Any,
+    *,
+    field_name: str,
+    index: int,
+    dimension_id: str,
+    path: Path,
+) -> str:
+    text = _optional_str(value)
+    if text is None:
+        raise ConfigError(
+            f"Readiness dimension '{dimension_id}' in {path} entry {index} is missing {field_name}."
+        )
+    return text
 
 
 def _humanize_dimension_id(dimension_id: str) -> str:

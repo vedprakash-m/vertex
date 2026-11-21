@@ -28,7 +28,7 @@ from src.core.rev.entity_types import EntityType
 from src.core.rev.governor import BudgetLimits, Governor
 from src.core.rev.identity import HydrationLocator
 from src.core.rev.ports import EnumeratedCandidate
-from src.core.rev.result import Incomplete, Success, Unsupported
+from src.core.rev.result import Forbidden, Incomplete, Success, Unsupported
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +553,90 @@ class TestSharePointHydrator:
         assert hydrated.identity.immutable_id is None
         # §5.4: no §13.5 registry route
         assert hydrated.route_metadata.get("sharepoint_no_registry_route") is True
+        assert hydrated.route_metadata["content_offset"] == 0
+        assert hydrated.route_metadata["content_length"] == len(item.file_content)
+        assert hydrated.route_metadata["content_etag"] == item.etag
+        assert hydrated.route_metadata["acl_authorization_claimed"] is False
+
+    def test_metadata_is_retrieved_before_bounded_content(self) -> None:
+        from src.m365.rev.sharepoint_hydrator import GraphDriveItem, SharePointContext
+
+        content = b"0123456789"
+        item = GraphDriveItem(
+            item_id="item-range",
+            drive_id="drive-1",
+            name="bounded.txt",
+            mime_type="text/plain",
+            file_content=content,
+            size=len(content),
+            etag="etag-range",
+        )
+        hydrator, client = self._make_hydrator(items=(item,))
+        hydrator._context = SharePointContext(  # type: ignore[attr-defined]
+            tenant_id="t1",
+            principal_mailbox="identity-2@rev-fixture.example.net",
+            drive_id="drive-1",
+            max_body_bytes=4,
+        )
+        candidate = _candidate("item-range", source_type=EntityType.DRIVE_ITEM)
+
+        result = hydrator.hydrate(candidate, correlation_id="test")
+
+        assert isinstance(result, Success)
+        assert result.value.metadata_only is True
+        assert [call[0] for call in client.calls] == [
+            "get_drive_item",
+            "get_drive_item_content",
+        ]
+        assert client.calls[1][1]["offset"] == 0
+        assert client.calls[1][1]["max_bytes"] == 4
+        assert result.value.route_metadata["content_offset"] == 0
+        assert result.value.route_metadata["content_length"] == 4
+        assert result.value.route_metadata["content_complete"] is False
+        assert result.value.route_metadata["content_etag"] == "etag-range"
+
+    @pytest.mark.parametrize(
+        ("item", "expected", "reason"),
+        [
+            (
+                {
+                    "deleted": True,
+                    "etag": "etag-deleted",
+                },
+                Incomplete,
+                "deleted",
+            ),
+            (
+                {
+                    "inaccessible": True,
+                    "etag": "etag-hidden",
+                },
+                Forbidden,
+                "inaccessible",
+            ),
+        ],
+    )
+    def test_deleted_or_inaccessible_items_are_never_authoritative(
+        self, item, expected, reason: str
+    ) -> None:
+        from src.m365.rev.sharepoint_hydrator import GraphDriveItem
+
+        graph_item = GraphDriveItem(
+            item_id="item-status",
+            drive_id="drive-1",
+            name="status.txt",
+            mime_type="text/plain",
+            file_content=b"old authoritative text",
+            **item,
+        )
+        hydrator, client = self._make_hydrator(items=(graph_item,))
+        candidate = _candidate("item-status", source_type=EntityType.DRIVE_ITEM)
+
+        result = hydrator.hydrate(candidate, correlation_id="test")
+
+        assert isinstance(result, expected)
+        assert reason in result.reason
+        assert [call[0] for call in client.calls] == ["get_drive_item"]
 
     def test_binary_file_metadata_only(self) -> None:
         from src.m365.rev.sharepoint_hydrator import GraphDriveItem

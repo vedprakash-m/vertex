@@ -173,7 +173,98 @@ def test_parallel_timeout_cancels_cooperative_query(tmp_path: Path) -> None:
     assert cancelled.wait(timeout=5)
     assert [row.query_id for row in result.resources.result_sets] == ["query-a"]
     assert result.errors[0].ref_id == "query-hangs"
-    assert "cancelled" in result.errors[0].message.lower()
+    assert "local cancellation" in result.errors[0].message.lower()
+
+
+def test_sequential_timeout_isolated_and_transport_cancellation_not_claimed(
+    tmp_path: Path,
+) -> None:
+    queries = tuple(_query(query_id) for query_id in ("query-hangs", "query-fast"))
+    registrations = tuple(_registration(query_id) for query_id in ("query-hangs", "query-fast"))
+    release = threading.Event()
+
+    def execute(query: KustoQuery, token: KustoCancellationToken) -> list[dict[str, object]]:
+        if query.id == "query-hangs":
+            token.wait(timeout=5)
+            return [{"late": True}]
+        return [{"ok": True}]
+
+    provider = KustoHydrationProvider(
+        executor=lambda _: [],
+        cancellable_executor=execute,
+        query_loader=lambda *_, **__: queries,
+    )
+
+    started = time.monotonic()
+    try:
+        result = provider.hydrate(
+            registrations,
+            _NOW,
+            "demo",
+            KustoHydrationConfig(
+                programs_root=tmp_path,
+                max_concurrency=1,
+                per_query_timeout_seconds=1,
+            ),
+        )
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 4
+    assert result.resources.result_sets == ()
+    assert result.hydrated_ref_ids == ()
+    assert result.failed_ref_ids == (
+        ("query-hangs", "kusto_query"),
+        ("query-fast", "kusto_query"),
+    )
+    assert "local cancellation was requested" in result.errors[0].message
+    assert "provider/server transport cancellation is unclaimed" in result.errors[0].message
+    assert "cancellation incomplete" in result.errors[0].message
+    assert "not started after an incomplete cancellation" in result.errors[1].message
+
+
+def test_uncooperative_sequential_timeout_never_starts_next_query(
+    tmp_path: Path,
+) -> None:
+    queries = tuple(_query(query_id) for query_id in ("query-hangs", "query-must-not-run"))
+    registrations = tuple(
+        _registration(query_id) for query_id in ("query-hangs", "query-must-not-run")
+    )
+    release = threading.Event()
+    second_started = threading.Event()
+
+    def execute(query: KustoQuery) -> list[dict[str, object]]:
+        if query.id == "query-hangs":
+            release.wait(timeout=5)
+        else:
+            second_started.set()
+        return [{"id": query.id}]
+
+    provider = KustoHydrationProvider(
+        executor=execute,
+        query_loader=lambda *_, **__: queries,
+    )
+
+    started = time.monotonic()
+    try:
+        result = provider.hydrate(
+            registrations,
+            _NOW,
+            "demo",
+            KustoHydrationConfig(
+                programs_root=tmp_path,
+                max_concurrency=1,
+                per_query_timeout_seconds=1,
+            ),
+        )
+        assert not second_started.is_set()
+        assert result.resources.result_sets == ()
+        assert len(result.errors) == 2
+        assert "cancellation incomplete" in result.errors[0].message
+        assert "not started" in result.errors[1].message
+        assert time.monotonic() - started < 4
+    finally:
+        release.set()
 
 
 def test_max_concurrency_bounds_simultaneous_executor_threads(tmp_path: Path) -> None:

@@ -211,6 +211,9 @@ class ADOHydrationProvider:
             int,
             tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None],
         ] = {}
+        detail_pagination_by_id: dict[
+            int, tuple[PaginationOutcome | None, PaginationOutcome | None]
+        ] = {}
         checkpoints: dict[
             tuple[int, HydrationSubresource], HydrationCheckpoint
         ] = {}
@@ -312,11 +315,37 @@ class ADOHydrationProvider:
                                 HydrationSubresource.COMMENTS,
                             )
                         )
-            detail_rows_by_id, detail_errors, detail_failed_ids, detail_api_calls = self._hydrate_item_details(
+            incremental_revision_checkpoints = {
+                work_item_id
+                : checkpoints[(work_item_id, HydrationSubresource.REVISIONS)]
+                for work_item_id in work_item_ids
+                if (
+                    (work_item_id, HydrationSubresource.REVISIONS) in checkpoints
+                    and checkpoints[
+                        (work_item_id, HydrationSubresource.REVISIONS)
+                    ].state == "current"
+                    and dict(reseeds).get(work_item_id)
+                    != "anti_entropy_expired"
+                    and _requires_item_detail(
+                        row=rows_by_id.get(work_item_id, {}),
+                        registration=registrations_by_id.get(work_item_id),
+                        since=since,
+                        mode=mode,
+                    )
+                )
+            }
+            (
+                detail_rows_by_id,
+                detail_pagination_by_id,
+                detail_errors,
+                detail_failed_ids,
+                detail_api_calls,
+            ) = self._hydrate_item_details(
                 work_item_ids=work_item_ids,
                 rows_by_id=rows_by_id,
                 config=config,
                 required_details=required_details,
+                revision_checkpoints=incremental_revision_checkpoints,
             )
             api_calls += detail_api_calls
             errors.extend(detail_errors)
@@ -392,7 +421,12 @@ class ADOHydrationProvider:
                         work_item_id,
                         HydrationSubresource.ITEM,
                         _fingerprint([row]),
-                        row,
+                        _checkpoint_evidence(
+                            HydrationSubresource.ITEM,
+                            _fingerprint([row]),
+                            [row],
+                            pagination=None,
+                        ),
                         provider_instance_id,
                         checkpoints,
                     )
@@ -404,7 +438,14 @@ class ADOHydrationProvider:
                             work_item_id,
                             HydrationSubresource.REVISIONS,
                             _revision_cursor(revision_rows),
-                            revision_rows,
+                            _checkpoint_evidence(
+                                HydrationSubresource.REVISIONS,
+                                _revision_cursor(revision_rows),
+                                revision_rows,
+                                pagination=detail_pagination_by_id.get(
+                                    work_item_id, (None, None)
+                                )[0],
+                            ),
                             provider_instance_id,
                             checkpoints,
                         )
@@ -415,7 +456,14 @@ class ADOHydrationProvider:
                             work_item_id,
                             HydrationSubresource.COMMENTS,
                             str(len(comment_rows)),
-                            comment_rows,
+                            _checkpoint_evidence(
+                                HydrationSubresource.COMMENTS,
+                                str(len(comment_rows)),
+                                comment_rows,
+                                pagination=detail_pagination_by_id.get(
+                                    work_item_id, (None, None)
+                                )[1],
+                            ),
                             provider_instance_id,
                             checkpoints,
                         )
@@ -483,8 +531,10 @@ class ADOHydrationProvider:
         rows_by_id: dict[int, dict[str, Any]],
         config: ADOHydrationConfig,
         required_details: dict[int, frozenset[HydrationSubresource]],
+        revision_checkpoints: dict[int, HydrationCheckpoint] | None = None,
     ) -> tuple[
         dict[int, tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]],
+        dict[int, tuple[PaginationOutcome | None, PaginationOutcome | None]],
         list[IntegrationError],
         list[str],
         int,
@@ -503,7 +553,7 @@ class ADOHydrationProvider:
             and required_details.get(work_item_id)
         )
         if not detail_ids:
-            return {}, [], [], 0
+            return {}, {}, [], [], 0
 
         # Directly constructed providers and lightweight test fakes retain the
         # original sequential behavior. Production construction supplies a
@@ -518,6 +568,7 @@ class ADOHydrationProvider:
                     in required_details[work_item_id],
                     HydrationSubresource.COMMENTS
                     in required_details[work_item_id],
+                    (revision_checkpoints or {}).get(work_item_id),
                 )
                 for work_item_id in detail_ids
             ]
@@ -537,6 +588,7 @@ class ADOHydrationProvider:
                     in required_details[work_item_id],
                     HydrationSubresource.COMMENTS
                     in required_details[work_item_id],
+                    (revision_checkpoints or {}).get(work_item_id),
                 )
 
             with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="vertex-ado-detail") as executor:
@@ -547,6 +599,9 @@ class ADOHydrationProvider:
             int,
             tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None],
         ] = {}
+        detail_pagination_by_id: dict[
+            int, tuple[PaginationOutcome | None, PaginationOutcome | None]
+        ] = {}
         errors: list[IntegrationError] = []
         failed_ids: list[str] = []
         api_calls = 0
@@ -556,7 +611,11 @@ class ADOHydrationProvider:
                 errors.extend(result.errors)
                 failed_ids.append(str(result.work_item_id))
             detail_rows_by_id[result.work_item_id] = (result.revision_rows, result.comment_rows)
-        return detail_rows_by_id, errors, failed_ids, api_calls
+            detail_pagination_by_id[result.work_item_id] = (
+                result.revision_pagination,
+                result.comment_pagination,
+            )
+        return detail_rows_by_id, detail_pagination_by_id, errors, failed_ids, api_calls
 
     @staticmethod
     def _fetch_item_detail(
@@ -564,6 +623,7 @@ class ADOHydrationProvider:
         client: ADOClient,
         fetch_revisions: bool,
         fetch_comments: bool,
+        revision_checkpoint: HydrationCheckpoint | None = None,
     ) -> "_ItemDetailFetch":
         api_calls = 0
         errors: list[IntegrationError] = []
@@ -572,7 +632,9 @@ class ADOHydrationProvider:
             name: str,
             loader: Callable[..., list[dict[str, Any]]] | None,
             timestamp: Callable[[dict[str, Any]], datetime | None],
-        ) -> list[dict[str, Any]] | None:
+            *,
+            checkpoint: HydrationCheckpoint | None = None,
+        ) -> _HistoryFetch | None:
             nonlocal api_calls
             description = f"Failed to hydrate work item {work_item_id}"
             outcomes: list[PaginationOutcome] = []
@@ -582,7 +644,16 @@ class ADOHydrationProvider:
                 message = f"{description} {name}: loader unavailable."
             else:
                 try:
-                    history = loader(work_item_id, on_pagination=outcomes.append)
+                    prior_records: list[dict[str, Any]] = []
+                    start_after_revision = 0
+                    if name == "revisions" and checkpoint is not None:
+                        prior_records, start_after_revision = _checkpoint_revision_records(
+                            checkpoint
+                        )
+                    loader_kwargs: dict[str, Any] = {"on_pagination": outcomes.append}
+                    if start_after_revision > 0:
+                        loader_kwargs["start_after_revision"] = start_after_revision
+                    history = loader(work_item_id, **loader_kwargs)
                 except AuthError as error:
                     reason = "credential expired" if isinstance(error, CredentialExpired) else "authentication failed"
                     message = f"{description} {name}: {reason}."
@@ -606,7 +677,47 @@ class ADOHydrationProvider:
                             except (ValueError, OverflowError):
                                 timestamps_valid = False
                             if timestamps_valid:
-                                return history
+                                if start_after_revision > 0:
+                                    revisions = [
+                                        row.get("rev") for row in history
+                                    ]
+                                    if not all(
+                                        type(revision) is int
+                                        and revision > start_after_revision
+                                        for revision in revisions
+                                    ):
+                                        outcomes.clear()
+                                        try:
+                                            history = loader(
+                                                work_item_id,
+                                                on_pagination=outcomes.append,
+                                            )
+                                        except (AuthError, QueryError):
+                                            history = []
+                                            outcomes.clear()
+                                        if (
+                                            len(outcomes) != 1
+                                            or outcomes[0].total_fetched
+                                            != len(history)
+                                            or outcomes[0].page_count <= 0
+                                            or outcomes[0].is_truncated
+                                        ):
+                                            outcomes.clear()
+                                            timestamps_valid = False
+                                        else:
+                                            prior_records = []
+                                    else:
+                                        prior_records = [
+                                            row
+                                            for row in prior_records
+                                            if isinstance(row, dict)
+                                        ]
+                                if timestamps_valid:
+                                    return _HistoryFetch(
+                                        rows=prior_records + history,
+                                        pagination=outcomes[0],
+                                        fetched_count=len(history),
+                                    )
                             message = f"{description} {name}: invalid timestamp."
                         else:
                             reason = "truncated" if outcome.is_truncated is True else "unverified"
@@ -627,15 +738,18 @@ class ADOHydrationProvider:
             )
             return None
 
-        revision_rows = (
+        revision_fetch = (
             _fetch_history(
-                "revisions", client.list_work_item_revisions, _revision_timestamp
+                "revisions",
+                client.list_work_item_revisions,
+                _revision_timestamp,
+                checkpoint=revision_checkpoint,
             )
             if fetch_revisions
             else None
         )
         comment_loader = getattr(client, "list_work_item_comments", None)
-        comment_rows = (
+        comment_fetch = (
             _fetch_history(
                 "comments",
                 comment_loader if callable(comment_loader) else None,
@@ -644,7 +758,15 @@ class ADOHydrationProvider:
             if fetch_comments
             else None
         )
-        return _ItemDetailFetch(work_item_id, revision_rows, comment_rows, api_calls, tuple(errors))
+        return _ItemDetailFetch(
+            work_item_id,
+            revision_fetch.rows if revision_fetch is not None else None,
+            comment_fetch.rows if comment_fetch is not None else None,
+            api_calls,
+            tuple(errors),
+            revision_fetch.pagination if revision_fetch is not None else None,
+            comment_fetch.pagination if comment_fetch is not None else None,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -654,6 +776,15 @@ class _ItemDetailFetch:
     comment_rows: list[dict[str, Any]] | None
     api_calls: int
     errors: tuple[IntegrationError, ...] = ()
+    revision_pagination: PaginationOutcome | None = None
+    comment_pagination: PaginationOutcome | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _HistoryFetch:
+    rows: list[dict[str, Any]]
+    pagination: PaginationOutcome
+    fetched_count: int
 
 
 def _requires_item_detail(
@@ -684,6 +815,50 @@ def _requires_item_detail(
 def _revision_cursor(revision_rows: list[dict[str, Any]]) -> str:
     revs = [row["rev"] for row in revision_rows if type(row.get("rev")) is int]
     return str(max(revs)) if revs else str(len(revision_rows))
+
+
+def _checkpoint_evidence(
+    subresource: HydrationSubresource,
+    cursor: str,
+    records: object,
+    *,
+    pagination: PaginationOutcome | None,
+) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "subresource": subresource.value,
+        "cursor": cursor,
+        "records": records,
+        "pagination": (
+            None
+            if pagination is None
+            else {
+                "total_fetched": pagination.total_fetched,
+                "page_count": pagination.page_count,
+                "is_truncated": pagination.is_truncated,
+            }
+        ),
+    }
+
+
+def _checkpoint_revision_records(
+    checkpoint: HydrationCheckpoint,
+) -> tuple[list[dict[str, Any]], int]:
+    if not checkpoint.evidence_json or not checkpoint.cursor:
+        return [], 0
+    try:
+        cursor = int(checkpoint.cursor)
+        payload = json.loads(checkpoint.evidence_json)
+    except (TypeError, ValueError):
+        return [], 0
+    records = payload.get("records") if isinstance(payload, dict) else payload
+    if (
+        cursor <= 0
+        or not isinstance(records, list)
+        or any(not isinstance(record, dict) for record in records)
+    ):
+        return [], 0
+    return records, cursor
 
 
 def _fingerprint(values: list[object]) -> str:
@@ -745,7 +920,12 @@ def _relation_checkpoint_advances(
                 work_item_id,
                 HydrationSubresource.RELATIONS,
                 _fingerprint(list(links)),
-                list(links),
+                _checkpoint_evidence(
+                    HydrationSubresource.RELATIONS,
+                    _fingerprint(list(links)),
+                    list(links),
+                    pagination=None,
+                ),
                 provider_instance_id,
                 checkpoints,
             )
@@ -755,7 +935,12 @@ def _relation_checkpoint_advances(
                 work_item_id,
                 HydrationSubresource.ATTACHMENT_META,
                 _fingerprint(list(attachments)),
-                list(attachments),
+                _checkpoint_evidence(
+                    HydrationSubresource.ATTACHMENT_META,
+                    _fingerprint(list(attachments)),
+                    list(attachments),
+                    pagination=None,
+                ),
                 provider_instance_id,
                 checkpoints,
             )

@@ -119,12 +119,14 @@ def retrieve_workiq_threads(
         window_end=request.window_end,
         limit=request.limit,
     )
-    records = tuple(validated.payload.get("emails") or [])
+    admitted_records = tuple(validated.payload.get("emails") or [])
+    records = admitted_records
     cache = load_workiq_freshness_cache(cache_path) if cache_path is not None else {}
     enrichments: list[Enrichment] = []
     skipped = 0
     rejected = validated.rejected_identity_count
     budget_exhausted = False
+    seen_source_ids: set[str] = set()
     for record in records[:top_k]:
         if run_budget.calls_made >= run_budget.max_calls or run_budget.remaining_seconds() <= 0:
             budget_exhausted = True
@@ -133,7 +135,10 @@ def retrieve_workiq_threads(
         if source_id is None:
             rejected += 1
             continue
-        newest_identity = str(record.get("id") or record.get("receivedDateTime") or "").strip()
+        if source_id in seen_source_ids:
+            continue
+        seen_source_ids.add(source_id)
+        newest_identity = _freshness_identity(record)
         message_count = _bounded_message_count(record.get("messageCount"))
         freshness = workiq_thread_freshness_hash(
             conversation_id=source_id,
@@ -177,7 +182,8 @@ def retrieve_workiq_threads(
     if cache_path is not None and write_cache:
         write_workiq_freshness_cache(cache_path, cache)
     return WorkIQRetrievalResult(
-        tuple(enrichments), len(records), calls, skipped, rejected, validated.rejected_source_time_count,
+        tuple(enrichments), len(admitted_records), calls, skipped, rejected,
+        validated.rejected_source_time_count,
         response_usable=validated.response_usable,
         rejected_invalid_record_count=validated.rejected_invalid_record_count,
         budget_exhausted=budget_exhausted,
@@ -205,6 +211,24 @@ def _canonical_source_id(record: dict[str, Any]) -> str | None:
         if value is not None and _is_native_workiq_identity(value):
             return value
     return None
+
+
+def _freshness_identity(record: dict[str, Any]) -> str:
+    provider_revision = {
+        key: record.get(key)
+        for key in (
+        "changeKey",
+        "lastModifiedDateTime",
+        "modifiedDateTime",
+        "changeType",
+        "deleted",
+        )
+        if record.get(key) is not None
+    }
+    identity = str(record.get("id") or record.get("receivedDateTime") or "").strip()
+    if not provider_revision:
+        return identity
+    return f"{identity}:{json.dumps(provider_revision, ensure_ascii=False, sort_keys=True)}"
 
 
 def _response_text(payload: Any) -> str | None:

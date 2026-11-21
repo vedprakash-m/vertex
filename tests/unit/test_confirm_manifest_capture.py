@@ -325,10 +325,14 @@ def test_program_backed_confirmation_rejects_unbound_historical_capture_without_
         payload, draft = _wire(capture)
         payload = json.loads(json.dumps(payload, default=lambda value: value.isoformat()))
         raw = payload["metadata"]["run_evidence_snapshot"]
+        raw.pop("source_scope_sha256")
+        raw.pop("binding_set_sha256")
+        raw.pop("selector_sha256")
         if capture_version == "v1":
             raw.pop("effective_family_modes")
             raw["schema_version"] = "run-evidence-capture.v1"
         else:
+            raw["schema_version"] = "run-evidence-capture.v2"
             raw["effective_family_modes"] = []
         raw.pop("sha256")
         raw["sha256"] = hash_jsonable(raw)

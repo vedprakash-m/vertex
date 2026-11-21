@@ -10,7 +10,7 @@ import os
 _VERTEX_CHARTS_ENABLED = os.environ.get("VERTEX_CHARTS", "1") == "1"
 from pathlib import Path
 from time import monotonic, perf_counter
-from typing import Any, Callable
+from typing import Any, Callable, TypedDict
 import uuid
 from uuid import NAMESPACE_URL, uuid5
 
@@ -73,6 +73,7 @@ from src.commands.gather_pipeline.projection_stage import (
     trajectory_point_from_item as _projection_trajectory_point_from_item,
 )
 from src.commands.gather_pipeline.kusto_query_helpers import build_kusto_signal as _build_kusto_signal_impl
+from src.commands.gather_pipeline.kusto_query_helpers import build_kusto_kpi_signal as _build_kusto_kpi_signal_impl
 from src.commands.gather_pipeline.kusto_query_helpers import build_kusto_signals as _build_kusto_signals_impl
 from src.commands.gather_pipeline.kusto_query_helpers import record_kusto_query_state as _record_kusto_query_state_impl
 from src.commands.gather_pipeline.icm_signal_stage import build_icm_query_signals as _build_icm_query_signals_impl
@@ -187,6 +188,7 @@ from src.core.gather_channel_support import (
 )
 from src.core.gather_run_manifest import (
     ACTOR_IDENTITY_INTERACTIVE,
+    ACTOR_IDENTITY_SCHEDULED,
     ChannelOutcomeEntry,
     GATHER_MUTATION_DOMAIN,
     FailedRefEntry,
@@ -207,6 +209,7 @@ from src.core.gather_run_manifest import (
     write_ado_items,
     write_query_results_sidecar,
 )
+from src.core.gather_schedule_monitor import require_scheduled_gather_authorized
 from src.core.gather_state_store import load_gather_state
 from src.core.ledger.ulid import new_ulid
 from src.core.workspace_lease import (
@@ -268,6 +271,9 @@ from src.core.integration_types import (
     RunContext,
 )
 from src.core.kusto_signal_extractor import format_kusto_result_text
+from src.core.kusto_result_contract import build_kusto_result_schema
+from src.core.kusto_hydration import compute_kusto_slo_breach
+from src.core.metric_binding_validator import coerce_metric_value
 from src.core.models import Comment, Confidence, Revision, RiskLevel, SnapshotItem, WorkItem
 from src.core.program_fact_store import (
     load_current_action_items,
@@ -322,6 +328,10 @@ from src.m365.registry_id_discovery import (
 from src.m365.teams_reader import TeamsReader
 from src.m365.transcript_reader import TranscriptReader
 from src.m365.workiq_ask_support import validate_structured_discovery_payload_with_diagnostics
+
+
+class _GatherActorKwargs(TypedDict, total=False):
+    actor_identity_type: str
 
 
 _BATCH_FIELDS = (
@@ -511,6 +521,11 @@ def gather_command(
     verbose: bool = typer.Option(False, "--verbose", help="Write structured gather traces under publications/<program>/observability/."),
     facts_only: bool = typer.Option(False, "--facts-only", help="Skip full gather; only mirror current program facts into the fact store (FR-SG-61)."),
     extract_evidence: bool = typer.Option(False, "--extract-evidence", help="Run ContentExtractionAgent on transcript signals to populate WorkstreamEvidence. Requires --workiq. Off by default until validated."),
+    scheduled: bool = typer.Option(
+        False,
+        "--scheduled",
+        help="Mark this as scheduler-driven read-only acquisition; the process principal is resolved from the OS.",
+    ),
     force_discovery: bool = typer.Option(False, "--force-discovery", help="Sec 4.4: bypass the discovery-staleness check for UIL-backed channels (ado/kusto/teams/icm) and force discovery even if not yet due. Required after changing query bindings."),
     accept_shrinkage: bool = typer.Option(False, "--accept-shrinkage", help="Sec 4.4: accept a guarded registry shrinkage (>=30% removed, >=5 items) for UIL-backed channels this run instead of blocking the registry update; classified removals are printed."),
     source_export: list[str] = typer.Option(
@@ -520,6 +535,11 @@ def gather_command(
     ),
 ) -> None:
     source_export_counts = _parse_source_export_counts(source_export)
+    if scheduled:
+        require_scheduled_gather_authorized(
+            program,
+            programs_root=PROGRAMS_ROOT,
+        )
     if facts_only:
         _now = datetime.now(timezone.utc)
         _programs_root = PROGRAMS_ROOT
@@ -568,6 +588,11 @@ def gather_command(
         force_refresh=force_refresh,
     )
     try:
+        actor_kwargs: _GatherActorKwargs = (
+            {"actor_identity_type": ACTOR_IDENTITY_SCHEDULED}
+            if scheduled
+            else {}
+        )
         artifacts = gather_program(
             program,
             include_workiq=resolved_flags["workiq"],
@@ -587,6 +612,7 @@ def gather_command(
             force_discovery=force_discovery,
             accept_shrinkage=accept_shrinkage,
             source_export_counts=source_export_counts,
+            **actor_kwargs,
         )
     except (GatherLeaseConflict, LeaseFencingTokenStale, LeaseRenewalFailed) as error:
         # D-7/AG-7.3: an overlapping or fenced-out gather is not a usage
@@ -732,6 +758,11 @@ def gather_program(
     never affects discovery/hydration behavior itself.
     """
     resolved_programs_root = programs_root or PROGRAMS_ROOT
+    if actor_identity_type == ACTOR_IDENTITY_SCHEDULED:
+        require_scheduled_gather_authorized(
+            program_id,
+            programs_root=resolved_programs_root,
+        )
     resolved_source_export_counts = source_export_counts or {}
     runtime_policy = load_gather_runtime_policy(
         program_id,
@@ -887,6 +918,7 @@ def gather_program(
                     result.scope_id, result.raw_count, resolved_source_export_counts
                 ),
                 failure_category=result.failure_category,
+                page_count=result.page_count,
             )
             for result in artifacts.ado_query_results
         )
@@ -908,6 +940,11 @@ def gather_program(
                 _has_required_scope_degradation(artifacts)
                 or query_capture_skew_exceeded
                 or not authoritative_discovery_captured
+                or any(
+                    type(result.page_count) is not int
+                    or result.page_count <= 0
+                    for result in query_results
+                )
             )
             else RequiredScopeStatus.FULL
         )
@@ -3136,74 +3173,9 @@ def _build_kusto_kpi_signal(
     as_of: datetime,
     entity_refs: tuple[str, ...] | None = None,
 ) -> Signal | None:
-    from src.core.metric_binding_validator import kusto_metric_result_error
-
-    if not rows or kusto_metric_result_error(
-        query.id, query.expected_cardinality, rows,
-        metric_id=query.metric_id, result_column=query.result_column,
-        slo_target=query.slo_target, comparison=query.comparison,
-        result_limits=query.result_limits,
-    ):
-        return None
-
-    timestamp = _kusto_event_timestamp(rows, as_of=as_of)
-    event_timestamp = timestamp.isoformat()
-    raw_ref = f"kusto_kpi:{query.id}:{event_timestamp}"
-    first_row = rows[0]
-    unbound_kusto_result = query.engine == "kusto" and query.metric_id is None
-    result_value = (
-        None
-        if unbound_kusto_result and (len(rows) != 1 or query.result_column is None)
-        else _kusto_kpi_value(query, first_row)
-    )
-    label = query.label or query.section or query.id
-    value_label = result_value if result_value is not None else "rows available"
-    if unbound_kusto_result:
-        text = format_kusto_result_text(
-            KustoResultSet(
-                query_id=query.id,
-                rows=tuple(rows),
-                observed_at=timestamp,
-                result_column=query.result_column,
-                row_count=len(rows),
-            )
-        )
-    else:
-        text = f"KPI {label}: {value_label}"
-    # BL-F2 (D-19): see kusto_query_helpers.build_kusto_signal for this fix's rationale.
-    workstream_id = query.workstream_ids[0] if query.workstream_ids else None
-    signal_entity_refs = merge_entity_refs(
-        provider_refs=entity_refs if entity_refs is not None else _extract_kusto_entity_refs(rows),
-        workstream_id=workstream_id,
-    )
-    return Signal(
-        id=str(uuid5(NAMESPACE_URL, f"{program_id}|{raw_ref}|{query.id}")),
-        timestamp=timestamp,
-        source="kusto_kpi",
-        program_id=program_id,
-        workstream_id=workstream_id,
-        workstream_ids=query.workstream_ids,
-        entity_refs=signal_entity_refs,
-        text=_truncate_signal_text(text),
-        raw_ref=raw_ref,
-        confidence=_confidence_from_string(query.confidence),
-        metadata={
-            "query_id": query.id,
-            "cluster": query.cluster,
-            "database": query.database,
-            "engine": query.engine,
-            "validated": query.validated,
-            "event_timestamp": event_timestamp,
-            "row_count": len(rows),
-            "label": query.label,
-            "result_column": query.result_column,
-            "result_value": result_value, "unit": query.unit,
-            "result_json": (
-                json.dumps(first_row, default=str, sort_keys=True)
-                if not unbound_kusto_result or len(rows) == 1
-                else None
-            ),
-        },
+    return _build_kusto_kpi_signal_impl(
+        query=query, rows=rows, program_id=program_id, as_of=as_of,
+        entity_refs=entity_refs,
     )
 
 

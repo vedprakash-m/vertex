@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -337,6 +338,87 @@ def test_current_checkpoint_keeps_incremental_skip_for_unchanged_item() -> None:
     } == {HydrationSubresource.ITEM}
 
 
+def test_changed_item_reuses_verified_revision_prefix_and_records_page_evidence() -> None:
+    old_revisions = [
+        {
+            "rev": 1,
+            "fields": {"System.ChangedDate": "2026-05-20T10:00:00Z"},
+        },
+        {
+            "rev": 2,
+            "fields": {"System.ChangedDate": "2026-05-24T09:00:00Z"},
+        },
+    ]
+    checkpoints = {
+        (42, HydrationSubresource.REVISIONS): HydrationCheckpoint(
+            42,
+            HydrationSubresource.REVISIONS,
+            "current",
+            2,
+            "2",
+            provider_instance_id="default",
+            updated_at=_VERIFIED,
+            evidence_json=json.dumps(
+                {
+                    "schema_version": 2,
+                    "subresource": "revisions",
+                    "cursor": "2",
+                    "records": old_revisions,
+                    "pagination": {
+                        "total_fetched": 2,
+                        "page_count": 1,
+                        "is_truncated": False,
+                    },
+                }
+            ),
+        )
+    }
+    revision_requests: list[dict[str, object]] = []
+
+    class _Incremental(_FakeADOClient):
+        def list_work_item_revisions(
+            self, work_item_id: int, **kwargs: object
+        ) -> list[dict[str, object]]:
+            revision_requests.append(dict(kwargs))
+            rows = [
+                {
+                    "rev": 3,
+                    "fields": {"System.ChangedDate": "2026-05-24T10:00:00Z"},
+                }
+            ]
+            callback = kwargs.get("on_pagination")
+            if callable(callback):
+                from src.core.integration_types import PaginationOutcome
+
+                callback(PaginationOutcome(1, 1, False))
+            return rows
+
+    reg = replace(
+        _registration("42", last_verified_at=datetime(2026, 5, 24, 9, 30, tzinfo=timezone.utc)),
+    )
+    result = _provider(_Incremental(), checkpoints).hydrate(
+        (reg,),
+        _SINCE,
+        "demo",
+        ADOHydrationConfig(anti_entropy_after_seconds=10**12),
+        mode=HydrationMode.FULL,
+    )
+
+    assert [request.get("start_after_revision") for request in revision_requests] == [2]
+    revision_advance = next(
+        advance
+        for advance in result.resources.checkpoint_advances
+        if advance.subresource is HydrationSubresource.REVISIONS
+    )
+    evidence = json.loads(revision_advance.evidence_json or "{}")
+    assert [row["rev"] for row in evidence["records"]] == [1, 2, 3]
+    assert evidence["pagination"] == {
+        "total_fetched": 1,
+        "page_count": 1,
+        "is_truncated": False,
+    }
+
+
 def test_relations_and_attachment_metadata_checkpoints_without_download() -> None:
     client = _RelationsClient()
     provider = _provider(client, {})
@@ -363,3 +445,82 @@ def test_failed_detail_does_not_propose_history_checkpoints() -> None:
         (42, HydrationSubresource.REVISIONS),
     }
     assert result.resources.checkpoint_evidence_ref_ids == (("42", "work_item"),)
+
+
+def test_checkpoint_evidence_commit_preserves_page_records_through_replay(
+    tmp_path: Path,
+) -> None:
+    store = _seeded_store(tmp_path)
+    evidence = json.dumps(
+        {
+            "schema_version": 2,
+            "subresource": "comments",
+            "cursor": "1",
+            "records": [{"id": 7}],
+            "pagination": {
+                "total_fetched": 1,
+                "page_count": 1,
+                "is_truncated": False,
+            },
+        },
+        sort_keys=True,
+    )
+    store.mark_verified(
+        "ado",
+        (("42", "work_item"),),
+        _AT,
+        checkpoint_advances=(
+            CheckpointAdvance(
+                42,
+                HydrationSubresource.COMMENTS,
+                "1",
+                evidence_json=evidence,
+            ),
+        ),
+    )
+
+    with sqlite3.connect(tmp_path / "registry.sqlite3") as conn:
+        conn.row_factory = sqlite3.Row
+        persisted = read_hydration_evidence(
+            conn, "default", 42, HydrationSubresource.COMMENTS
+        )
+    assert persisted is not None
+    assert json.loads(persisted)["pagination"]["page_count"] == 1
+    checkpoint = store.read_hydration_checkpoints("default", (42,))[
+        (42, HydrationSubresource.COMMENTS)
+    ]
+    assert checkpoint.state == "current"
+    assert json.loads(checkpoint.evidence_json or "{}") == json.loads(evidence)
+
+
+def test_anti_entropy_reseeds_all_history_after_expiry_without_losing_evidence() -> None:
+    old = _AT.replace(day=1)
+    checkpoints = {
+        (42, subresource): HydrationCheckpoint(
+            42,
+            subresource,
+            "current",
+            2,
+            "old",
+            updated_at=old,
+        )
+        for subresource in (
+            HydrationSubresource.REVISIONS,
+            HydrationSubresource.COMMENTS,
+        )
+    }
+    client = _FakeADOClient()
+    result = _provider(client, checkpoints).hydrate(
+        (_registration("42", last_verified_at=_VERIFIED),),
+        _SINCE,
+        "demo",
+        ADOHydrationConfig(
+            anti_entropy_after_seconds=1,
+            anti_entropy_max_expired_items=1,
+        ),
+        mode=HydrationMode.FULL,
+    )
+
+    assert client.revision_calls == [42]
+    assert client.comment_calls == [42]
+    assert (42, "anti_entropy_expired") in result.resources.checkpoint_reseed_reasons

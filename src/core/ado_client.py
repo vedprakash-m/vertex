@@ -352,6 +352,7 @@ class ADOClient:
         self,
         work_item_id: int,
         *,
+        start_after_revision: int = 0,
         page_size: int = 200,
         max_pages: int = _DEFAULT_MAX_PAGES,
         on_pagination: Callable[[PaginationOutcome], None] | None = None,
@@ -365,7 +366,9 @@ class ADOClient:
         all_rows: list[dict[str, Any]] = []
         page_count = 0
         is_truncated = False
-        skip = 0
+        if type(start_after_revision) is not int or start_after_revision < 0:
+            raise ValueError("ADO revision checkpoint must be a non-negative integer.")
+        skip = start_after_revision
         while page_count < max_pages:
             try:
                 response = self._request_json("GET", url, params={"$top": str(page_size), "$skip": str(skip)})

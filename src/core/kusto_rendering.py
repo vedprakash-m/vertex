@@ -193,7 +193,15 @@ def build_kusto_sections(
 
         if not rows:
             if query.render_as == "chart_image" and not charts_active:
-                sections.append(_build_table_section(query, (), message=None, degraded=False))
+                sections.append(
+                    _build_table_section(
+                        query,
+                        (),
+                        message=None,
+                        degraded=False,
+                        result_kind=result_schema.kind.value,
+                    )
+                )
                 observations.append(_make_observation(query, observed_time, "success", None))
                 continue
             # Zero rows from live query is a valid data state — spec §5.5.
@@ -256,7 +264,15 @@ def build_kusto_sections(
                 continue
 
             if not charts_active:
-                sections.append(_build_table_section(query, rows, message=None, degraded=False))
+                sections.append(
+                    _build_table_section(
+                        query,
+                        rows,
+                        message=None,
+                        degraded=False,
+                        result_kind=result_schema.kind.value,
+                    )
+                )
                 observations.append(_make_observation(query, observed_time, "success", None))
                 continue
 
@@ -267,6 +283,7 @@ def build_kusto_sections(
                     chart_registry=chart_registry,
                     theme_context=theme_context,
                     chart_cache_loader=chart_cache_loader,
+                    result_kind=result_schema.kind.value,
                 )
                 if section is not None:
                     sections.append(section)
@@ -315,7 +332,11 @@ def build_kusto_sections(
 
             if query.chart_blocks_publish:
                 sections.append(_build_table_section(
-                    query, rows, message="Chart rendering failed; showing a table instead.", degraded=True,
+                    query,
+                    rows,
+                    message="Chart rendering failed; showing a table instead.",
+                    degraded=True,
+                    result_kind=result_schema.kind.value,
                 ))
                 observations.append(_make_observation(query, observed_time, "success", None))
                 continue
@@ -642,6 +663,7 @@ def _build_registry_chart_section(
     chart_registry,
     theme_context,
     chart_cache_loader,
+    result_kind: str = KustoResultKind.TABLE.value,
 ):
     """Build a chart section using the chart registry pipeline."""
     chart_config = getattr(query, "chart_config", None) or {}
@@ -708,6 +730,7 @@ def _build_registry_chart_section(
         chart_cache_ttl_hours=cache_ttl_hours,
         section_placement=section_placement,
         cache_captured_at=None,
+        result_kind=result_kind,
     )
 
     obs = _make_observation(query, observed_time, "success", None)
@@ -741,6 +764,12 @@ def _build_chart_section_from_cache(query, cache_entry, observed_time, fallback_
 
     attachment = getattr(query, "attachment", None)
     section_placement = attachment.target if attachment and hasattr(attachment, "target") else "standalone"
+    from src.core.kusto_result_contract import build_kusto_result_schema
+
+    result_kind = build_kusto_result_schema(
+        rows,
+        expected_cardinality=getattr(query, "expected_cardinality", "zero_ok"),
+    ).kind.value
 
     return KustoSectionData(
         section_id=_section_id(query.id),
@@ -764,6 +793,7 @@ def _build_chart_section_from_cache(query, cache_entry, observed_time, fallback_
         chart_cache_ttl_hours=getattr(query, "chart_cache_ttl_hours", _DEFAULT_CHART_CACHE_TTL_HOURS),
         section_placement=section_placement,
         cache_captured_at=cache_entry.captured_at,
+        result_kind=result_kind,
     )
 
 

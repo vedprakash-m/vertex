@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -115,12 +116,132 @@ def test_enumerate_dedupes_by_resource_id() -> None:
     assert _ids(result) == ["m1"]
 
 
+def test_checkpoint_page_preserves_latest_edit_and_suppresses_tombstone() -> None:
+    records = (
+        {"id": "edited", "subject": "old", "receivedDateTime": "2026-11-01T00:00:00Z"},
+        {"id": "deleted", "receivedDateTime": "2026-11-01T00:00:00Z"},
+        {"id": "edited", "subject": "new", "receivedDateTime": "2026-11-02T00:00:00Z"},
+        {"id": "deleted", "@removed": {"reason": "deleted"}},
+    )
+    enumerator = WorkIQEnumerator(
+        lambda _intent, *, cursor: WorkIQPage(records, None),
+        CTX,
+        program_id="synthetic",
+    )
+
+    result = enumerator.enumerate(_intent(), correlation_id="x")
+
+    assert isinstance(result, Success)
+    assert [candidate.locator.resource_id for candidate in result.value] == ["edited"]
+    assert result.value[0].partial_metadata["subject"] == "new"
+
+
+def test_occurrence_ids_are_not_collapsed_by_series_identity() -> None:
+    records = [
+        {
+            "id": "occurrence-1",
+            "seriesMasterId": "series-1",
+            "startDateTime": "2026-11-01T09:00:00Z",
+        },
+        {
+            "id": "occurrence-2",
+            "seriesMasterId": "series-1",
+            "startDateTime": "2026-11-08T09:00:00Z",
+        },
+    ]
+
+    result = WorkIQEnumerator(
+        lambda _intent: records, CTX, entity_type=EntityType.EVENT,
+    ).enumerate(_intent(entity_type=EntityType.EVENT), correlation_id="x")
+
+    assert _ids(result) == ["occurrence-2", "occurrence-1"]
+
+
+def test_checkpoint_replays_uncommitted_page_and_resumes_after_restart(tmp_path) -> None:
+    calls: list[str | None] = []
+
+    def query(_intent: RetrievalIntent, *, cursor: str | None) -> WorkIQPage:
+        calls.append(cursor)
+        if cursor is None:
+            return WorkIQPage(
+                ({"id": "page-1", "receivedDateTime": "2026-11-01T00:00:00Z"},),
+                "cursor-2",
+            )
+        assert cursor == "cursor-2"
+        return WorkIQPage((), None)
+
+    first = WorkIQEnumerator(
+        query, CTX, program_id="synthetic", programs_root=tmp_path,
+    )
+    first_result = first.enumerate(_intent(), correlation_id="first")
+    assert first_result.value[0].locator.resource_id == "page-1"
+
+    restarted = WorkIQEnumerator(
+        query, CTX, program_id="synthetic", programs_root=tmp_path,
+    )
+    restarted_result = restarted.enumerate(_intent(), correlation_id="restart")
+    assert restarted_result.value[0].locator.resource_id == "page-1"
+    restarted.commit_enumeration_checkpoint()
+
+    resumed = WorkIQEnumerator(
+        query, CTX, program_id="synthetic", programs_root=tmp_path,
+    )
+    assert resumed.enumerate(_intent(), correlation_id="resume").value == ()
+    resumed.commit_enumeration_checkpoint()
+
+    completed = WorkIQEnumerator(
+        query, CTX, program_id="synthetic", programs_root=tmp_path,
+    )
+    assert completed.enumerate(_intent(), correlation_id="complete").value == ()
+    assert calls == [None, None, "cursor-2"]
+
+
+def test_checkpoint_persists_empty_initial_window_as_unverified(tmp_path) -> None:
+    calls = 0
+
+    def query(_intent: RetrievalIntent, *, cursor: str | None) -> WorkIQPage:
+        nonlocal calls
+        calls += 1
+        assert cursor is None
+        return WorkIQPage((), None)
+
+    first = WorkIQEnumerator(
+        query, CTX, program_id="synthetic", programs_root=tmp_path,
+    )
+    result = first.enumerate(_intent(), correlation_id="first")
+    assert isinstance(result, Incomplete)
+    assert result.reason == "coverage_unverified:empty"
+    first.commit_enumeration_checkpoint()
+
+    restarted = WorkIQEnumerator(
+        query, CTX, program_id="synthetic", programs_root=tmp_path,
+    )
+    replay = restarted.enumerate(_intent(), correlation_id="restart")
+    assert isinstance(replay, Incomplete)
+    assert replay.reason == "coverage_unverified:empty"
+    assert calls == 1
+
+
 def test_enumerate_falls_back_to_thread_identity() -> None:
     result = _enumerator([{"conversationId": "AAQk-thread"}]).enumerate(_intent(), correlation_id="x")
     assert isinstance(result, Success)
     (candidate,) = result.value
     assert candidate.partial_metadata["identity_kind"] == "native_thread"
     assert candidate.locator.resource_id
+
+
+def test_enumerate_validates_each_native_identity_candidate_independently() -> None:
+    result = _enumerator([{
+        "id": "turn1search2",
+        "messageId": "native-message",
+        "conversationId": "semantic:preview",
+        "threadId": "native-thread",
+    }]).enumerate(_intent(), correlation_id="x")
+
+    assert isinstance(result, Success)
+    (candidate,) = result.value
+    assert candidate.locator.resource_id == "native-message"
+    assert candidate.partial_metadata["conversation_id"] == "native-thread"
 
 
 def test_enumerate_drops_unidentifiable_records_as_incomplete() -> None:
@@ -134,6 +255,19 @@ def test_enumerate_drops_unidentifiable_records_as_incomplete() -> None:
     assert isinstance(result, Incomplete)
     assert result.reason == "unidentified_records:3"
     assert _ids(result) == ["good"]
+
+
+def test_enumerate_quarantines_exact_id_mismatch() -> None:
+    intent = _intent()
+    intent = replace(intent, entity_ids=("requested-message",))
+
+    result = _enumerator([{"id": "different-message"}]).enumerate(
+        intent, correlation_id="x",
+    )
+
+    assert isinstance(result, Incomplete)
+    assert result.reason == "mismatched_identity:1"
+    assert result.value == ()
 
 
 def test_enumerate_naive_timestamp_is_not_trusted() -> None:

@@ -7,6 +7,8 @@ from src.core.exceptions import QueryError
 from src.core.retry import retry_with_backoff
 from src.m365.agency_bridge import AgencyBridge
 from src.m365.workiq_ask_support import (
+    _is_native_workiq_identity,
+    _normalize_discovery_identity,
     build_mail_search_question,
     coerce_workiq_json_payload,
     extract_source_url_contexts,
@@ -25,6 +27,10 @@ class MailRecord:
     preview: str | None
     thread_id: str | None = None
     conversation_id: str | None = None
+    deleted: bool = False
+    change_type: str | None = None
+    last_modified_at: str | None = None
+    change_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +123,9 @@ class GraphMailClient:
                 continue
             records.append(
                 MailRecord(
-                    source_id=_as_optional_str(raw_record.get("id") or raw_record.get("messageId") or raw_record.get("emailId")),
+                    source_id=_native_record_identity(
+                        raw_record, ("id", "messageId", "emailId"),
+                    ),
                     subject=_as_optional_str(raw_record.get("subject") or raw_record.get("title")),
                     sender=_coerce_sender(raw_record.get("from") or raw_record.get("sender")),
                     recipients=_coerce_recipients(raw_record.get("to") or raw_record.get("toRecipients")),
@@ -128,8 +136,24 @@ class GraphMailClient:
                     ),
                     web_url=_as_optional_str(raw_record.get("webUrl") or raw_record.get("url") or raw_record.get("link")),
                     preview=_as_optional_str(raw_record.get("bodyPreview") or raw_record.get("preview") or raw_record.get("snippet")),
-                    thread_id=_as_optional_str(raw_record.get("threadId")),
-                    conversation_id=_as_optional_str(raw_record.get("conversationId")),
+                    thread_id=_native_record_identity(
+                        raw_record, ("threadId",),
+                    ),
+                    conversation_id=_native_record_identity(
+                        raw_record, ("conversationId",),
+                    ),
+                    deleted=bool(
+                        isinstance(raw_record.get("@removed"), dict)
+                        or raw_record.get("@removed") is True
+                        or raw_record.get("deleted") is True
+                        or raw_record.get("changeType") in ("deleted", "removed")
+                    ),
+                    change_type=_as_optional_str(raw_record.get("changeType")),
+                    last_modified_at=_as_optional_str(
+                        raw_record.get("lastModifiedDateTime")
+                        or raw_record.get("modifiedDateTime")
+                    ),
+                    change_key=_as_optional_str(raw_record.get("changeKey")),
                 )
             )
 
@@ -171,6 +195,14 @@ def _as_optional_str(value: Any) -> str | None:
     if value in (None, ""):
         return None
     return str(value)
+
+
+def _native_record_identity(record: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        candidate = _normalize_discovery_identity(record.get(key))
+        if candidate is not None and _is_native_workiq_identity(candidate):
+            return candidate
+    return None
 
 
 def _coerce_sender(value: Any) -> str | None:
