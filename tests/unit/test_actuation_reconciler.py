@@ -12,7 +12,7 @@ from src.core.actuation_outbox import (
     enqueue_create_task_intent,
     outbox_db_path,
 )
-from src.core.actuation_reconciler import (
+from src.core.actuation_reconciliation import (
     ReconciliationDisposition,
     ReconciliationObservation,
     reconcile_uncertain_effect,
@@ -394,3 +394,71 @@ def test_request_compensation_refuses_noncompensable_create(tmp_path: Path) -> N
             reason="must remain manual",
         )
     assert load_entry(db_path, entry.outbox_id) == succeeded
+
+
+def test_reconcile_and_compensation_fail_closed_on_invalid_rows_and_capabilities(tmp_path: Path) -> None:
+    db_path = tmp_path / "outbox_invalid.db"
+    bad_json = enqueue(
+        db_path, "bad-json", domain="synthetic", correlation_id="bad-json", payload_json="{not-json",
+    )
+    leased_bad = lease_next(db_path, "synthetic", owner="worker")
+    assert leased_bad is not None
+    mark_dispatched(db_path, bad_json.outbox_id, owner="worker", fencing_token=leased_bad.lease_fencing_token)
+    mark_uncertain_remote_state(db_path, bad_json.outbox_id, owner="worker", fencing_token=leased_bad.lease_fencing_token, reason="lost")
+    with pytest.raises(OutboxError, match="not valid JSON"):
+        reconcile_uncertain_effect(
+            db_path, bad_json.outbox_id, reconciled_by="op", provider_lookup=lambda _e: ReconciliationObservation(ReconciliationDisposition.ABSENT, "x"),
+        )
+
+    bad_op = enqueue(
+        db_path, "bad-op", domain="synthetic", correlation_id="bad-op", payload_json=json.dumps({"operation": "unknown_op.v1"}),
+    )
+    leased_op = lease_next(db_path, "synthetic", owner="worker")
+    assert leased_op is not None
+    mark_dispatched(db_path, bad_op.outbox_id, owner="worker", fencing_token=leased_op.lease_fencing_token)
+    mark_uncertain_remote_state(db_path, bad_op.outbox_id, owner="worker", fencing_token=leased_op.lease_fencing_token, reason="lost")
+    with pytest.raises(OutboxError, match="no registered capability"):
+        reconcile_uncertain_effect(
+            db_path, bad_op.outbox_id, reconciled_by="op", provider_lookup=lambda _e: ReconciliationObservation(ReconciliationDisposition.ABSENT, "x"),
+        )
+    with pytest.raises(OutboxError, match="unknown outbox row"):
+        request_compensation(db_path, "nonexistent", owner="worker", fencing_token=1, reason="nope")
+    with pytest.raises(OutboxError, match="no registered capability"):
+        request_compensation(db_path, bad_op.outbox_id, owner="worker", fencing_token=leased_op.lease_fencing_token, reason="nope")
+
+    # Non-dict JSON payload & empty operation guards + provider lookup exceptions/invalid returns
+    list_row = enqueue(db_path, "list-json", domain="synthetic", correlation_id="list-json", payload_json="[1, 2]")
+    leased_list = lease_next(db_path, "synthetic", owner="worker")
+    assert leased_list is not None
+    mark_dispatched(db_path, list_row.outbox_id, owner="worker", fencing_token=leased_list.lease_fencing_token)
+    mark_uncertain_remote_state(db_path, list_row.outbox_id, owner="worker", fencing_token=leased_list.lease_fencing_token, reason="lost")
+    with pytest.raises(OutboxError, match="not an object"):
+        reconcile_uncertain_effect(db_path, list_row.outbox_id, reconciled_by="op", provider_lookup=lambda _e: ReconciliationObservation(ReconciliationDisposition.ABSENT, "x"))
+
+    empty_op = enqueue(db_path, "empty-op", domain="synthetic", correlation_id="empty-op", payload_json=json.dumps({"operation": ""}))
+    leased_empty = lease_next(db_path, "synthetic", owner="worker")
+    assert leased_empty is not None
+    mark_dispatched(db_path, empty_op.outbox_id, owner="worker", fencing_token=leased_empty.lease_fencing_token)
+    mark_uncertain_remote_state(db_path, empty_op.outbox_id, owner="worker", fencing_token=leased_empty.lease_fencing_token, reason="lost")
+    with pytest.raises(OutboxError, match="operation is invalid"):
+        reconcile_uncertain_effect(db_path, empty_op.outbox_id, reconciled_by="op", provider_lookup=lambda _e: ReconciliationObservation(ReconciliationDisposition.ABSENT, "x"))
+
+    valid_row = enqueue(
+        db_path, "valid-create", domain="synthetic", correlation_id="valid-create",
+        payload_json=json.dumps({"operation": "create_task.v1", "org": "o", "project": "p", "operation_intent_id": "i"}),
+    )
+    leased_valid = lease_next(db_path, "synthetic", owner="worker")
+    assert leased_valid is not None
+    mark_dispatched(db_path, valid_row.outbox_id, owner="worker", fencing_token=leased_valid.lease_fencing_token)
+    with pytest.raises(OutboxError, match="applies only to an uncertain_remote_state"):
+        reconcile_uncertain_effect(db_path, valid_row.outbox_id, reconciled_by="op", provider_lookup=lambda _e: ReconciliationObservation(ReconciliationDisposition.ABSENT, "x"))
+    mark_uncertain_remote_state(db_path, valid_row.outbox_id, owner="worker", fencing_token=leased_valid.lease_fencing_token, reason="lost")
+
+    raising_outcome = reconcile_uncertain_effect(
+        db_path, valid_row.outbox_id, reconciled_by="op", provider_lookup=lambda _e: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert raising_outcome.status == "uncertain_remote_state"
+    invalid_obs_outcome = reconcile_uncertain_effect(
+        db_path, valid_row.outbox_id, reconciled_by="op", provider_lookup=lambda _e: "not-an-obs",  # type: ignore[return-value]
+    )
+    assert invalid_obs_outcome.status == "uncertain_remote_state"

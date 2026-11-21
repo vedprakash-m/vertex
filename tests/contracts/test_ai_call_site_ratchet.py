@@ -222,3 +222,38 @@ def test_dependency_blast_radius_command_is_bound_to_runner_adoption() -> None:
     ]
     assert len(adopted) == 1
     assert adopted[0][5] == "opt-in-production"
+
+
+def test_exec_summary_report_command_has_opt_in_runner_adoption() -> None:
+    report_ai_path = _REPO_ROOT / "src" / "commands" / "report_ai.py"
+    tree = ast.parse(report_ai_path.read_text(encoding="utf-8"))
+    caller = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_synthesize_v2_ai_content"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(caller)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "draft_exec_summary_via_runner" in called
+    assert "generate_workstream_blurb_via_runner" in called
+
+    rows = _inventory_rows(_INVENTORY_PATH.read_text(encoding="utf-8"))
+    for path_str, fn_name in (
+        ("src/ai/exec_summary_drafter.py", "draft_exec_summary_via_runner.call_provider"),
+        ("src/ai/blurb_generator.py", "generate_workstream_blurb_via_runner.call_provider"),
+        ("src/ai/claim_extractor.py", "ClaimExtractor.extract_claims_via_runner.call_provider"),
+        ("src/commands/report_lookback.py", "_run_ai_route_via_runner.call_provider"),
+        ("src/ai/anticipation_engine.py", "anticipate_questions_via_runner.call_provider"),
+        ("src/ai/decision_brief_advisor.py", "advise_on_decision_brief_via_runner.call_provider"),
+        ("src/ai/program_synthesizer.py", "generate_program_synthesis_via_runner.call_provider"),
+        ("src/ai/intent_router.py", "_run_ai_route_via_runner.call_provider"),
+        ("src/ai/m365_topic_router.py", "_run_ai_route_via_runner.call_provider"),
+        ("src/ai/summary_generator.py", "SummaryGenerator.generate_via_runner.call_provider"),
+        ("src/ai/synthesizer.py", "WorkstreamSynthesizer.generate_via_runner.call_provider"),
+    ):
+        adopted = [row for row in rows if row[0] == path_str and row[1] == fn_name]
+        assert len(adopted) == 1, f"Missing inventory row for {path_str}:{fn_name}"
+        assert adopted[0][5] == "opt-in-production"

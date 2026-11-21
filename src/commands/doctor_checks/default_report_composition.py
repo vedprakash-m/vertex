@@ -4,6 +4,32 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.commands.doctor_checks.models import ADOProbeResult, DoctorCheck, DoctorReport
+from src.core.exceptions import ConfigError
+from src.core.models import RiskLevel
+from src.core.program_verdict import load_latest_program_verdict, render_published_verdict_line
+
+
+def _retained_verdict_check(
+    program_id: str, *, programs_root: Path, archive_root: Path,
+) -> DoctorCheck:
+    try:
+        verdict = load_latest_program_verdict(
+            program_id, programs_root=programs_root, archive_root=archive_root, confirmed_only=True,
+        )
+    except ConfigError:
+        return DoctorCheck("Retained Verdict", "fail", "The confirmed program verdict is invalid or unreadable.")
+    if verdict is None:
+        return DoctorCheck("Retained Verdict", "info", "No confirmed program verdict observation is available.")
+    return DoctorCheck(
+        "Retained Verdict",
+        "ok" if verdict.health in {RiskLevel.LOW, RiskLevel.DONE} else "warn",
+        render_published_verdict_line(verdict),
+        metadata={
+            "snapshot_id": verdict.snapshot_id,
+            "as_of": verdict.as_of.isoformat(),
+            "health": verdict.health.value,
+        },
+    )
 
 
 def run_default_doctor_report(
@@ -164,6 +190,10 @@ def run_default_doctor_report(
         checks.append(DoctorCheck("Archive", "ok", f"archive/{edition_name}/ - {len(archive_index.issues)} issues, index intact"))
 
     checks.append(latest_snapshot_check_fn(edition_name, archive_root_path, archive_index))
+    if resolved is not None:
+        checks.append(_retained_verdict_check(
+            resolved.program.id, programs_root=programs_root, archive_root=archive_root,
+        ))
 
     if resolved is not None and semantic_index_enabled_fn(resolved.raw_program):
         checks.extend(build_semantic_index_checks_fn(edition_name=edition_name, archive_root=archive_root))

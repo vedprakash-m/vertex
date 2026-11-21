@@ -13,7 +13,13 @@ import typer
 
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai.llm_trace import AITraceContext, use_trace_context
-from src.ai.summary_generator import RollingSummaryDraft, SummaryGenerator, SummaryGeneratorError
+from src.ai._runner_bridge import build_pinned_runner_context
+from src.ai.summary_generator import (
+    POLICY_VERSION as SUMMARY_POLICY_VERSION,
+    RollingSummaryDraft,
+    SummaryGenerator,
+    SummaryGeneratorError,
+)
 from src.core.edition_resolver import PROGRAMS_ROOT, _parse_program
 from src.core.knowledge_store import load_program_knowledge
 from src.core.models_v2 import PersonDirectory, Program, Signal, Workstream
@@ -233,6 +239,7 @@ def _summarize_workstream(
     people_directory: tuple[PersonDirectory, ...],
     programs_root: Path,
     generator: SummaryGenerator,
+    use_structured_runner: bool = False,
 ) -> WorkstreamSummaryResult:
     path = get_summary_path(program_id, workstream.id, programs_root)
     workstream_signals = tuple(signal for signal in approved_signals if workstream.id in signal.workstream_ids)
@@ -304,14 +311,32 @@ def _summarize_workstream(
         current_time=current_time,
         programs_root=programs_root,
     )
-    draft = generator.generate(
-        program=program,
-        workstream=workstream,
-        prior_summary=prior_text,
-        signals=candidate_signals,
-        drift_patterns=drift_patterns,
-        programs_root=programs_root,
-    )
+    if use_structured_runner:
+        summary_ctx = build_pinned_runner_context(
+            program_id,
+            programs_root=programs_root,
+            caller="vertex-summarize",
+            feature="summary_generator",
+            policy_version=SUMMARY_POLICY_VERSION,
+        )
+        draft = generator.generate_via_runner(
+            context=summary_ctx,
+            program=program,
+            workstream=workstream,
+            prior_summary=prior_text,
+            signals=candidate_signals,
+            drift_patterns=drift_patterns,
+            programs_root=programs_root,
+        )
+    else:
+        draft = generator.generate(
+            program=program,
+            workstream=workstream,
+            prior_summary=prior_text,
+            signals=candidate_signals,
+            drift_patterns=drift_patterns,
+            programs_root=programs_root,
+        )
     if draft is None:
         warning = f"Summary generation returned no content for workstream {workstream.id}."
         return WorkstreamSummaryResult(

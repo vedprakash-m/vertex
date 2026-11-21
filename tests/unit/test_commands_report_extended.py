@@ -1401,18 +1401,18 @@ def test_report_conflicting_flags_preserve_skip_issue_error(
 
 @pytest.mark.parametrize("command", ["report", "draft"])
 @pytest.mark.parametrize(
-    ("args", "exit_code"),
+    ("args", "exit_code", "expects_maintenance"),
     [
-        (["--edition", "fixture_weekly", "--dry-run"], 71),
-        (["--edition", "fixture_weekly", "--send-draft"], 71),
-        (["--edition=--dry-run", "--send-draft"], 71),
-        (["--edition", "fixture_weekly", "--format", "--send-draft", "--dry-run"], 71),
-        (["--edition", "fixture_weekly", "--", "--dry-run", "--send-draft"], 2),
-        (["--help", "--dry-run", "--send-draft"], 0),
+        (["--edition", "fixture_weekly", "--dry-run"], 71, False),
+        (["--edition", "fixture_weekly", "--send-draft"], 71, True),
+        (["--edition=--dry-run", "--send-draft"], 71, True),
+        (["--edition", "fixture_weekly", "--format", "--send-draft", "--dry-run"], 71, False),
+        (["--edition", "fixture_weekly", "--", "--dry-run", "--send-draft"], 2, True),
+        (["--help", "--dry-run", "--send-draft"], 0, False),
     ],
 )
 def test_report_nonconflicting_flags_preserve_root_startup(
-    monkeypatch, report_startup_calls: list[str], command: str, args: list[str], exit_code: int,
+    monkeypatch, report_startup_calls: list[str], command: str, args: list[str], exit_code: int, expects_maintenance: bool,
 ) -> None:
     def stop_after_startup():
         raise typer.Exit(71)
@@ -1421,13 +1421,14 @@ def test_report_nonconflicting_flags_preserve_root_startup(
     result = runner.invoke(app, [command, *args])
 
     assert result.exit_code == exit_code, result.output
-    assert report_startup_calls == [
+    expected = [
         "_set_invocation_ai_mode",
         "_preflight_report_workspace",
         "_maybe_register_tier_decision_sink",
-        "_maybe_run_scheduled_db_maintenance",
-        "_maybe_run_session_catchup",
     ]
+    if expects_maintenance:
+        expected.extend(["_maybe_run_scheduled_db_maintenance", "_maybe_run_session_catchup"])
+    assert report_startup_calls == expected
 
 
 @pytest.mark.parametrize("command", ["report", "draft"])
@@ -1500,9 +1501,9 @@ def test_report_conflicting_flags_skip_due_synthetic_compaction(
         raise typer.Exit(71)
 
     monkeypatch.setattr(report_module, "_preflight_report_workspace", stop_after_startup)
-    args = [command, "--edition", "fixture_weekly", "--dry-run"]
+    args = [command, "--edition", "fixture_weekly"]
     if conflicting:
-        args.append("--send-draft")
+        args.extend(["--dry-run", "--send-draft"])
     result = runner.invoke(app, args)
 
     assert result.exit_code == (2 if conflicting else 71), result.output
@@ -2300,7 +2301,7 @@ def test_generate_report_draft_renders_v2_lt_deck_markdown(repo_root: Path, tmp_
 @pytest.mark.parametrize(
     ("prior_confirmed_at", "expected_trend"),
     [
-        (datetime(2040, 4, 28, 18, 0, tzinfo=timezone.utc), "unchanged vs prior issue"),
+        (datetime(2040, 4, 28, 18, 0, tzinfo=timezone.utc), "high vs prior issue"),
         (datetime(2040, 5, 5, 18, 0, tzinfo=timezone.utc), None),
     ],
 )

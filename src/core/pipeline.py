@@ -60,6 +60,7 @@ class StageContext:
     reseed: bool = False
     no_seed: bool = False
     dry_run: bool = False
+    projector_preview: bool = False
     offline: bool = False
     diff_mode: bool = False
     as_of: datetime | None = None

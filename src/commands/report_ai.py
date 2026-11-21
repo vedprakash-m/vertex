@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import yaml
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -10,14 +11,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, TypedDict
 
-from src.ai.blurb_generator import BlurbGenerationError
+from src.ai._runner_bridge import build_pinned_runner_context
+from src.ai.blurb_generator import (
+    BlurbGenerationError,
+    POLICY_VERSION as BLURB_POLICY_VERSION,
+    generate_workstream_blurb_via_runner,
+)
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai.client import AIClientError, NON_RETRYABLE_AI_ERRORS
 from src.ai.deployment_fallback import LEGACY_DEPLOYMENT_ALIAS_NOTICE, resolve_ai_deployments_for_feature
 from src.ai.edit_learner import summarize_recent_confidence_bands, summarize_recent_models, summarize_recent_prompt_version_confidence_bands, summarize_recent_prompt_version_models, summarize_recent_prompt_versions
-from src.ai.exec_summary_drafter import ExecSummaryDraftError
+from src.ai.exec_summary_drafter import (
+    ExecSummaryDraftError,
+    POLICY_VERSION as EXEC_SUMMARY_POLICY_VERSION,
+    draft_exec_summary_via_runner,
+)
 from src.ai.llm_trace import AITraceContext
 from src.ai.provider import LLMProvider
+from src.ai.structured_feature_runner import RunnerContext
 from src.commands.report_continuity import _continuity_chapter_title as _continuity_chapter_title_impl
 from src.commands.report_continuity import _is_continuity_layout, _iter_continuity_ai_sections as _iter_continuity_ai_sections_impl
 from src.commands.report_detail import _iter_detail_sections as _iter_detail_sections_impl
@@ -32,13 +43,17 @@ from src.core.human_precedence import should_ai_fill
 from src.core.evidence_models import SourceRef, WorkstreamEvidence, extract_icm_ids
 from src.core.evidence_conflict_detector import detect_evidence_conflicts
 from src.core.evidence_store import load_approved_evidence_by_lane
+from src.core.exceptions import ConfigError, StateError
 from src.core.forecast_engine import ETAForecast, forecast_etas
 from src.core.knowledge_store import load_program_knowledge
 from src.core.m365_payload_support import has_provisional_workiq_identity
 from src.core.models import DeltaSet, DimensionRisk, EditionType, EvidencePacket, ItemDelta, RiskLevel, ScorecardEvidencePacket, Snapshot, WorkItem
 from src.core.models_v2 import PersonDirectory, Signal as JournalSignal, Workstream, WorkstreamEvidenceBundle
+from src.core.operator_identity import capture_operator_identity
 from src.core.overrides_store import OverridesDocument
+from src.core.program_fact_store import ProgramFactStore, _resolve_fact_db_root
 from src.core.program_reality import ProgramReality
+from src.core.quality_gates.ai_release_audit import new_ai_run_id
 from src.commands.reality_context import (
     RealityAssessmentSummary,
     build_reality_assessment_summary,
@@ -770,6 +785,77 @@ def _load_draft_ai_context(
     )
 
 
+def build_exec_summary_runner_context(
+    program_id: str,
+    *,
+    programs_root: Path,
+) -> RunnerContext:
+    """Bind operator identity and pinned ProgramFactStore snapshot for runner execution."""
+    try:
+        identity = capture_operator_identity(
+            "vertex-report-exec-summary",
+            require_os_principal=True,
+        )
+    except (OSError, ValueError):
+        raise StateError(
+            "A native OS principal is required for exec summary runner execution."
+        ) from None
+    if identity.principal is None or not identity.principal.strip():
+        raise StateError(
+            "A native OS principal is required for exec summary runner execution."
+        )
+    store = ProgramFactStore(program_id, db_root=_resolve_fact_db_root(programs_root))
+    try:
+        pin = store.pin_snapshot(
+            metadata={
+                "caller": "vertex-report-exec-summary",
+                "feature": "exec_summary_drafter",
+            }
+        )
+        drift = store.detect_drift(pin.snapshot_id)
+    except (ConfigError, KeyError, OSError, sqlite3.DatabaseError, StateError, ValueError):
+        raise StateError(
+            "The program fact snapshot could not be pinned for exec summary runner execution."
+        ) from None
+    digest = pin.content_sha256
+    if (
+        pin.program_id != program_id
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise StateError(
+            "The pinned program fact snapshot does not match the selected program."
+        )
+    if drift:
+        raise StateError(
+            "The pinned program fact snapshot changed before exec summary execution."
+        )
+    return RunnerContext(
+        program_id=program_id,
+        run_id=new_ai_run_id(),
+        policy_version=EXEC_SUMMARY_POLICY_VERSION,
+        snapshot_id=digest,
+        principal=identity.principal,
+        classification="confidential",
+    )
+
+
+def build_blurb_runner_context(
+    program_id: str,
+    *,
+    programs_root: Path,
+) -> RunnerContext:
+    """Bind operator identity and pinned ProgramFactStore snapshot for blurb runner execution."""
+    return build_pinned_runner_context(
+        program_id,
+        programs_root=programs_root,
+        caller="vertex-report-blurb",
+        feature="blurb_generator",
+        policy_version=BLURB_POLICY_VERSION,
+    )
+
+
 def _synthesize_v2_ai_content(
     *,
     bundle: ReportBundle,
@@ -797,6 +883,7 @@ def _synthesize_v2_ai_content(
     generate_workstream_blurb_runner: Callable[..., Any] | None = None,
     iter_ai_generated_sections: Callable[..., tuple[_AIGeneratedSection, ...]] | None = None,
     relevant_item_deltas: Callable[[DeltaSet, set[int]], tuple[ItemDelta, ...]] | None = None,
+    use_structured_runner: bool = False,
 ) -> _AISynthesisResult:
     render_exec_summary_text = current_exec_summary_text
     render_workstream_blurbs = dict(current_workstream_blurbs)
@@ -836,6 +923,25 @@ def _synthesize_v2_ai_content(
     budget_per_client = _report_ai_budget_per_client(bundle)
 
     if should_ai_fill(loaded_exec_summary_text):
+        exec_supplemental_context = (
+            _exec_ai_context_lines(
+                ai_program_context,
+                ai_context,
+            )
+            + _program_synthesis_exec_summary_context_lines(
+                ai_context.program_id,
+                ai_context.programs_root,
+                **archive_options,
+            )
+        )
+        exec_runner_context = (
+            build_exec_summary_runner_context(
+                ai_context.program_id,
+                programs_root=ai_context.programs_root,
+            )
+            if use_structured_runner
+            else None
+        )
         exec_draft = _run_report_ai_with_fallback(
             deployments=_resolve_report_ai_deployments(
                 feature_name="exec_summary_drafter",
@@ -856,26 +962,31 @@ def _synthesize_v2_ai_content(
             warnings=warnings,
             label="exec summary",
             create_ai_client=create_ai_client,
-            runner=lambda client: draft_exec_summary_runner(
-                client=client,
-                items=items,
-                deltas=deltas,
-                editorial_rules=bundle.editorial_rules,
-                program_id=ai_context.program_id,
-                edition_type=edition_type,
-                program_context=ai_program_context,
-                supplemental_context=(
-                    _exec_ai_context_lines(
-                        ai_program_context,
-                        ai_context,
-                    )
-                    + _program_synthesis_exec_summary_context_lines(
-                        ai_context.program_id,
-                        ai_context.programs_root,
-                        **archive_options,
-                    )
-                ),
-                programs_root=ai_context.programs_root,
+            runner=lambda client: (
+                draft_exec_summary_via_runner(
+                    context=exec_runner_context,
+                    client=client,
+                    items=items,
+                    deltas=deltas,
+                    editorial_rules=bundle.editorial_rules,
+                    program_id=ai_context.program_id,
+                    edition_type=edition_type,
+                    program_context=ai_program_context,
+                    supplemental_context=exec_supplemental_context,
+                    programs_root=ai_context.programs_root,
+                )
+                if exec_runner_context is not None
+                else draft_exec_summary_runner(
+                    client=client,
+                    items=items,
+                    deltas=deltas,
+                    editorial_rules=bundle.editorial_rules,
+                    program_id=ai_context.program_id,
+                    edition_type=edition_type,
+                    program_context=ai_program_context,
+                    supplemental_context=exec_supplemental_context,
+                    programs_root=ai_context.programs_root,
+                )
             ),
         )
         if exec_draft is not None and exec_draft.text.strip():
@@ -914,6 +1025,29 @@ def _synthesize_v2_ai_content(
             m365_evidence_by_lane=m365_evidence_by_lane,
             item_ids={item.id for item in section.items},
         )
+        section_supplemental = (
+            _section_ai_context_lines(
+                section.items,
+                ai_program_context,
+                ai_context,
+            )
+            + _program_synthesis_blurb_context_lines(
+                ai_context.program_id,
+                ai_context.programs_root,
+                workstream_ids=_matching_program_workstream_ids(section.items, ai_context.workstreams),
+                item_ids={item.id for item in section.items},
+                **archive_options,
+            )
+        )
+        section_deltas = relevant_deltas(deltas, {item.id for item in section.items})
+        blurb_runner_context = (
+            build_blurb_runner_context(
+                ai_context.program_id,
+                programs_root=ai_context.programs_root,
+            )
+            if use_structured_runner
+            else None
+        )
         blurb = _run_report_ai_with_fallback(
             deployments=_resolve_report_ai_deployments(
                 feature_name="blurb_generator",
@@ -934,32 +1068,37 @@ def _synthesize_v2_ai_content(
             warnings=warnings,
             label=f"section {section.section_id}",
             create_ai_client=create_ai_client,
-            runner=lambda client: generate_workstream_blurb_runner(
-                client=client,
-                workstream_name=section.title,
-                items=section.items,
-                evidence_by_item=evidence_by_item,
-                deltas=relevant_deltas(deltas, {item.id for item in section.items}),
-                editorial_rules=bundle.editorial_rules,
-                program_id=ai_context.program_id,
-                edition_type=edition_type,
-                program_context=ai_program_context,
-                supplemental_context=(
-                    _section_ai_context_lines(
-                        section.items,
-                        ai_program_context,
-                        ai_context,
-                    )
-                    + _program_synthesis_blurb_context_lines(
-                        ai_context.program_id,
-                        ai_context.programs_root,
-                        workstream_ids=_matching_program_workstream_ids(section.items, ai_context.workstreams),
-                        item_ids={item.id for item in section.items},
-                        **archive_options,
-                    )
-                ),
-                workstream_evidence_bundle=section_bundle,
-                programs_root=ai_context.programs_root,
+            runner=lambda client: (
+                generate_workstream_blurb_via_runner(
+                    context=blurb_runner_context,
+                    client=client,
+                    workstream_name=section.title,
+                    items=section.items,
+                    evidence_by_item=evidence_by_item,
+                    deltas=section_deltas,
+                    editorial_rules=bundle.editorial_rules,
+                    program_id=ai_context.program_id,
+                    edition_type=edition_type,
+                    program_context=ai_program_context,
+                    supplemental_context=section_supplemental,
+                    workstream_evidence_bundle=section_bundle,
+                    programs_root=ai_context.programs_root,
+                )
+                if blurb_runner_context is not None
+                else generate_workstream_blurb_runner(
+                    client=client,
+                    workstream_name=section.title,
+                    items=section.items,
+                    evidence_by_item=evidence_by_item,
+                    deltas=section_deltas,
+                    editorial_rules=bundle.editorial_rules,
+                    program_id=ai_context.program_id,
+                    edition_type=edition_type,
+                    program_context=ai_program_context,
+                    supplemental_context=section_supplemental,
+                    workstream_evidence_bundle=section_bundle,
+                    programs_root=ai_context.programs_root,
+                )
             ),
         )
         if blurb is None or not blurb.text.strip():

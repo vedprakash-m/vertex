@@ -141,13 +141,13 @@ def test_workflow_honors_measured_sharding_and_evidence_policy() -> None:
     assert "--weights governance/test-file-timings.json" in command
     assert f"-n {policy['workers_per_shard']}" in command
     assert "--dist worksteal" in command
-    assert "--cov=" not in command
-    assert "--cov-branch" not in command
+    assert "--cov=src --cov=cli --cov-branch" in command
+    assert "--cov-report=json:" in command
     assert "--strict-markers" in command
-    assert (
-        f"--coverage-baseline {policy['coverage']['baseline']}"
-        in workflow["jobs"]["vertex-required"]["steps"][-1]["run"]
-    )
+    aggregate = workflow["jobs"]["vertex-required"]["steps"][-1]["run"]
+    assert "--coverage " in aggregate
+    assert "functional-{0..9}.coverage.json" in aggregate
+    assert "--coverage-baseline" not in aggregate
 
 
 def test_scale_and_compatibility_have_non_pr_qualification() -> None:

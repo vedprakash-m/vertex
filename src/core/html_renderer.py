@@ -1,7 +1,7 @@
 # Adapted from Shiproom src/report/generator.py
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -94,6 +94,7 @@ class RenderContext:
     exec_summary_chart: KustoSectionData | None = None
     show_footer: bool = True
     hidden_render_sections: frozenset[str] = field(default_factory=frozenset)
+    projector_profile: bool = False
 
 
 def build_render_payload(context: RenderContext) -> dict[str, Any]:
@@ -164,6 +165,7 @@ def build_render_payload(context: RenderContext) -> dict[str, Any]:
         "workspace_root": context.workspace_root,
         "mobile_safe_scorecards": context.mobile_safe_scorecards,
         "type_scale_v2": context.type_scale_v2,
+        "projector_profile": context.projector_profile,
         "executive_style": context.executive_style,
         "continuity": context.continuity,
         "show_footer": context.show_footer,
@@ -223,6 +225,11 @@ class HTMLRenderer:
     def _get_template(self, template_name: str):
         _warn_if_deprecated_template(template_name)
         return self.environment.get_template(template_name)
+
+
+def render_projector_variant(renderer: HTMLRenderer, context: RenderContext) -> str:
+    """Render the opt-in 1920x1080 >=16px projector profile without altering the default 14px newsletter."""
+    return renderer.render(replace(context, projector_profile=True))
 
 
 def _warn_if_deprecated_template(template_name: str) -> None:

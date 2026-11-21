@@ -191,7 +191,7 @@ from src.commands.report_detail import _normalize_workstream_blurb
 from src.commands.report_detail import _resolve_workstream_blurb
 from src.commands.report_detail import _slice_contract_map
 from src.commands.report_detail import _visible_detail_section_ids as _visible_detail_section_ids_impl
-from src.commands.report_email import _build_draft_email_message, _build_draft_email_sender, _build_email_preheader, _build_email_subject, _build_preview_eml_bytes, _distribution_to, _resolve_email_subject
+from src.commands.report_email import _build_draft_email_message, _build_draft_email_sender, _build_email_preheader, _build_email_subject, _build_preview_eml_bytes, _distribution_to, _resolve_email_subject, format_communication_budget_observations, observe_report_email_communication_budget
 from src.commands.report_continuity import _continuity_chapter_title
 from src.commands.report_continuity import _build_continuity_deltas
 from src.commands.report_continuity import _active_chapter_notes, _build_chapter_templates, _build_continuity_exec_summary_template as _build_continuity_exec_summary_template_impl
@@ -440,6 +440,7 @@ def report_command(
     edition: str = typer.Option(..., "--edition", help="Edition name, for example acme_weekly."),
     issue: int | None = typer.Option(None, "--issue", help="Issue number to render. Defaults to next issue."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Generate draft outputs without archive writes. Narrative seeding may still write draft narrative files for the current issue."),
+    projector_preview: bool = typer.Option(False, "--projector-preview", help="Write a separate 1080p HTML preview for a newsletter dry run."),
     reseed: bool = typer.Option(False, "--reseed", help="Delete seedable draft narratives for the target issue before re-seeding from the trusted baseline. Dry-run only."),
     no_seed: bool = typer.Option(False, "--no-seed", help="Skip trusted-baseline narrative seeding for this run and render from scaffold templates or existing narratives instead."),
     offline: bool = typer.Option(False, "--offline", help="Render from the newest cached snapshot without live ADO or Kusto calls."),
@@ -478,6 +479,8 @@ def report_command(
         raise typer.BadParameter("--reseed requires --dry-run.")
     if reseed and no_seed:
         raise typer.BadParameter("--reseed cannot be combined with --no-seed.")
+    resolved_option_type = EditionType.from_string(edition_type) if edition_type is not None else None
+    if projector_preview and (not dry_run or resolved_option_type in {EditionType.DECK, EditionType.LOOKBACK}): raise typer.BadParameter("--projector-preview requires a newsletter --dry-run.")
     programs_root, reports_root, archive_root = _preflight_report_workspace()
     load_result = load_bundle_with_mode(edition, reports_root=reports_root, programs_root=programs_root)
     if str(load_result.bundle.config.edition.type).strip().lower() == "nudge":
@@ -488,8 +491,9 @@ def report_command(
     if issue is not None and issue < _HISTORICAL_ISSUE_CUTOFF:
         typer.echo(_HISTORICAL_ISSUE_GUARD_MESSAGE)
         return
-    resolved_option_type = EditionType.from_string(edition_type) if edition_type is not None else None
     effective_edition_type = resolved_option_type or EditionType.from_string(load_result.bundle.config.edition.type)
+    if projector_preview and effective_edition_type in {EditionType.DECK, EditionType.LOOKBACK}:
+        raise typer.BadParameter("--projector-preview requires a newsletter --dry-run.")
     section_filter_ids = _normalize_section_filter_ids(sections)
     if lookback_range is not None and effective_edition_type != EditionType.LOOKBACK:
         raise typer.BadParameter("--range requires --edition-type lookback.")
@@ -563,6 +567,7 @@ def report_command(
             edition_type_override=edition_type,
             lookback_range=lookback_range,
             section_filter_ids=section_filter_ids,
+            projector_preview=projector_preview,
             reports_root=reports_root,
             archive_root=archive_root,
             programs_root=programs_root,
@@ -745,6 +750,8 @@ def report_command(
         else:
             bundle = load_bundle(edition, reports_root=reports_root, programs_root=programs_root)
             try:
+                for msg in format_communication_budget_observations(observe_report_email_communication_budget(bundle=bundle, edition_name=edition, top_items=artifacts.report.top_items if hasattr(artifacts.report, "top_items") else (), archive_root=archive_root, manifest_metadata=artifacts.manifest.metadata, now=artifacts.report.ado_data_as_of)):
+                    typer.echo(msg)
                 _build_draft_email_sender()(_build_draft_email_message(bundle, artifacts))
                 typer.echo(f"Draft email sent to {bundle.config.author.email}.")
             except (AuthError, QueryError) as error:
@@ -837,6 +844,7 @@ def generate_report_draft(
     correlation_id: str = "",
     workflow_id: str = "",
     run_id: str = "",
+    projector_preview: bool = False,
 ) -> DraftArtifacts:
     final_ctx = _execute_report_pipeline(
         _build_stage_request_context(
@@ -845,6 +853,7 @@ def generate_report_draft(
             reseed=reseed,
             no_seed=no_seed,
             dry_run=dry_run,
+            projector_preview=projector_preview,
             offline=offline,
             diff_mode=diff_mode,
             as_of=as_of,
@@ -1047,6 +1056,7 @@ def _build_stage_request_context(
     correlation_id: str = "",
     workflow_id: str = "",
     run_id: str = "",
+    projector_preview: bool = False,
 ) -> StageContext:
     started_at = datetime.now(timezone.utc)
     programs_root, resolved_reports_root, resolved_archive_root = resolve_report_workspace_roots(
@@ -1066,6 +1076,7 @@ def _build_stage_request_context(
         reseed=reseed,
         no_seed=no_seed,
         dry_run=dry_run,
+        projector_preview=projector_preview,
         offline=offline,
         diff_mode=diff_mode,
         as_of=as_of,
@@ -1214,15 +1225,10 @@ class _OutputStage:
             or ctx.reports_root is None
             or ctx.archive_root is None
             or ctx.editions_root is None
-            or ctx.programs_root is None
         ):
             raise RuntimeError("ValidationStage must execute before OutputStage.")
 
-        draft_program_id = (
-            ctx.resolved_v2.program.id
-            if ctx.resolved_v2 is not None
-            else (ctx.signal_context.program_id if ctx.signal_context is not None else None)
-        )
+        draft_program_id = ctx.resolved_v2.program.id if ctx.resolved_v2 is not None else (ctx.signal_context.program_id if ctx.signal_context is not None else None)
         if ctx.resolved_v2 is not None and ctx.fact_snapshot_pin is None:
             raise ConfigError("Report fact snapshot baseline is missing. Re-run the report.")
         render_state = ctx.render_state
@@ -1369,6 +1375,8 @@ class _OutputStage:
                 ),
             )
             html_path = _write_output_text(issue_dir / f"issue_{ctx.resolved_issue_number:03d}.html", render_state.html_body)
+            if getattr(render_state, "projector_html", None) is not None:
+                _write_output_text(html_path.with_suffix(".projector.html"), render_state.projector_html)
             md_path = _write_output_text(issue_dir / f"issue_{ctx.resolved_issue_number:03d}.md", render_state.markdown_body)
         snapshot_path = _write_output_json(issue_dir / f"issue_{ctx.resolved_issue_number:03d}.snapshot.json", render_state.snapshot)
         persona_signal_coverage_path = (
@@ -1463,6 +1471,7 @@ class _OutputStage:
             programs_root=ctx.programs_root,
             report_html_path=html_path,
         )
+        observe_report_email_communication_budget(bundle=ctx.bundle, edition_name=ctx.edition_name, top_items=getattr(render_state.health, "top_items", None) or getattr(ctx, "top_items", None) or (), archive_root=ctx.archive_root, manifest_metadata=validation_state.manifest.metadata, now=ctx.data_as_of)
         manifest_path = write_run_manifest(
             ctx.edition_name,
             ctx.resolved_issue_number,

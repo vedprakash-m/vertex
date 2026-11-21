@@ -11,7 +11,12 @@ from typing import Any
 
 import typer
 
-from src.ai.anticipation_engine import anticipate_questions
+from src.ai._runner_bridge import build_pinned_runner_context
+from src.ai.anticipation_engine import (
+    POLICY_VERSION as ANTICIPATION_POLICY_VERSION,
+    anticipate_questions,
+    anticipate_questions_via_runner,
+)
 from src.core.action_tracker import assess_action_staleness, load_action_resolution_candidate_ids
 from src.core.assumption_tracker import check_validation_due
 from src.commands.confirm import _deserialize_items, _load_draft_state
@@ -114,6 +119,7 @@ def generate_prep_brief(
     archive_root: Path | None = None,
     programs_root: Path | None = None,
     as_of: datetime | None = None,
+    use_structured_runner: bool = False,
 ) -> PrepBriefArtifacts:
     selected_programs_root = programs_root
     if selected_programs_root is None:
@@ -229,17 +235,38 @@ def generate_prep_brief(
     dependencies = projected_dependencies
     summary_lookup = _load_reviewer_summaries(resolved_v2=resolved_v2, programs_root=programs_root)
     anticipation_client = _build_anticipation_client(bundle)
-    anticipated_questions = anticipate_questions(
-        readers=resolved_v2.program.leadership_readers,
-        signals=guarded_review_evidence.approved_signals,
-        drift_patterns=guarded_review_evidence.drift_patterns,
-        summaries=summary_lookup,
-        workstreams=workstreams,
-        dependencies=dependencies,
-        client=anticipation_client,
-        program_id=resolved_v2.program.id,
-        programs_root=programs_root,
-    )
+    if use_structured_runner:
+        anticipation_ctx = build_pinned_runner_context(
+            resolved_v2.program.id,
+            programs_root=programs_root,
+            caller="vertex-prep-anticipation",
+            feature="anticipation_engine",
+            policy_version=ANTICIPATION_POLICY_VERSION,
+        )
+        anticipated_questions = anticipate_questions_via_runner(
+            context=anticipation_ctx,
+            readers=resolved_v2.program.leadership_readers,
+            signals=guarded_review_evidence.approved_signals,
+            drift_patterns=guarded_review_evidence.drift_patterns,
+            summaries=summary_lookup,
+            workstreams=workstreams,
+            dependencies=dependencies,
+            client=anticipation_client,
+            program_id=resolved_v2.program.id,
+            programs_root=programs_root,
+        )
+    else:
+        anticipated_questions = anticipate_questions(
+            readers=resolved_v2.program.leadership_readers,
+            signals=guarded_review_evidence.approved_signals,
+            drift_patterns=guarded_review_evidence.drift_patterns,
+            summaries=summary_lookup,
+            workstreams=workstreams,
+            dependencies=dependencies,
+            client=anticipation_client,
+            program_id=resolved_v2.program.id,
+            programs_root=programs_root,
+        )
     dependency_cascades = detect_dependency_cascades(
         dependencies=dependencies,
         signals=guarded_review_evidence.approved_signals,

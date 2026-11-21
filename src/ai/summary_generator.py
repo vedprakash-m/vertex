@@ -7,9 +7,11 @@ from typing import Any, Callable, Protocol, cast
 
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai._pipeline import AIPipelineError, process_generated_text
+from src.ai._runner_bridge import run_structured_feature_via_runner
 from src.ai.client import AIClientError
 from src.ai.deployment_fallback import FallbackStructuredClient, LEGACY_DEPLOYMENT_ALIAS_NOTICE, resolve_ai_deployments_for_feature
 from src.ai.llm_trace import AITraceContext
+from src.ai.structured_feature_runner import RunnerContext
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
 from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
@@ -257,6 +259,98 @@ class SummaryGenerator:
         )
         word_count = summary_word_count(text)
         return RollingSummaryDraft(text=text, prompt_version=PROMPT_VERSION, word_count=word_count)
+
+    def generate_via_runner(
+        self,
+        *,
+        context: RunnerContext,
+        program: Program,
+        workstream: Workstream,
+        prior_summary: str | None,
+        signals: tuple[Signal, ...],
+        drift_patterns: tuple[DriftPattern, ...],
+        programs_root: Path = PROGRAMS_ROOT,
+    ) -> RollingSummaryDraft | None:
+        """RVX-D09 runner path for ``summary_generator`` via StructuredFeatureRunner."""
+        if get_ai_mode() == AIMode.DISABLED or self._client is None:
+            return None
+        if not signals and not drift_patterns and not (prior_summary and prior_summary.strip()):
+            return None
+        program_id = program.id
+        request_payload: dict[str, Any] = {
+            "program_id": program.id,
+            "workstream_id": workstream.id,
+            "prior_summary": prior_summary or "",
+            "signal_texts": [signal.text for signal in signals],
+            "signal_refs": [ref for signal in signals for ref in signal.entity_refs],
+            "drift_pattern_ids": [pattern.work_item_id for pattern in drift_patterns],
+            "drift_pattern_details": [pattern.detail for pattern in drift_patterns],
+        }
+        system_prompt = _load_prompt()
+        user_prompt = _build_user_prompt(
+            program=program,
+            workstream=workstream,
+            prior_summary=prior_summary,
+            signals=signals,
+            drift_patterns=drift_patterns,
+        )
+        policy = load_ai_feature_policy(_FEATURE)
+        client = self._client
+
+        def _validate_summary(raw: dict[str, Any]) -> RollingSummaryDraft | None:
+            text = _parse_generated_summary_text(cast(dict[str, object], raw))
+            try:
+                processed = process_generated_text(text)
+            except AIPipelineError as error:
+                raise SummaryGeneratorError(str(error)) from error
+            cleaned = processed.text
+            if not cleaned:
+                return None
+            findings = _validate_semantics(cleaned, signals=signals, drift_patterns=drift_patterns)
+            if findings:
+                raise SummaryGeneratorError("; ".join(findings))
+            return RollingSummaryDraft(
+                text=cleaned,
+                prompt_version=PROMPT_VERSION,
+                word_count=summary_word_count(cleaned),
+            )
+
+        def call_provider(compiled: Any) -> Any:
+            return client.structured(
+                compiled.prompt_text,
+                "",
+                parser=lambda payload: payload,
+                max_tokens=policy.max_tokens,
+                prompt_version=PROMPT_VERSION,
+            )
+
+        return run_structured_feature_via_runner(
+            feature=_FEATURE,
+            task_class="synthesis",
+            context=context,
+            program_id=program_id,
+            prompt_version=PROMPT_VERSION,
+            policy_version=POLICY_VERSION,
+            schema_version=_OUTPUT_SCHEMA_VERSION,
+            programs_root=programs_root,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            output_schema_text='Respond with JSON: {"text": str}.',
+            request_payload=request_payload,
+            deployment_fingerprint=_resolve_model_deployment(self._client),
+            validator_version=POLICY_VERSION,
+            invoke_provider=call_provider,
+            parse_and_validate=_validate_summary,
+            serialize_result=lambda raw, _draft: {"text": _parse_generated_summary_text(cast(dict[str, object], raw))},
+            error_factory=SummaryGeneratorError,
+            raise_on_rejection=True,
+            raise_on_empty_result=True,
+            provider_error_map=lambda err: (
+                SummaryGeneratorError(f"Rolling summary generation failed: {err}")
+                if isinstance(err, AIClientError)
+                else err
+            ),
+        )
 
 
 def _load_prompt() -> str:

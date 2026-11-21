@@ -4,7 +4,7 @@ import csv
 import json
 import logging
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 import inspect
 from io import StringIO
@@ -14,7 +14,14 @@ from typing import Any, Callable
 import typer
 
 from src.ai.ai_mode import AIMode, get_ai_mode
-from src.ai.anticipation_engine import anticipate_questions
+from src.ai._runner_bridge import build_pinned_runner_context
+from src.ai.anticipation_engine import (
+    POLICY_VERSION as ANTICIPATION_POLICY_VERSION,
+    anticipate_questions,
+    anticipate_questions_via_runner,
+)
+from src.ai.structured_feature_runner import RunnerContext
+from src.core.quality_gates.ai_release_audit import new_ai_run_id
 from src.ai.client import AIClientError
 from src.ai.deployment_fallback import FallbackStructuredClient, LEGACY_DEPLOYMENT_ALIAS_NOTICE, resolve_ai_deployments_for_feature
 from src.ai.llm_trace import AITraceContext, use_trace_context
@@ -44,6 +51,7 @@ from src.core.evidence_engine import build_evidence
 from src.core.exceptions import AuthError, ConfigError, QueryError
 from src.core.forecast_engine import ETAForecast, build_forecast_assessment
 from src.core.freshness_engine import build_freshness_report
+from src.core.program_verdict import PublishedProgramVerdict, load_latest_program_verdict, render_published_verdict_line
 from src.core.issue_projection import IssueProjection, build_issue_projection, issue_projection_confidence_label, issue_projection_source_label
 from src.core.jinja_filters import build_anchor, delta_label, risk_label
 from src.core.knowledge_store import load_program_knowledge, select_engms_pages
@@ -113,6 +121,7 @@ class ReviewFullContextData:
     reviewer_context: ReviewerRenderContext
     items: tuple[WorkItem, ...]
     program_id: str | None
+    published_verdict: PublishedProgramVerdict | None = None
 
 
 SectionReviewCardSender = Callable[[str, dict[str, Any]], None]
@@ -589,12 +598,27 @@ def prepare_review_full_context(
         signal_source_confidence_order=reviewer_signal_source_confidence_order,
         persona_coverage=persona_coverage,
     )
+    published_verdict = (
+        load_latest_program_verdict(
+            resolved_v2.program.id,
+            programs_root=programs_root,
+            archive_root=resolved_archive_root,
+        )
+        if resolved_v2 is not None
+        else None
+    )
+    if published_verdict is not None:
+        reviewer_context = replace(
+            reviewer_context,
+            published_verdict_line=render_published_verdict_line(published_verdict),
+        )
     return ReviewFullContextData(
         issue_number=resolved_issue_number,
         bundle=bundle,
         reviewer_context=reviewer_context,
         items=items,
         program_id=(resolved_v2.program.id if resolved_v2 is not None else None),
+        published_verdict=published_verdict,
     )
 
 
@@ -719,6 +743,7 @@ def _build_reviewer_context(
     signal_people_directory: tuple[PersonDirectory, ...],
     signal_source_confidence_order: tuple[str, ...],
     persona_coverage: dict[str, Any] | None = None,
+    use_structured_runner: bool = False,
 ) -> ReviewerRenderContext:
     assigned_reviewers = _assigned_reviewers_by_section(bundle)
     review_lookup = {section.section_id: section for section in review_status.sections}
@@ -759,25 +784,38 @@ def _build_reviewer_context(
         archive_root=archive_root,
         forecast=forecast,
     )
-    anticipated_questions = tuple(
-        ReviewerAnticipatedQuestion(
-            reader=question.reader,
-            question=question.question,
-            suggested_response=question.suggested_response,
-            confidence=question.confidence.value,
-            evidence=question.evidence,
+    anticipation_readers = tuple(
+        LeadershipReader(
+            name=reader.name,
+            role=reader.role,
+            cares_about=reader.cares_about,
+            prefers=reader.prefers,
+            pet_peeves=reader.pet_peeves,
         )
-        for question in anticipate_questions(
-            readers=tuple(
-                LeadershipReader(
-                    name=reader.name,
-                    role=reader.role,
-                    cares_about=reader.cares_about,
-                    prefers=reader.prefers,
-                    pet_peeves=reader.pet_peeves,
-                )
-                for reader in (bundle.program_context.leadership_readers if bundle.program_context is not None else ())
-            ),
+        for reader in (bundle.program_context.leadership_readers if bundle.program_context is not None else ())
+    )
+    if use_structured_runner:
+        anticipation_runner_ctx = (
+            build_pinned_runner_context(
+                program_id,
+                programs_root=programs_root,
+                caller="vertex-review-full-anticipation",
+                feature="anticipation_engine",
+                policy_version=ANTICIPATION_POLICY_VERSION,
+            )
+            if program_id is not None
+            else RunnerContext(
+                program_id="unbound-review",
+                run_id=new_ai_run_id(),
+                policy_version=ANTICIPATION_POLICY_VERSION,
+                snapshot_id="0" * 64,
+                principal="system",
+                classification="internal",
+            )
+        )
+        anticipation_items = anticipate_questions_via_runner(
+            context=anticipation_runner_ctx,
+            readers=anticipation_readers,
             signals=approved_signals,
             drift_patterns=drift_patterns,
             summaries=summary_lookup,
@@ -787,6 +825,27 @@ def _build_reviewer_context(
             program_id=program_id,
             programs_root=programs_root,
         )
+    else:
+        anticipation_items = anticipate_questions(
+            readers=anticipation_readers,
+            signals=approved_signals,
+            drift_patterns=drift_patterns,
+            summaries=summary_lookup,
+            workstreams=detail_sections,
+            dependencies=dependencies,
+            client=anticipation_client,
+            program_id=program_id,
+            programs_root=programs_root,
+        )
+    anticipated_questions = tuple(
+        ReviewerAnticipatedQuestion(
+            reader=question.reader,
+            question=question.question,
+            suggested_response=question.suggested_response,
+            confidence=question.confidence.value,
+            evidence=question.evidence,
+        )
+        for question in anticipation_items
     )
     trust_editorial_rows: tuple[ReviewerTrustRow, ...] = ()
     trust_claim_extraction_rows: tuple[ReviewerTrustRow, ...] = ()

@@ -21,8 +21,10 @@ from pathlib import Path
 from typing import Any
 
 from src.ai._pipeline import AIPipelineError, process_generated_text
+from src.ai._runner_bridge import run_structured_feature_via_runner
 from src.ai.prompt_registry import PromptRegistryError, load_prompt
 from src.ai.provider import LLMProvider
+from src.ai.structured_feature_runner import RunnerContext
 from src.ai.tiered_router import route_through_tiers
 from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
 from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
@@ -189,6 +191,76 @@ def generate_program_synthesis(
     )
     persist_program_synthesis(synthesis, programs_root=programs_root)
     return ProgramSynthesisOutcome(ai_run_id=ai_run_id, released=True, synthesis=synthesis, findings=())
+
+
+def generate_program_synthesis_via_runner(
+    request: ProgramSynthesisRequest,
+    *,
+    context: RunnerContext,
+    client: LLMProvider,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> ProgramSynthesisOutcome:
+    """RVX-D09 runner path for ``program_synthesizer`` via StructuredFeatureRunner."""
+    program_id = request.program_id
+    policy = load_ai_feature_policy(_FEATURE)
+    prompt_template = _load_prompt_template()
+    user_prompt = _build_user_prompt(request)
+    collected_findings: list[str] = []
+
+    def _validate_synthesis(raw: dict[str, Any]) -> ProgramSynthesis:
+        synthesis = _parse_synthesis(raw, request=request, ai_run_id=context.run_id)
+        if synthesis is None:
+            raise ValueError(
+                "response missing a non-empty through_line, has invalid recommendation evidence_refs, "
+                "or failed the text-safety pipeline."
+            )
+        findings = _validate_program_synthesis_semantics(synthesis, request)
+        if findings:
+            collected_findings.extend(findings)
+            raise ValueError("; ".join(findings))
+        return synthesis
+
+    def call_provider(compiled: Any) -> Any:
+        return client.structured(
+            compiled.prompt_text,
+            "",
+            parser=lambda payload: payload,
+            max_tokens=policy.max_tokens or 1200,
+            prompt_version=PROMPT_VERSION,
+        )
+
+    synthesis = run_structured_feature_via_runner(
+        feature=_FEATURE,
+        task_class="synthesis",
+        context=context,
+        program_id=program_id,
+        prompt_version=PROMPT_VERSION,
+        policy_version=POLICY_VERSION,
+        schema_version=_OUTPUT_SCHEMA_VERSION,
+        programs_root=programs_root,
+        system_prompt=prompt_template,
+        user_prompt=user_prompt,
+        output_schema_text=_CONTEXT_OUTPUT_SCHEMA_TEXT,
+        request_payload=_request_to_payload(request),
+        deployment_fingerprint=_resolve_model_deployment(client),
+        validator_version=POLICY_VERSION,
+        invoke_provider=call_provider,
+        parse_and_validate=_validate_synthesis,
+        serialize_result=lambda raw, _s: dict(raw),
+        error_factory=ValueError,
+        raise_on_rejection=False,
+        empty_value=None,
+        provider_error_map=lambda _err: None,
+    )
+    if synthesis is None:
+        return ProgramSynthesisOutcome(
+            ai_run_id=context.run_id,
+            released=False,
+            synthesis=None,
+            findings=tuple(collected_findings) or ("program_synthesizer did not release output.",),
+        )
+    persist_program_synthesis(synthesis, programs_root=programs_root)
+    return ProgramSynthesisOutcome(ai_run_id=context.run_id, released=True, synthesis=synthesis, findings=())
 
 
 def generate_program_synthesis_via_context_gateway(

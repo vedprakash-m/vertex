@@ -30,6 +30,7 @@ from src.core.intervention_ranker import InterventionProposal, rank_brief_interv
 from src.core.knowledge_store import load_program_knowledge, select_engms_pages
 from src.core.models import Confidence
 from src.core.models_v2 import ContradictionPacket, IncidentEntry
+from src.core.program_verdict import PublishedProgramVerdict, load_latest_program_verdict, render_published_verdict_line
 from src.core.workspace_paths import REPO_ROOT, resolve_report_workspace_roots
 
 
@@ -53,6 +54,7 @@ class BriefReport:
     reference_lines: tuple[str, ...] = ()
     staged_interventions: tuple[InterventionProposal, ...] = ()
     program_narrative_lines: tuple[str, ...] = ()
+    published_verdict: PublishedProgramVerdict | None = None
 
 
 def brief_command(
@@ -335,6 +337,14 @@ def build_brief(
                 )
     now_lines = tuple(line.text for line in sorted(now_items, key=lambda item: (-item.priority, item.text)))
     watch_lines = tuple(line.text for line in sorted(watch_items, key=lambda item: (-item.priority, item.text)))
+    try:
+        published_verdict = load_latest_program_verdict(program_id, programs_root=programs_root)
+    except ConfigError as error:
+        published_verdict = None
+        now_lines = (
+            f"Published program verdict unavailable for {program_id} ({type(error).__name__}); retained assessment read failed.",
+            *now_lines,
+        )
     return BriefReport(
         program_id=program_id,
         generated_at=generated_at,
@@ -344,6 +354,7 @@ def build_brief(
         reference_lines=reference_lines,
         staged_interventions=staged_interventions,
         program_narrative_lines=program_narrative_lines,
+        published_verdict=published_verdict,
     )
 
 
@@ -437,6 +448,9 @@ def render_brief(report: BriefReport, *, programs_root: Path = PROGRAMS_ROOT) ->
     if report.program_narrative_lines:
         lines.extend(("", "Program Narrative", "-----------------"))
         lines.extend(f"- {line}" for line in report.program_narrative_lines)
+    if report.published_verdict is not None:
+        lines.extend(("", "Program Verdict", "---------------"))
+        lines.append(f"- {render_published_verdict_line(report.published_verdict)}")
     rendered = "\n".join(lines)
     _validate_brief_editorial(report.program_id, rendered, programs_root=programs_root)
     return rendered

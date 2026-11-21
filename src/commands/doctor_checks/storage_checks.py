@@ -8,7 +8,10 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+import yaml
+
 from src.commands.doctor_checks.models import DoctorCheck, DoctorReport, directory_size, format_bytes
+from src.core.metric_registry import load_metric_definition_map
 from src.commands.gather_pipeline.lifecycle_policy import load_gather_runtime_policy
 from src.core.tag_hygiene import (
     NO_UNRESOLVED_SLA_DAYS,
@@ -138,8 +141,48 @@ def run_storage_doctor(
         _dc01_root_cleanliness_check(program_id, programs_root=programs_root),
         _dc02_runtime_layout_check(program_id, programs_root=programs_root),
         _dc03_docs_directory_check(program_id, programs_root=programs_root),
+        _compaction_authority_check(
+            program_id,
+            programs_root=programs_root,
+            db_root=reality_db_root,
+        ),
     )
     return DoctorReport(edition=edition_name, checks=checks)
+
+
+def _compaction_authority_check(
+    program_id: str,
+    *,
+    programs_root: Path,
+    db_root: Path | None,
+) -> DoctorCheck:
+    db_path = get_program_reality_db_path(program_id, db_root=db_root, programs_root=programs_root)
+    if not db_path.exists():
+        return DoctorCheck(
+            "Compaction Authority",
+            "pass",
+            "No reality database yet; workspace compaction metrics authority check skipped.",
+        )
+    metrics_root = programs_root.expanduser().resolve().parent / "knowledge" / "metrics"
+    if not metrics_root.is_dir():
+        return DoctorCheck(
+            "Compaction Authority",
+            "warn",
+            f"Reality database exists without workspace compaction metrics authority at {metrics_root} (knowledge/metrics).",
+        )
+    try:
+        load_metric_definition_map(metrics_root=metrics_root)
+    except (ConfigError, yaml.YAMLError) as exc:
+        return DoctorCheck(
+            "Compaction Authority",
+            "warn",
+            f"Workspace compaction metrics authority at {metrics_root} is invalid: {exc}",
+        )
+    return DoctorCheck(
+        "Compaction Authority",
+        "pass",
+        f"Workspace compaction metrics authority resolved cleanly ({metrics_root}).",
+    )
 
 
 def _edition_workspace_layout_check(program_id: str, *, programs_root: Path) -> DoctorCheck:

@@ -85,8 +85,45 @@ def test_report_comparison_uses_two_real_dated_samples(prior: RiskLevel, current
         assert label == "rising vs prior issue"
     elif _RANK[current] < _RANK[prior]:
         assert label == "falling vs prior issue"
+    elif current == prior == RiskLevel.HIGH:
+        assert label == "high vs prior issue"
     else:
         assert label == "unchanged vs prior issue"
+
+
+@pytest.mark.parametrize(("prior", "current"), list(product(_RANK, repeat=2)))
+def test_report_and_escalation_agree_on_dated_direction_semantics(
+    prior: RiskLevel, current: RiskLevel
+) -> None:
+    report_spark, report_label = assemble_stage._derive_risk_sparkline(
+        current, prior, current_at=_CURRENT_AT, prior_at=_PRIOR_AT
+    )
+    esc_spark, esc_label = escalate._history_risk_trend(
+        prior, current, prior_at=_PRIOR_AT, current_at=_CURRENT_AT
+    )
+    spark, direction = compare_dated_risk_pair(
+        current, prior, current_at=_CURRENT_AT, prior_at=_PRIOR_AT
+    )
+    assert report_spark == esc_spark == spark
+    expected_report = {
+        None: None,
+        "rise": "rising vs prior issue",
+        "fall": "falling vs prior issue",
+        "steady": "unchanged vs prior issue",
+        "high": "high vs prior issue",
+    }[direction]
+    expected_esc = {
+        None: None,
+        "rise": "net rise across 2 observations",
+        "fall": "net fall across 2 observations",
+        "steady": "no net change across 2 observations",
+        "high": "high across 2 observations",
+    }[direction]
+    assert report_label == expected_report
+    assert esc_label == expected_esc
+    if direction == "high":
+        assert "high" in (report_label or "")
+        assert "high" in (esc_label or "")
 
 
 @pytest.mark.parametrize("current", list(_RANK))

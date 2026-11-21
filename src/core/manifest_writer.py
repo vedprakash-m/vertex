@@ -167,7 +167,7 @@ def build_run_evidence_snapshot(
 
 
 def validate_run_evidence_snapshot(capture: RunEvidenceSnapshot) -> RunEvidenceSnapshot:
-    return _decode_run_capture(_to_jsonable(capture))
+    return decode_run_evidence_snapshot(_to_jsonable(capture))
 
 
 def _capture_content(capture: RunEvidenceSnapshot) -> dict[str, Any]:
@@ -185,8 +185,10 @@ def _capture_clock(value: Any) -> datetime:
     return clock.astimezone(timezone.utc)
 
 
-def _decode_run_capture(value: Any) -> RunEvidenceSnapshot:
+def decode_run_evidence_snapshot(value: object) -> RunEvidenceSnapshot:
     try:
+        if not isinstance(value, Mapping):
+            raise ValueError("Invalid capture object")
         payload = dict(value)
         schema_version = payload.get("schema_version")
         expected_fields = {field.name for field in fields(RunEvidenceSnapshot)}
@@ -268,7 +270,7 @@ def load_run_evidence_snapshot(
         raise ConfigError("Declared run evidence metadata is invalid.")
     if "run_evidence_snapshot" not in metadata and reference is None:
         return None
-    capture = _decode_run_capture(metadata.get("run_evidence_snapshot"))
+    capture = decode_run_evidence_snapshot(metadata.get("run_evidence_snapshot"))
     pin = draft_state.get("program_fact_snapshot")
     if (
         not isinstance(pin, dict) or reference != capture.sha256

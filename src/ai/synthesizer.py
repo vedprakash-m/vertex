@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any, cast
 
 from src.ai._pipeline import AIPipelineError, process_generated_text
+from src.ai._runner_bridge import run_structured_feature_via_runner
 from src.ai.client import AIClientError, NON_RETRYABLE_AI_ERRORS
 from src.ai.provider import LLMProvider
+from src.ai.structured_feature_runner import RunnerContext
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
 from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
@@ -194,6 +196,93 @@ class WorkstreamSynthesizer:
             "passed AISchemaGateway bounds and workstream-synthesis field validation",
         )
         return SynthesizedProposalDraft(synthesis=synthesis, prompt_version=PROMPT_VERSION)
+
+    def generate_via_runner(
+        self,
+        *,
+        context: RunnerContext,
+        program: Program,
+        workstream: Workstream,
+        signals: tuple[Signal, ...],
+        drift_patterns: tuple[DriftPattern, ...],
+        open_risks: tuple[RiskEntry, ...] = (),
+        open_actions: tuple[ActionItem, ...] = (),
+        contradictions: tuple[ContradictionPacket, ...] = (),
+        programs_root: Path = PROGRAMS_ROOT,
+    ) -> SynthesizedProposalDraft | None:
+        """RVX-D09 runner path for ``synthesizer`` via StructuredFeatureRunner."""
+        if not signals:
+            return None
+        program_id = program.id
+        valid_signal_ids = tuple(signal.id for signal in signals)
+        request_payload: dict[str, Any] = {
+            "program_id": program.id,
+            "workstream_id": workstream.id,
+            "signal_ids": list(valid_signal_ids),
+            "signal_texts": [signal.text for signal in signals],
+            "drift_pattern_ids": [pattern.work_item_id for pattern in drift_patterns],
+            "open_risk_ids": [risk.id for risk in open_risks],
+            "open_action_ids": [action.id for action in open_actions],
+        }
+        system_prompt = _load_prompt()
+        user_prompt = _build_user_prompt(
+            program=program,
+            workstream=workstream,
+            signals=signals,
+            drift_patterns=drift_patterns,
+            open_risks=open_risks,
+            open_actions=open_actions,
+            contradictions=contradictions,
+        )
+        policy = load_ai_feature_policy(_FEATURE)
+        client = self._client
+
+        def call_provider(compiled: Any) -> Any:
+            return client.structured(
+                compiled.prompt_text,
+                "",
+                parser=lambda payload: payload,
+                max_tokens=policy.max_tokens,
+                prompt_version=PROMPT_VERSION,
+            )
+
+        def _validate_synthesis(raw: dict[str, Any]) -> SynthesizedProposalDraft:
+            synthesis = _parse_synthesis_payload(
+                cast(dict[str, object], raw),
+                workstream_id=workstream.id,
+                valid_signal_ids=valid_signal_ids,
+            )
+            return SynthesizedProposalDraft(synthesis=synthesis, prompt_version=PROMPT_VERSION)
+
+        return run_structured_feature_via_runner(
+            feature=_FEATURE,
+            task_class="synthesis",
+            context=context,
+            program_id=program_id,
+            prompt_version=PROMPT_VERSION,
+            policy_version=POLICY_VERSION,
+            schema_version=_OUTPUT_SCHEMA_VERSION,
+            programs_root=programs_root,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            output_schema_text='Respond with JSON: {"summary": str, "risks": [...], "actions": [...]}.',
+            request_payload=request_payload,
+            deployment_fingerprint=_resolve_model_deployment(self._client),
+            validator_version=POLICY_VERSION,
+            invoke_provider=call_provider,
+            parse_and_validate=_validate_synthesis,
+            serialize_result=lambda raw, _draft: dict(raw),
+            error_factory=SynthesizerError,
+            raise_on_rejection=True,
+            nonretryable_error_map=lambda error: SynthesizerError(
+                f"Workstream synthesis stopped: {type(error).__name__}; check AI cost state before retrying."
+            ),
+            provider_error_map=lambda err: (
+                SynthesizerError(f"Workstream synthesis failed for {workstream.id}: {err}")
+                if isinstance(err, AIClientError)
+                else err
+            ),
+        )
 
 
 def build_synthesizer_from_client(client: LLMProvider) -> WorkstreamSynthesizer:

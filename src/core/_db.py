@@ -47,12 +47,17 @@ def open_program_db(
     path: Path,
     *,
     read_only: bool = False,
+    immutable: bool = False,
     durability: Literal["balanced", "strict"] = "balanced",
     busy_timeout_ms: int = 5000,
 ) -> SQLiteUnitOfWork:
     if not read_only:
         path.parent.mkdir(parents=True, exist_ok=True)
-    connection_target = f"{path.absolute().as_uri()}?mode=ro" if read_only else str(path)
+    if read_only:
+        query = "mode=ro&immutable=1" if immutable else "mode=ro"
+        connection_target = f"{path.absolute().as_uri()}?{query}"
+    else:
+        connection_target = str(path)
     connection = sqlite3.connect(connection_target, uri=read_only)
     setup_complete = False
     try:

@@ -26,11 +26,16 @@ from src.core.models import ConfirmedDimension, EditionType, RunManifest, RiskLe
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+_R0_CALLERLESS_MODULE_ALLOWLIST: dict[str, dict[str, str]] = {}
+
+
 def test_relo_w4_callerless_helpers_are_retired() -> None:
     retired = (
         REPO_ROOT / "src" / "core" / "sprint_planner.py",
         REPO_ROOT / "src" / "core" / "object_lifecycle.py",
         REPO_ROOT / "src" / "core" / "long_horizon_relevance.py",
+        REPO_ROOT / "src" / "core" / "actuation_reconciler.py",
+        REPO_ROOT / "src" / "core" / "action_extraction_parity.py",
     )
     assert [path.relative_to(REPO_ROOT).as_posix() for path in retired if path.exists()] == []
 
@@ -38,6 +43,8 @@ def test_relo_w4_callerless_helpers_are_retired() -> None:
         "src.core.sprint_planner",
         "src.core.object_lifecycle",
         "src.core.long_horizon_relevance",
+        "src.core.actuation_reconciler",
+        "src.core.action_extraction_parity",
     }
     imports: set[str] = set()
     for path in (REPO_ROOT / "src").rglob("*.py"):
@@ -48,6 +55,8 @@ def test_relo_w4_callerless_helpers_are_retired() -> None:
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imports.add(node.module)
     assert imports & forbidden_modules == set()
+    assert "src.core.communication_budget" in imports
+    assert _R0_CALLERLESS_MODULE_ALLOWLIST == {}
 
 
 # These ceilings freeze the current high-risk hotspots so they cannot silently grow
@@ -1701,3 +1710,86 @@ def test_no_source_writes_to_repo_root_output() -> None:
             for match in pattern.finditer(text):
                 violations.append(f"{py_file.relative_to(src_root)}: {match.group()}")
     assert not violations, f"Shadow output constructors found:\n" + "\n".join(violations)
+
+
+_R1_ZERO_IMPORTER_SRC_BASELINE = frozenset(
+    {
+        "src/ai/activation_judge.py",
+        "src/ai/discovery/kb_decision_log_extractor.py",
+        "src/ai/rev/rev_extractor.py",
+        "src/ai/rev/rev_judge.py",
+        "src/ai/safety/ai_trace_capture.py",
+        "src/ai/safety/confidence_tagger.py",
+        "src/commands/counterfactual_render.py",
+        "src/commands/doctor_checks/actuation_checks.py",
+        "src/core/acceptance_truth_policy.py",
+        "src/core/activation_benefit.py",
+        "src/core/activation_fleet.py",
+        "src/core/activation_readiness.py",
+        "src/core/activation_slo.py",
+        "src/core/adf_quality_floors.py",
+        "src/core/ado_actuation_adapter.py",
+        "src/core/authority_registry.py",
+        "src/core/cold_start_accelerator.py",
+        "src/core/consolidated_gate_approval.py",
+        "src/core/consolidated_scope_policy.py",
+        "src/core/date_inference.py",
+        "src/core/entity_resolution.py",
+        "src/core/fact_schema_registry.py",
+        "src/core/flake_buckets.py",
+        "src/core/follow_up_proposal.py",
+        "src/core/forecast_bands.py",
+        "src/core/gather_schedule_monitor.py",
+        "src/core/inferred_dependency_evidence.py",
+        "src/core/integration_profile.py",
+        "src/core/ledger/program_checkpoint_manifest.py",
+        "src/core/nfr_budgets.py",
+        "src/core/null_adapter.py",
+        "src/core/null_projection.py",
+        "src/core/people_delegation_conflicts.py",
+        "src/core/platform_observability.py",
+        "src/core/quality_gates/adf_cross_surface.py",
+        "src/core/quality_gates/adf_economics.py",
+        "src/core/quality_gates/gate_registry.py",
+        "src/core/rev/authority_scope.py",
+        "src/core/rev/entity_binding_gate.py",
+        "src/core/review_packs.py",
+        "src/core/workiq_precision_eval.py",
+        "src/m365/local_kb_reader.py",
+        "src/m365/teams_webhook_client.py",
+    }
+)
+
+
+def test_zero_importer_src_modules_do_not_grow_beyond_baseline() -> None:
+    """R0-5 / R1 ratchet: no new unimported Python modules may be introduced under src/."""
+    src_root = REPO_ROOT / "src"
+    all_mods: dict[str, str] = {}
+    for path in sorted(src_root.rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        mod = rel[:-3].replace("/", ".")
+        if mod.endswith(".__init__"):
+            mod = mod[:-9]
+        all_mods[rel] = mod
+
+    imported: set[str] = set()
+    for scan_target in (*sorted(src_root.rglob("*.py")), REPO_ROOT / "cli.py"):
+        tree = ast.parse(scan_target.read_text(encoding="utf-8-sig"), filename=str(scan_target))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+                for alias in node.names:
+                    imported.add(f"{node.module}.{alias.name}")
+
+    zero_importers = {
+        rel
+        for rel, mod in all_mods.items()
+        if mod not in imported and not any(entry.startswith(mod + ".") for entry in imported)
+    }
+    unexpected = sorted(zero_importers - _R1_ZERO_IMPORTER_SRC_BASELINE)
+    assert unexpected == [], (
+        "New callerless src/ module(s) introduced without a production/CLI importer: "
+        + ", ".join(unexpected)
+    )

@@ -6,8 +6,10 @@ from pathlib import Path
 import re
 from typing import Any, Callable
 
+from src.ai._runner_bridge import build_pinned_runner_context, run_structured_feature_via_runner
 from src.ai.provider import LLMProvider
 from src.ai.prompt_registry import load_prompt
+from src.ai.structured_feature_runner import RunnerContext
 from src.ai.tiered_router import route_through_tiers
 from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
 from src.core.edition_resolver import PROGRAMS_ROOT
@@ -538,6 +540,8 @@ def _build_lookback_ai_retrospective_rows(
     snapshots: tuple[Snapshot, ...],
     program_id: str = "",
     programs_root: Path = PROGRAMS_ROOT,
+    use_structured_runner: bool = False,
+    runner_context: RunnerContext | None = None,
 ) -> tuple[RetrospectiveIntelligenceRow, ...]:
     if not retrospective_intelligence.rows or not snapshots:
         return ()
@@ -596,13 +600,45 @@ def _build_lookback_ai_retrospective_rows(
         return tuple(rows)
 
     user_prompt = "\n".join(user_lines)
+    system_prompt = load_prompt(_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION)
+    if use_structured_runner:
+        context = runner_context
+        if context is None:
+            if program_id.strip():
+                context = build_pinned_runner_context(
+                    program_id.strip(),
+                    programs_root=programs_root,
+                    caller="vertex-report-lookback",
+                    feature=_LOOKBACK_RETROSPECTIVE_FEATURE,
+                    policy_version=_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION,
+                )
+            else:
+                context = RunnerContext(
+                    program_id="unbound-lookback",
+                    run_id=new_ai_run_id(),
+                    policy_version=_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION,
+                    snapshot_id="0" * 64,
+                    principal="system",
+                    classification="internal",
+                )
+        rows = _run_ai_route_via_runner(
+            client,
+            context=context,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            parse_response=_parse_response,
+            program_id=program_id,
+            programs_root=programs_root,
+        )
+        return rows
+
     outcome = route_through_tiers(
         _LOOKBACK_RETROSPECTIVE_FEATURE,
         deterministic_fn=None,
         local_fn=None,
         frontier_fn=lambda: _run_ai_route(
             client,
-            system_prompt=load_prompt(_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION),
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             parse_response=_parse_response,
             program_id=program_id,
@@ -611,6 +647,55 @@ def _build_lookback_ai_retrospective_rows(
         policy=load_ai_feature_policy(_LOOKBACK_RETROSPECTIVE_FEATURE),
     )
     return outcome.value or ()
+
+
+def _run_ai_route_via_runner(
+    client: LLMProvider,
+    *,
+    context: RunnerContext,
+    system_prompt: str,
+    user_prompt: str,
+    parse_response: Callable[[dict[str, Any]], tuple[RetrospectiveIntelligenceRow, ...]],
+    program_id: str,
+    programs_root: Path,
+) -> tuple[RetrospectiveIntelligenceRow, ...]:
+    """RVX-D09 runner path for ``lookback_retrospective``."""
+    policy = load_ai_feature_policy(_LOOKBACK_RETROSPECTIVE_FEATURE)
+
+    def call_provider(compiled: Any) -> Any:
+        return client.structured(
+            compiled.prompt_text,
+            "",
+            parser=lambda payload: payload,
+            max_tokens=policy.max_tokens,
+            prompt_version=_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION,
+        )
+
+    deployment = getattr(client, "deployment", None) or getattr(client, "model", None) or type(client).__name__
+    empty_rows: tuple[RetrospectiveIntelligenceRow, ...] = ()
+    result = run_structured_feature_via_runner(
+        feature=_LOOKBACK_RETROSPECTIVE_FEATURE,
+        task_class="synthesis",
+        context=context,
+        program_id=program_id or None,
+        prompt_version=_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION,
+        policy_version=_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION,
+        schema_version="1",
+        programs_root=programs_root,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        output_schema_text='Respond with JSON: {"insights": [{"category": str, "title": str, "detail": str}]}.',
+        request_payload={"program_id": program_id, "user_prompt_length": len(user_prompt)},
+        deployment_fingerprint=str(deployment),
+        validator_version=_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION,
+        invoke_provider=call_provider,
+        parse_and_validate=parse_response,
+        serialize_result=lambda raw, _rows: dict(raw),
+        error_factory=RuntimeError,
+        raise_on_rejection=False,
+        empty_value=empty_rows,
+    )
+    return result or ()
 
 
 def _run_ai_route(

@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 import typer
 
+from src.commands.report_email import assess_notify_communication_budgets, format_communication_budget_observations
 from src.core.ado_client import ADOClient
 from src.core.ado_enrichment import ADO_RISK_ASSESSMENT_COMMENT_FIELD, ADO_RISK_ASSESSMENT_FIELD, infer_ado_risk_level, normalize_risk_assessment
 from src.core.action_tracker import assess_action_staleness
@@ -144,6 +145,16 @@ def freshness_command(
         typer.echo(f"Markdown: {artifacts.md_path}")
         typer.echo(f"HTML: {artifacts.html_path}")
         if notify and artifacts.notify_previews:
+            for observation in format_communication_budget_observations(
+                assess_notify_communication_budgets(
+                    edition_name=edition,
+                    previews=artifacts.notify_previews,
+                    dri_summaries=artifacts.dri_summaries,
+                    programs_root=PROGRAMS_ROOT,
+                    now=datetime.now(timezone.utc),
+                )
+            ):
+                typer.echo(observation)
             if notification_log_path is not None:
                 typer.echo(f"Notification log: {notification_log_path}")
             typer.echo("Send disabled until Phase 2 (Graph permissions required).")

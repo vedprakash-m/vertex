@@ -418,6 +418,23 @@ class CacheIdentity:
         )
 
 
+_FAIL_CLOSED_INTEGRITY_FEATURES = frozenset(
+    {
+        "dependency_blast_radius_generator",
+        "exec_summary_drafter",
+        "blurb_generator",
+        "lookback_retrospective",
+        "claim_extractor",
+        "anticipation_engine",
+        "decision_brief_advisor",
+        "program_synthesizer",
+        "intent_router",
+        "m365_topic_router",
+        "summary_generator",
+        "synthesizer",
+    }
+)
+
 _RELEASED_CACHE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS released_result_cache (
     cache_key             TEXT PRIMARY KEY,
@@ -722,20 +739,16 @@ class ReleasedResultCache:
                     _released_content_hash(row["payload"])
                     != row["released_content_hash"]
                 )
+                preserve_fail_closed = (
+                    preserve_payload_integrity_errors
+                    and identity.feature in _FAIL_CLOSED_INTEGRITY_FEATURES
+                )
                 if payload_hash_mismatch:
-                    if (
-                        preserve_payload_integrity_errors
-                        and identity.feature
-                        == "dependency_blast_radius_generator"
-                    ):
+                    if preserve_fail_closed:
                         preserve_for_read = True
                     else:
                         should_remove = True
-                if (
-                    preserve_payload_integrity_errors
-                    and identity.feature == "dependency_blast_radius_generator"
-                    and not preserve_for_read
-                ):
+                if preserve_fail_closed and not preserve_for_read:
                     try:
                         json.loads(row["payload"])
                     except (json.JSONDecodeError, TypeError):
@@ -758,11 +771,7 @@ class ReleasedResultCache:
                     verified = self._verify_release(identity, row["payload"], origin_run_id)
                     if verified is not True and verified is not False:
                         raise StateError("Released-result cache release verification result is invalid.")
-                    if (
-                        verified is False
-                        and preserve_payload_integrity_errors
-                        and identity.feature == "dependency_blast_radius_generator"
-                    ):
+                    if verified is False and preserve_fail_closed:
                         preserve_for_read = True
                     else:
                         should_remove = verified is False
