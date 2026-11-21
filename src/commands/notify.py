@@ -10,6 +10,7 @@ from typing import Any, Callable
 import typer
 
 from src.commands.freshness import FreshnessArtifacts, _record_confirmed_notify_run, generate_freshness_report
+from src.commands.report_email import assess_notify_communication_budgets, format_communication_budget_observations
 from src.core.config_loader import load_bundle
 from src.core.edition_resolver import get_program_output_dir, PROGRAMS_ROOT
 from src.core.eml_writer import build_eml_bytes, write_eml
@@ -63,6 +64,16 @@ def notify_command(
             archive_root=ARCHIVE_ROOT,
         )
         typer.echo(render_notify_preview_plaintext(artifacts.notify_previews))
+        for observation in format_communication_budget_observations(
+            assess_notify_communication_budgets(
+                edition_name=edition,
+                previews=artifacts.notify_previews,
+                dri_summaries=artifacts.dri_summaries,
+                programs_root=PROGRAMS_ROOT,
+                now=datetime.now(timezone.utc),
+            )
+        ):
+            typer.echo(observation)
         typer.echo(f"Markdown: {artifacts.md_path}")
         typer.echo(f"HTML: {artifacts.html_path}")
 

@@ -5,6 +5,7 @@ Ranks existing signals only; computes nothing new and writes nothing.
 
 from __future__ import annotations
 
+from collections import defaultdict
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -13,7 +14,15 @@ from pathlib import Path
 from src.core.actuation_outbox import outbox_db_path
 from src.core._db import open_program_db
 from src.core.action_tracker import assess_action_staleness
+from src.core.context_gap_store import ContextGapRecord, load_context_gaps
+from src.core.governed_feedback_lifecycle import (
+    ProposalStatus,
+    get_feedback_proposals_path,
+    load_feedback_proposals,
+)
+from src.core.incident_journal_store import read_incident_entries
 from src.core.models_v2 import ActionItem, RiskEntry, RiskImpact, RiskProbability, RiskStatus
+from src.core.reality_store import get_program_reality_db_path
 from src.core.risk_register_engine import assess_risk_staleness
 
 _ACTIVE_RISK_STATUSES = {RiskStatus.OPEN, RiskStatus.ESCALATED}
@@ -44,8 +53,9 @@ def build_exception_queue(
     as_of: date,
     *,
     dispatch_exceptions: tuple[DispatchException, ...] = (),
+    extended_exceptions: tuple[ExceptionItem, ...] = (),
 ) -> tuple[ExceptionItem, ...]:
-    """Rank: needs_input (0) > overdue_action (1) > stale_risk (2); ties by oldest, then id."""
+    """Rank: severity 0 (needs_input/dispatch/blocked_draft) > 1 (action/gap/binding) > 2 (stale); ties by oldest, then id."""
     items: list[ExceptionItem] = []
     for risk in risks:
         review_date = risk.last_reviewed_date or risk.identified_date
@@ -79,6 +89,7 @@ def build_exception_queue(
             dispatch.reason,
             dispatch.evidence,
         ))
+    items.extend(extended_exceptions)
     return tuple(sorted(items, key=lambda item: (item.severity_rank, -item.age_days, item.subject_id)))
 
 
@@ -91,7 +102,7 @@ def load_dispatch_exceptions(
     db_path = outbox_db_path(program_id, programs_root=programs_root)
     if not db_path.exists():
         return ()
-    with open_program_db(db_path, read_only=True) as connection:
+    with open_program_db(db_path, read_only=True, immutable=_zero_write_immutable(db_path)) as connection:
         has_table = connection.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type = 'table' AND name = 'outbox_reconciliation_receipts'"
@@ -149,9 +160,312 @@ def load_dispatch_exceptions(
     return tuple(exceptions)
 
 
+def _confirmed_issue_keys(program_id: str, *, programs_root: Path) -> set[tuple[str, int]]:
+    confirmed: set[tuple[str, int]] = set()
+    for base in (programs_root / program_id / "archive", programs_root.parent / "archive" / program_id):
+        if not base.is_dir():
+            continue
+        for index_path in sorted(base.glob("*/index.json")):
+            edition = index_path.parent.name
+            try:
+                payload = json.loads(index_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            raw_issues = payload.get("issues") if isinstance(payload, dict) else None
+            if not isinstance(raw_issues, list):
+                continue
+            for entry in raw_issues:
+                if isinstance(entry, dict) and entry.get("kind") == "confirmed":
+                    issue_number = entry.get("issue_number")
+                    if isinstance(issue_number, int) and not isinstance(issue_number, bool):
+                        confirmed.add((edition, issue_number))
+    return confirmed
+
+
+def load_blocked_draft_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only scan of unconfirmed draft manifests failing one or more quality gates."""
+    publications_dir = programs_root / program_id / "publications"
+    if not publications_dir.is_dir():
+        return ()
+    confirmed = _confirmed_issue_keys(program_id, programs_root=programs_root)
+    items: list[ExceptionItem] = []
+    for path in sorted(publications_dir.glob("*.manifest.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Publication manifest is not an object: {path.name}")
+        qg_results = payload.get("qg_results")
+        if not isinstance(qg_results, dict):
+            continue
+        failed_gates = sorted(str(gate) for gate, passed in qg_results.items() if passed is False)
+        if not failed_gates:
+            continue
+        edition = str(payload.get("edition") or "unknown")
+        issue_number = payload.get("issue_number")
+        if isinstance(issue_number, int) and not isinstance(issue_number, bool) and (edition, issue_number) in confirmed:
+            continue
+        raw_started = payload.get("started_at")
+        if isinstance(raw_started, str):
+            started = datetime.fromisoformat(raw_started.replace("Z", "+00:00"))
+            if started.utcoffset() is None:
+                raise ValueError(f"Publication manifest timestamp is naive: {path.name}")
+            age_days = max(0, (as_of - started.astimezone(timezone.utc).date()).days)
+        else:
+            age_days = 0
+        manifest_id = str(payload.get("manifest_id") or path.stem)
+        items.append(ExceptionItem(
+            kind="blocked_draft",
+            subject_id=manifest_id,
+            severity_rank=0,
+            age_days=age_days,
+            reason=f"Draft {edition}#{issue_number} blocked by {', '.join(failed_gates)}.",
+            evidence=f"publications/{path.name}",
+        ))
+    return tuple(items)
+
+
+def load_context_gap_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only projection of context/source gaps in _feedback/context_gaps.jsonl."""
+    records = load_context_gaps(program_id, programs_root=programs_root)
+    grouped: dict[tuple[str, str | None, str], list[ContextGapRecord]] = defaultdict(list)
+    for rec in records:
+        grouped[(rec.feature, rec.lane, rec.field)].append(rec)
+    items: list[ExceptionItem] = []
+    for (feature, lane, field_name), group in sorted(grouped.items(), key=lambda entry: (entry[0][0], entry[0][1] or "", entry[0][2])):
+        latest = max(group, key=lambda rec: rec.ts)
+        age_days = max(0, (as_of - latest.ts.astimezone(timezone.utc).date()).days)
+        severity_rank = 0 if latest.severity == "feature_blocked" else 1
+        suffix = f" ({len(group)} signals)" if len(group) > 1 else ""
+        items.append(ExceptionItem(
+            kind="source_gap",
+            subject_id=f"{feature}:{lane or 'global'}:{field_name}",
+            severity_rank=severity_rank,
+            age_days=age_days,
+            reason=f"[{latest.severity}] {latest.message}{suffix}",
+            evidence=f"_feedback/context_gaps.jsonl#{feature}:{field_name}",
+        ))
+    return tuple(items)
+
+
+def _zero_write_immutable(db_path: Path) -> bool:
+    wal_path = db_path.with_name(f"{db_path.name}-wal")
+    return not wal_path.exists() or wal_path.stat().st_size == 0
+
+
+def load_unvalidated_binding_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only check for active unvalidated metric source bindings in the reality DB."""
+    db_path = get_program_reality_db_path(program_id, programs_root=programs_root)
+    if not db_path.is_file():
+        return ()
+    with open_program_db(db_path, read_only=True, immutable=_zero_write_immutable(db_path)) as connection:
+        has_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reality_metric_source_bindings'"
+        ).fetchone()
+        if has_table is None:
+            return ()
+        rows = connection.execute(
+            """
+            SELECT binding_id, metric_id, source_kind, valid_from
+            FROM reality_metric_source_bindings
+            WHERE program_id = ? AND valid_until IS NULL AND validated = 0
+            ORDER BY metric_id ASC, binding_id ASC
+            """,
+            (program_id,),
+        ).fetchall()
+    items: list[ExceptionItem] = []
+    for binding_id, metric_id, source_kind, valid_from_text in rows:
+        valid_from = datetime.fromisoformat(str(valid_from_text).replace("Z", "+00:00"))
+        if valid_from.utcoffset() is None:
+            raise ValueError("Stored metric source binding timestamp is not timezone-aware")
+        age_days = max(0, (as_of - valid_from.astimezone(timezone.utc).date()).days)
+        items.append(ExceptionItem(
+            kind="unvalidated_binding",
+            subject_id=str(binding_id),
+            severity_rank=1,
+            age_days=age_days,
+            reason=f"Metric binding for {metric_id} ({source_kind}) is unvalidated.",
+            evidence=f"vertex-db/{program_id}#binding:{binding_id}",
+        ))
+    return tuple(items)
+
+
+def load_approval_expiry_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only check for expired unrevoked actuation approvals without completed dispatch."""
+    db_path = outbox_db_path(program_id, programs_root=programs_root)
+    if not db_path.is_file():
+        return ()
+    with open_program_db(db_path, read_only=True, immutable=_zero_write_immutable(db_path)) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if not {"outbox_approvals", "outbox_current_approvals"}.issubset(tables):
+            return ()
+        has_outbox = {"outbox", "outbox_admissions"}.issubset(tables)
+        outbox_filter = (
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM outbox_admissions AS adm "
+            "JOIN outbox AS o ON o.outbox_id = adm.outbox_id "
+            "WHERE adm.intent_id = a.intent_id AND o.status = 'completed'"
+            ")"
+            if has_outbox
+            else ""
+        )
+        rows = connection.execute(
+            f"""
+            SELECT a.approval_id, a.intent_id, a.revision, a.expires_at, a.evidence_expires_at
+            FROM outbox_approvals AS a
+            JOIN outbox_current_approvals AS c
+              ON c.approval_id = a.approval_id
+            WHERE a.revoked_at IS NULL
+              {outbox_filter}
+            ORDER BY a.expires_at ASC, a.approval_id ASC
+            """
+        ).fetchall()
+    items: list[ExceptionItem] = []
+    for approval_id, intent_id, revision, expires_at_text, evidence_expires_at_text in rows:
+        exp_dt = datetime.fromisoformat(str(expires_at_text).replace("Z", "+00:00"))
+        ev_dt = datetime.fromisoformat(str(evidence_expires_at_text).replace("Z", "+00:00"))
+        if exp_dt.utcoffset() is None or ev_dt.utcoffset() is None:
+            raise ValueError("Stored actuation approval expiry timestamp is not timezone-aware")
+        earliest_date = min(
+            exp_dt.astimezone(timezone.utc).date(),
+            ev_dt.astimezone(timezone.utc).date(),
+        )
+        if earliest_date > as_of:
+            continue
+        age_days = max(0, (as_of - earliest_date).days)
+        items.append(ExceptionItem(
+            kind="approval_expiry",
+            subject_id=str(approval_id),
+            severity_rank=0,
+            age_days=age_days,
+            reason=f"Approval for {intent_id} (rev {revision}) expired {earliest_date.isoformat()}.",
+            evidence=f"actuation/outbox.db#approval:{approval_id}",
+        ))
+    return tuple(items)
+
+
+def load_runtime_incident_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only projection of recent severity-0/1/2 runtime incidents from incident_journal.jsonl."""
+    entries = read_incident_entries(program_id, programs_root=programs_root)
+    items: list[ExceptionItem] = []
+    for entry in entries:
+        if entry.severity is not None and entry.severity > 2:
+            continue
+        obs_date = entry.observed_at.astimezone(timezone.utc).date()
+        age_days = (as_of - obs_date).days
+        if age_days < 0 or age_days > 30:
+            continue
+        sev_label = f"Sev-{entry.severity}" if entry.severity is not None else "Incident"
+        severity_rank = 0 if (entry.severity is not None and entry.severity <= 1) else 1
+        items.append(ExceptionItem(
+            kind="runtime_incident",
+            subject_id=entry.incident_id,
+            severity_rank=severity_rank,
+            age_days=age_days,
+            reason=f"{sev_label}: {entry.belief_change_summary}",
+            evidence=f"journal/incident_journal.jsonl#{entry.signal_id}",
+        ))
+    return tuple(items)
+
+
+def load_knowledge_proposal_exceptions(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only projection of pending or expired-approval governed feedback proposals."""
+    proposals_path = get_feedback_proposals_path(program_id, programs_root=programs_root)
+    if not proposals_path.is_file():
+        return ()
+    pending_statuses = {
+        ProposalStatus.PROPOSED,
+        ProposalStatus.EVALUATING,
+        ProposalStatus.AWAITING_APPROVAL,
+        ProposalStatus.APPROVED,
+        ProposalStatus.SHADOW,
+    }
+    items: list[ExceptionItem] = []
+    for proposal in load_feedback_proposals(program_id, programs_root=programs_root):
+        if proposal.status in pending_statuses:
+            age_days = max(0, (as_of - proposal.updated_at.astimezone(timezone.utc).date()).days)
+            items.append(ExceptionItem(
+                kind="knowledge_proposal",
+                subject_id=proposal.proposal_id,
+                severity_rank=1,
+                age_days=age_days,
+                reason=f"Proposal for {proposal.subject} is {proposal.status.value}.",
+                evidence=f"feedback_proposals.jsonl#{proposal.proposal_id}",
+            ))
+        elif proposal.status is ProposalStatus.ACTIVE and proposal.approval is not None:
+            exp_date = proposal.approval.expires_at.astimezone(timezone.utc).date()
+            if exp_date <= as_of:
+                items.append(ExceptionItem(
+                    kind="knowledge_proposal",
+                    subject_id=proposal.proposal_id,
+                    severity_rank=0,
+                    age_days=(as_of - exp_date).days,
+                    reason=f"Active proposal approval for {proposal.subject} expired {exp_date.isoformat()}.",
+                    evidence=f"feedback_proposals.jsonl#{proposal.proposal_id}",
+                ))
+    return tuple(items)
+
+
+def load_extended_exception_signals(
+    program_id: str,
+    *,
+    programs_root: Path,
+    as_of: date,
+) -> tuple[ExceptionItem, ...]:
+    """Read-only loader for RELO-W4.12 extended operational exception signals."""
+    return (
+        load_blocked_draft_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+        + load_approval_expiry_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+        + load_runtime_incident_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+        + load_knowledge_proposal_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+        + load_context_gap_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+        + load_unvalidated_binding_exceptions(program_id, programs_root=programs_root, as_of=as_of)
+    )
+
+
 __all__ = [
     "DispatchException",
     "ExceptionItem",
     "build_exception_queue",
+    "load_approval_expiry_exceptions",
+    "load_blocked_draft_exceptions",
+    "load_context_gap_exceptions",
     "load_dispatch_exceptions",
+    "load_extended_exception_signals",
+    "load_knowledge_proposal_exceptions",
+    "load_runtime_incident_exceptions",
+    "load_unvalidated_binding_exceptions",
 ]

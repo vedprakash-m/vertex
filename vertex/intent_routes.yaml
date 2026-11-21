@@ -501,7 +501,8 @@ commands:
         - --program
         - --to
       exceptions:
-        flags: []
+        flags:
+        - --extended
         value_options:
         - --as-of
         - --program
@@ -876,6 +877,7 @@ commands:
       - --no-ai
       - --no-seed
       - --offline
+      - --projector-preview
       - --reseed
       - --send-draft
       - --stdout
@@ -1499,6 +1501,10 @@ commands:
         value_options:
         - --format
         - --program
+      study:
+        flags: []
+        value_options:
+        - --evidence
   reconcile:
     callback:
       flags:
@@ -1574,6 +1580,7 @@ commands:
       - --no-ai
       - --no-seed
       - --offline
+      - --projector-preview
       - --reseed
       - --send-draft
       - --stdout

@@ -814,3 +814,207 @@ def _seed_db_compaction_fixture(store: RealityStore) -> str:
         )
     )
     return metric_id
+
+
+def _write_workspace_metric_registry(workspace: Path, *, retention_days: int) -> None:
+    metrics_dir = workspace / "knowledge" / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    (metrics_dir / "acme.yaml").write_text(
+        (
+            "metrics:\n"
+            "  - id: acme.cluster_count\n"
+            "    title: Cluster Count\n"
+            "    unit: count\n"
+            "    aggregation: last\n"
+            f"    retention_days: {retention_days}\n"
+        ),
+        encoding="utf-8",
+    )
+
+
+def _seed_external_workspace_compaction_db(workspace: Path) -> Path:
+    db_root = workspace / "vertex-db"
+    store = RealityStore("acme", db_root=db_root)
+    store.initialize()
+    _seed_db_compaction_fixture(store)
+    return store.db_path
+
+
+def test_compact_resolves_workspace_metrics_registry_independently(tmp_path: Path) -> None:
+    ws_a = tmp_path / "ws_a"
+    ws_b = tmp_path / "ws_b"
+    (ws_a / "programs").mkdir(parents=True)
+    (ws_b / "programs").mkdir(parents=True)
+    _write_workspace_metric_registry(ws_a, retention_days=30)
+    _write_workspace_metric_registry(ws_b, retention_days=3650)
+    db_a = _seed_external_workspace_compaction_db(ws_a)
+    db_b = _seed_external_workspace_compaction_db(ws_b)
+
+    result_a = runner.invoke(
+        app,
+        [
+            "admin",
+            "db",
+            "compact",
+            "--program",
+            "acme",
+            "--programs-root",
+            str(ws_a / "programs"),
+            "--format",
+            "json",
+        ],
+    )
+    assert result_a.exit_code == 0, result_a.output
+    payload_a = json.loads(result_a.stdout)
+    assert payload_a["observation_compaction"]["rows_deleted"] == 2
+    assert payload_a["observation_compaction"]["rollup_rows_inserted"] == 1
+
+    scheduled_b = maybe_run_scheduled_compaction(
+        "acme",
+        programs_root=ws_b / "programs",
+        db_root=ws_b / "vertex-db",
+    )
+    assert scheduled_b is not None
+    assert scheduled_b["observation_compaction"]["rows_deleted"] == 0
+
+    with sqlite3.connect(db_a) as conn_a, sqlite3.connect(db_b) as conn_b:
+        count_a = conn_a.execute("SELECT COUNT(*) FROM reality_metric_observations").fetchone()[0]
+        count_b = conn_b.execute("SELECT COUNT(*) FROM reality_metric_observations").fetchone()[0]
+    assert count_a == 2
+    assert count_b == 3
+
+
+def test_compact_fails_closed_when_external_workspace_metrics_missing_or_invalid(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from src.core.exceptions import ConfigError
+
+    ws_missing = tmp_path / "ws_missing"
+    (ws_missing / "programs").mkdir(parents=True)
+    db_missing = _seed_external_workspace_compaction_db(ws_missing)
+    before_bytes = db_missing.read_bytes()
+
+    manual_result = runner.invoke(
+        app,
+        [
+            "admin",
+            "db",
+            "compact",
+            "--program",
+            "acme",
+            "--programs-root",
+            str(ws_missing / "programs"),
+            "--format",
+            "json",
+        ],
+    )
+    assert manual_result.exit_code == 2
+    assert json.loads(manual_result.stdout)["error"] == "metrics_registry_missing"
+    assert db_missing.read_bytes() == before_bytes
+    assert not (db_missing.parent / ".compact_last_run").exists()
+
+    with pytest.raises(ConfigError):
+        maybe_run_scheduled_compaction(
+            "acme",
+            programs_root=ws_missing / "programs",
+            db_root=ws_missing / "vertex-db",
+        )
+    assert db_missing.read_bytes() == before_bytes
+    assert not (db_missing.parent / ".compact_last_run").exists()
+
+    ws_invalid = tmp_path / "ws_invalid"
+    (ws_invalid / "programs").mkdir(parents=True)
+    invalid_metrics = ws_invalid / "knowledge" / "metrics"
+    invalid_metrics.mkdir(parents=True)
+    (invalid_metrics / "broken.yaml").write_text("metrics: [\n", encoding="utf-8")
+    db_invalid = _seed_external_workspace_compaction_db(ws_invalid)
+    before_invalid_bytes = db_invalid.read_bytes()
+
+    invalid_result = runner.invoke(
+        app,
+        [
+            "admin",
+            "db",
+            "compact",
+            "--program",
+            "acme",
+            "--programs-root",
+            str(ws_invalid / "programs"),
+            "--format",
+            "json",
+        ],
+    )
+    assert invalid_result.exit_code == 2
+    assert json.loads(invalid_result.stdout)["error"] == "metrics_registry_invalid"
+    assert db_invalid.read_bytes() == before_invalid_bytes
+    assert not (db_invalid.parent / ".compact_last_run").exists()
+
+
+def test_storage_doctor_warns_when_external_workspace_lacks_compaction_metrics_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.commands.doctor_checks.storage_checks import run_storage_doctor
+    from tests.support.synthetic_report_source import EDITION_NAME, build_synthetic_report_source
+
+    ws = tmp_path / "ws"
+    monkeypatch.setenv("USERPROFILE", str(ws))
+    monkeypatch.setenv("HOME", str(ws))
+    build_synthetic_report_source(ws)
+    programs_root = ws / "programs"
+    editions_root = programs_root / "acme" / "editions"
+    archive_root = ws / "archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    _seed_external_workspace_compaction_db(ws)
+
+    report = run_storage_doctor(
+        edition_name=EDITION_NAME,
+        editions_root=editions_root,
+        programs_root=programs_root,
+        archive_root=archive_root,
+        reality_db_root=ws / "vertex-db",
+    )
+    check = next((item for item in report.checks if item.label == "Compaction Authority"), None)
+    assert check is not None
+    assert check.status == "warn"
+    assert "knowledge/metrics" in check.detail.replace("\\", "/")
+
+    # Malformed YAML -> warn; valid YAML -> pass; absent DB -> pass
+    bad_metrics = ws / "knowledge" / "metrics"
+    bad_metrics.mkdir(parents=True, exist_ok=True)
+    bad_yaml = bad_metrics / "broken.yaml"
+    bad_yaml.write_text("metrics: [\n", encoding="utf-8")
+    malformed_report = run_storage_doctor(
+        edition_name=EDITION_NAME,
+        editions_root=editions_root,
+        programs_root=programs_root,
+        archive_root=archive_root,
+        reality_db_root=ws / "vertex-db",
+    )
+    malformed_check = next(item for item in malformed_report.checks if item.label == "Compaction Authority")
+    assert malformed_check.status == "warn"
+    assert "invalid" in malformed_check.detail
+
+    bad_yaml.unlink()
+    _write_workspace_metric_registry(ws, retention_days=90)
+    valid_report = run_storage_doctor(
+        edition_name=EDITION_NAME,
+        editions_root=editions_root,
+        programs_root=programs_root,
+        archive_root=archive_root,
+        reality_db_root=ws / "vertex-db",
+    )
+    valid_check = next(item for item in valid_report.checks if item.label == "Compaction Authority")
+    assert valid_check.status == "pass"
+
+    no_db_report = run_storage_doctor(
+        edition_name=EDITION_NAME,
+        editions_root=editions_root,
+        programs_root=programs_root,
+        archive_root=archive_root,
+        reality_db_root=ws / "empty-vertex-db",
+    )
+    no_db_check = next(item for item in no_db_report.checks if item.label == "Compaction Authority")
+    assert no_db_check.status == "pass"
+

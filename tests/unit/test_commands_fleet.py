@@ -2616,3 +2616,48 @@ def _write_ai_safety_manifest(
         ),
         encoding="utf-8",
     )
+
+
+def test_fr19_thirty_two_program_synthetic_fleet_contract(tmp_path: Path) -> None:
+    from src.core.activation_fleet import FleetProgramSample, FleetSoakBudget, evaluate_fleet_soak
+
+    programs_root = tmp_path / "programs"
+    for idx in range(32):
+        pid = f"fleet_prog_{idx:02d}"
+        _write_program(
+            programs_root / pid,
+            name=f"Fleet Program {idx:02d}",
+            current_phase="Execution",
+            archive_payloads={
+                f"{pid}_weekly": {
+                    "latest_issue": 2,
+                    "generated_at": FROZEN_NOW.isoformat(),
+                    "scorecards": [
+                        {"issue_number": 1, "scorecard_name": "Health", "dimension": "Delivery", "risk": "low"},
+                        {"issue_number": 2, "scorecard_name": "Health", "dimension": "Delivery", "risk": "low"},
+                    ],
+                    "top_items": (),
+                }
+            },
+            dependencies_text=None,
+        )
+    report = build_fleet_report(programs_root=programs_root, as_of=FROZEN_NOW)
+    assert len(report.programs) == 32
+    assert report.stale_program_count == 0
+    verdict = evaluate_fleet_soak(
+        tuple(
+            FleetProgramSample(
+                program_id=p.program_id,
+                rendered_from_program_reality=True,
+                quiet_lane=(idx == 0),
+                isolation_violations=0,
+                growth_mb_this_cycle=1.0,
+                cost_usd_this_cycle=0.0,
+                observed_concurrency=4,
+            )
+            for idx, p in enumerate(report.programs)
+        ),
+        budget=FleetSoakBudget(min_programs=30),
+    )
+    assert verdict.passed is True
+    assert verdict.program_count == 32

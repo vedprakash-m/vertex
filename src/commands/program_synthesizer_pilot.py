@@ -31,10 +31,13 @@ from pathlib import Path
 import typer
 
 from src.ai.ai_mode import AIMode, get_ai_mode
+from src.ai._runner_bridge import build_pinned_runner_context
 from src.ai.deployment_fallback import FallbackAIClient, resolve_ai_deployments_for_feature
 from src.ai.program_synthesizer import (
+    POLICY_VERSION as PROGRAM_SYNTH_POLICY_VERSION,
     generate_program_synthesis,
     generate_program_synthesis_via_context_gateway,
+    generate_program_synthesis_via_runner,
 )
 from src.ai.provider import LLMProvider
 from src.commands.blind_ab_prompt import prompt_comparison_judgment
@@ -78,6 +81,7 @@ def run_context_gateway_comparison(
     client_factory: Callable[..., LLMProvider] | None = None,
     prompt_fn: Callable[[str], str] = typer.prompt,
     echo_fn: Callable[[str], None] = typer.echo,
+    use_structured_runner: bool = False,
 ) -> ComparisonRunResult:
     """Runs both synthesis paths over the same assembled candidate-item pool
     and records one blind human judgment. Requires a live AI client for both
@@ -117,7 +121,19 @@ def run_context_gateway_comparison(
         client_factory=client_factory,
     )
 
-    baseline_outcome = generate_program_synthesis(request, client=client, programs_root=programs_root)
+    if use_structured_runner:
+        runner_ctx = build_pinned_runner_context(
+            program_id,
+            programs_root=programs_root,
+            caller="vertex-program-synthesizer-pilot",
+            feature="program_synthesizer",
+            policy_version=PROGRAM_SYNTH_POLICY_VERSION,
+        )
+        baseline_outcome = generate_program_synthesis_via_runner(
+            request, context=runner_ctx, client=client, programs_root=programs_root,
+        )
+    else:
+        baseline_outcome = generate_program_synthesis(request, client=client, programs_root=programs_root)
     candidate_outcome = generate_program_synthesis_via_context_gateway(request, client=client, programs_root=programs_root)
     baseline_text = _format_synthesis(baseline_outcome.synthesis) if baseline_outcome.released else None
     candidate_text = _format_synthesis(candidate_outcome.synthesis) if candidate_outcome.released else None

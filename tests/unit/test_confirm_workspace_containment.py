@@ -147,8 +147,10 @@ def test_installed_confirm_preflight_uses_confirm_defaults_not_report_defaults(
     result = CliRunner().invoke(cli.app, ["confirm", "--edition", "fixture", "--issue", "7", "--dry-run"])
     assert isinstance(result.exception, RuntimeError)
     assert str(result.exception) == "stop before archive IO"
-    for hook in hooks:
-        hook.assert_called_once()
+    hooks[0].assert_called_once()
+    # R0-FR-02: --dry-run skips scheduled DB maintenance and session catchup.
+    hooks[1].assert_not_called()
+    hooks[2].assert_not_called()
 
 
 @pytest.mark.parametrize("force", [False, True])

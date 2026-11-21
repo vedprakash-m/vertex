@@ -200,11 +200,17 @@ def _enrich_with_ai(
     program_id: str,
     create_ai_client: object,
     programs_root: Path = PROGRAMS_ROOT,
+    use_structured_runner: bool = False,
 ) -> DecisionBrief:
     if get_ai_mode() == AIMode.DISABLED:
         return brief
+    from src.ai._runner_bridge import build_pinned_runner_context
     from src.commands.report import _create_ai_client as default_create_ai_client
-    from src.ai.decision_brief_advisor import advise_on_decision_brief
+    from src.ai.decision_brief_advisor import (
+        POLICY_VERSION as DECISION_BRIEF_POLICY_VERSION,
+        advise_on_decision_brief,
+        advise_on_decision_brief_via_runner,
+    )
 
     client_factory = create_ai_client or default_create_ai_client
     try:
@@ -214,6 +220,21 @@ def _enrich_with_ai(
     if client is None:
         return brief
     try:
+        if use_structured_runner:
+            context = build_pinned_runner_context(
+                program_id,
+                programs_root=programs_root,
+                caller="vertex-decision-brief-advise",
+                feature="decision_brief_advisor",
+                policy_version=DECISION_BRIEF_POLICY_VERSION,
+            )
+            return advise_on_decision_brief_via_runner(
+                context=context,
+                client=client,
+                brief=brief,
+                program_id=program_id,
+                programs_root=programs_root,
+            )
         return advise_on_decision_brief(
             client=client, brief=brief, program_id=program_id, programs_root=programs_root,
         )

@@ -5,12 +5,13 @@ from typing import Literal, TypedDict
 from pathlib import Path
 
 from src.commands.risks import _risk_review_label
-from src.core.forecast_engine import ForecastAssessment
+from src.core.forecast_engine import ETAForecast, ForecastAssessment
 from src.core.milestone_engine import describe_milestone_schedule_variance, load_milestone_completion_date_history_map, load_milestone_target_date_history_map, summarize_milestone_completion_date_history, summarize_milestone_target_date_history
 from src.core.models import Confidence, DimensionRisk, EditionType, RiskLevel, Snapshot, WorkItem
 from src.core.models_v2 import Milestone, MilestoneAssessment, MilestoneStatus, RiskEntry, RiskStatus
 from src.core.overrides_store import OverridesDocument
 from src.core.program_reality import FactAssessment, ProgramReality
+from src.core.program_verdict import resolve_authoritative_program_risk
 from src.core.risk_register_engine import assess_risk_staleness, compute_risk_score, risk_summary_sort_key
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.store_factory import build_signal_store_for_program_id, build_trajectory_store_for_program_id
@@ -139,6 +140,7 @@ def _build_health_summary(
     overrides_document: OverridesDocument | None = None,
     top_items: tuple[Top3Item, ...] = (),
     forecast: ForecastAssessment | None = None,
+    eta_forecasts: tuple[ETAForecast, ...] = (),
     items: tuple[WorkItem, ...] = (),
     milestones: tuple[Milestone, ...] = (),
     milestone_assessments: tuple[MilestoneAssessment, ...] = (),
@@ -244,6 +246,20 @@ def _build_health_summary(
         resolved_risks,
         resolved_risk_assessments,
     )
+    verdict_assessment = resolve_authoritative_program_risk(
+        scorecards=dimension_risks,
+        items=items,
+        forecasts=eta_forecasts,
+        risks=resolved_risks,
+        milestones=milestones,
+        milestone_assessments=milestone_assessments,
+        as_of=as_of,
+    )
+    if not needs_input_count and verdict_assessment.overall_risk in {RiskLevel.HIGH, RiskLevel.BLOCKED, RiskLevel.MEDIUM}:
+        overall_risk = max((overall_risk, verdict_assessment.overall_risk), key={
+            RiskLevel.DONE: 0, RiskLevel.LOW: 1, RiskLevel.UNKNOWN: 2,
+            RiskLevel.MEDIUM: 3, RiskLevel.HIGH: 4, RiskLevel.BLOCKED: 5,
+        }.__getitem__)
 
     return HealthSummary(
         overall_risk=overall_risk,
@@ -311,6 +327,9 @@ def _build_health_summary(
             assessment.truth_level.value == "raw_observed"
             for assessment in resolved_risk_assessments
         ),
+        verdict_risk=verdict_assessment.overall_risk,
+        verdict_reason_codes=verdict_assessment.reason_codes,
+        verdict_contradiction_count=len(verdict_assessment.contradictions),
     )
 
 

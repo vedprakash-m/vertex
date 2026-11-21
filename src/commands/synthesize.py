@@ -18,7 +18,14 @@ from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai.client import AIClient, AIClientError, NON_RETRYABLE_AI_ERRORS
 from src.ai.deployment_fallback import LEGACY_DEPLOYMENT_ALIAS_NOTICE, resolve_ai_deployments_for_feature
 from src.ai.llm_trace import AITraceContext, use_trace_context
-from src.ai.synthesizer import SynthesizedProposalDraft, SynthesizerError, WorkstreamSynthesizer, build_synthesizer_from_client
+from src.ai._runner_bridge import build_pinned_runner_context
+from src.ai.synthesizer import (
+    POLICY_VERSION as SYNTHESIZER_POLICY_VERSION,
+    SynthesizedProposalDraft,
+    SynthesizerError,
+    WorkstreamSynthesizer,
+    build_synthesizer_from_client,
+)
 from src.core.action_tracker import PROGRAMS_ROOT
 from src.core.analytics_store import load_contradiction_state
 from src.core.ai_proposal_store import (
@@ -264,6 +271,7 @@ def synthesize_workstream(
     editions_root: Path | None = None,
     synthesizer_builder: SynthesizerBuilder | None = None,
     now_provider: NowProvider | None = None,
+    use_structured_runner: bool = False,
 ) -> SynthesizeResult:
     resolved_programs_root = programs_root or PROGRAMS_ROOT
     resolved_editions_root = editions_root or EDITIONS_ROOT
@@ -342,16 +350,36 @@ def synthesize_workstream(
         )
     else:
         synthesizer = synthesizer_builder(program)
-    draft = synthesizer.generate(
-        program=program,
-        workstream=workstream,
-        signals=workstream_signals,
-        drift_patterns=drift_patterns,
-        open_risks=open_risks,
-        open_actions=open_actions,
-        contradictions=contradictions,
-        programs_root=resolved_programs_root,
-    )
+    if use_structured_runner:
+        synth_ctx = build_pinned_runner_context(
+            resolved_program_id,
+            programs_root=resolved_programs_root,
+            caller="vertex-synthesize",
+            feature="synthesizer",
+            policy_version=SYNTHESIZER_POLICY_VERSION,
+        )
+        draft = synthesizer.generate_via_runner(
+            context=synth_ctx,
+            program=program,
+            workstream=workstream,
+            signals=workstream_signals,
+            drift_patterns=drift_patterns,
+            open_risks=open_risks,
+            open_actions=open_actions,
+            contradictions=contradictions,
+            programs_root=resolved_programs_root,
+        )
+    else:
+        draft = synthesizer.generate(
+            program=program,
+            workstream=workstream,
+            signals=workstream_signals,
+            drift_patterns=drift_patterns,
+            open_risks=open_risks,
+            open_actions=open_actions,
+            contradictions=contradictions,
+            programs_root=resolved_programs_root,
+        )
     if draft is None:
         raise SynthesizerError(f"No synthesis draft was produced for workstream '{workstream.id}'.")
 

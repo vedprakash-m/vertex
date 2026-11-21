@@ -7,10 +7,12 @@ from typing import Any, Literal, cast
 
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai._pipeline import AIPipelineError, process_generated_text
+from src.ai._runner_bridge import run_structured_feature_via_runner
 from src.ai.client import AIClientError, BudgetExceeded
 from src.ai.deployment_fallback import FallbackStructuredClient, LEGACY_DEPLOYMENT_ALIAS_NOTICE, resolve_ai_deployments_for_feature
 from src.ai.llm_trace import AITraceContext
 from src.ai.provider import DisabledStructuredProvider, LLMProvider
+from src.ai.structured_feature_runner import RunnerContext
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.core.ado_status import _area_path_matches
 from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
@@ -272,6 +274,101 @@ class ClaimExtractor:
         if outcome.value is not None:
             return outcome.value
         return ClaimExtractionResult(claims=(), decision_asks=(), warnings=())
+
+    def extract_claims_via_runner(
+        self,
+        *,
+        context: RunnerContext,
+        program_id: str,
+        edition_id: str,
+        issue_number: int,
+        claim_date: date,
+        narratives: dict[str, str],
+        items: tuple[WorkItem, ...] = (),
+        valid_workstream_ids: tuple[str, ...] = (),
+        workstream_area_paths: dict[str, tuple[str, ...]] | None = None,
+        programs_root: Path = PROGRAMS_ROOT,
+    ) -> ClaimExtractionResult:
+        """RVX-D09 runner path for ``claim_extractor`` via StructuredFeatureRunner."""
+        if not narratives:
+            return ClaimExtractionResult(claims=(), decision_asks=(), warnings=())
+
+        explicit_or_regex, _ = _extract_deterministic_claims(
+            program_id=program_id,
+            edition_id=edition_id,
+            issue_number=issue_number,
+            claim_date=claim_date,
+            narratives=narratives,
+            items=items,
+            valid_workstream_ids=valid_workstream_ids,
+            workstream_area_paths=workstream_area_paths,
+        )
+        if explicit_or_regex is not None:
+            return explicit_or_regex
+
+        system_prompt = _load_prompt()
+        user_prompt = _build_user_prompt(
+            narratives=narratives,
+            items=items,
+            valid_workstream_ids=valid_workstream_ids,
+            workstream_area_paths=workstream_area_paths,
+        )
+        request_payload = {
+            "program_id": program_id,
+            "edition_id": edition_id,
+            "issue_number": issue_number,
+            "narratives": narratives,
+            "item_ids": [item.id for item in items],
+            "valid_workstream_ids": list(valid_workstream_ids),
+        }
+        policy = load_ai_feature_policy(_FEATURE)
+
+        def call_provider(compiled: Any) -> Any:
+            return self._client.structured(
+                compiled.prompt_text,
+                "",
+                parser=lambda payload: payload,
+                max_tokens=policy.max_tokens,
+                prompt_version=PROMPT_VERSION,
+            )
+
+        result = run_structured_feature_via_runner(
+            feature=_FEATURE,
+            task_class="extraction",
+            context=context,
+            program_id=program_id,
+            prompt_version=PROMPT_VERSION,
+            policy_version=POLICY_VERSION,
+            schema_version=_OUTPUT_SCHEMA_VERSION,
+            programs_root=programs_root,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            output_schema_text='Respond with JSON: {"claims": [...], "decision_asks": [...]}.',
+            request_payload=request_payload,
+            deployment_fingerprint=_resolve_model_deployment(self._client),
+            validator_version=POLICY_VERSION,
+            invoke_provider=call_provider,
+            parse_and_validate=lambda raw: _parse_claim_extraction_payload(
+                payload=raw,
+                program_id=program_id,
+                edition_id=edition_id,
+                issue_number=issue_number,
+                claim_date=claim_date,
+                items=items,
+                valid_workstream_ids=valid_workstream_ids,
+                workstream_area_paths=workstream_area_paths,
+            ),
+            serialize_result=lambda raw, _res: dict(raw),
+            error_factory=ClaimExtractorError,
+            raise_on_rejection=True,
+            nonretryable_error_map=lambda error: ClaimExtractorBudgetError(f"AOAI cost guard triggered: {error}"),
+            provider_error_map=lambda error: (
+                ClaimExtractorError(f"AI claim extraction failed: {error}")
+                if isinstance(error, AIClientError)
+                else error
+            ),
+        )
+        return result or ClaimExtractionResult(claims=(), decision_asks=(), warnings=())
 
 
 def _extract_deterministic_claims(

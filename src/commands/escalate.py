@@ -42,6 +42,11 @@ from src.core.milestone_engine import (
     summarize_milestone_target_date_history,
 )
 from src.core.models import Confidence, RiskLevel, ScorecardEvidencePacket, WorkItem
+from src.core.program_verdict import (
+    PublishedProgramVerdict,
+    load_latest_program_verdict,
+    render_published_verdict_line,
+)
 from src.core.scorecard_trends import compare_dated_risk_pair
 from src.core.models_v2 import DependencyStatus, IncidentEntry, LeadershipReader, Scorecard, Signal, SignalReviewDecision, Workstream
 from src.core.overrides_store import load_overrides, merge_overrides
@@ -110,6 +115,7 @@ class EscalationArtifacts:
     signal_paths: tuple[Path, ...] = ()
     state_path: Path | None = None
     sent_count: int = 0
+    published_verdict: PublishedProgramVerdict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,8 +301,13 @@ def generate_escalations(
         programs_root=programs_root,
         rules_path=rules_path,
     )
+    published_verdict = load_latest_program_verdict(
+        resolved.program.id,
+        programs_root=programs_root,
+        archive_root=programs_root.parent / "archive",
+    )
     if not resolved_rules:
-        return EscalationArtifacts(previews=(), suppressed=(), unresolved=())
+        return EscalationArtifacts(previews=(), suppressed=(), unresolved=(), published_verdict=published_verdict)
 
     state_path = programs_root / resolved.program.id / "escalation_state.json"
     knowledge = load_program_knowledge(resolved.program.id, programs_root=programs_root)
@@ -657,6 +668,7 @@ def generate_escalations(
             suppressed=tuple(suppressed),
             unresolved=tuple(unresolved),
             state_path=state_path,
+            published_verdict=published_verdict,
         )
 
     if channel == "email" and resolved.program.maturity_level < 2:
@@ -740,6 +752,7 @@ def generate_escalations(
         signal_paths=tuple(signal_paths),
         state_path=state_path,
         sent_count=sent_count,
+        published_verdict=published_verdict,
     )
 
 
@@ -1827,6 +1840,8 @@ def _escalation_rollback_mechanism(*, channel: str) -> str:
 
 def render_escalation_preview_plaintext(artifacts: EscalationArtifacts) -> str:
     lines = ["ESCALATE PREVIEW"]
+    if artifacts.published_verdict is not None:
+        lines.append(f"Program Verdict: {render_published_verdict_line(artifacts.published_verdict)}")
     if not artifacts.previews:
         lines.append("No escalation rules triggered.")
     for index, preview in enumerate(artifacts.previews, start=1):
@@ -1893,6 +1908,11 @@ def render_escalation_output(
         "edition_name": edition_name,
         "channel": channel,
         "dry_run": dry_run,
+        "published_verdict": (
+            render_published_verdict_line(artifacts.published_verdict)
+            if artifacts.published_verdict is not None
+            else None
+        ),
         "preview_count": len(artifacts.previews),
         "suppressed_count": len(artifacts.suppressed),
         "unresolved_count": len(artifacts.unresolved),

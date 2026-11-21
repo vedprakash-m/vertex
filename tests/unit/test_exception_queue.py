@@ -682,3 +682,425 @@ def test_other_cockpit_commands_preserve_root_startup(monkeypatch: pytest.Monkey
     for hook in hooks:
         hook.assert_called_once()
     assert ai_mode._CURRENT_MODE is ai_mode.AIMode.ACTIVE
+
+
+def test_cli_exceptions_extended_signals_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core._db import open_program_db
+    from src.core.actuation_approval_store import _APPROVAL_SCHEMA_SQL
+    from src.core.actuation_outbox import outbox_db_path
+    from src.core.context_gap_store import append_context_gap
+    from src.core.exception_queue import (
+        load_approval_expiry_exceptions,
+        load_blocked_draft_exceptions,
+        load_context_gap_exceptions,
+        load_knowledge_proposal_exceptions,
+        load_runtime_incident_exceptions,
+        load_unvalidated_binding_exceptions,
+    )
+    from src.core.governed_feedback_lifecycle import (
+        FeedbackApproval,
+        FeedbackPrivacyClass,
+        FeedbackRetentionClass,
+        FeedbackValue,
+        GovernedFeedbackProposal,
+        ProposalKind,
+        ProposalStatus,
+        _append_proposals,
+    )
+    from src.core.incident_journal_store import append_incident_entry
+    from src.core.ledger.durable_outbox_store import _SCHEMA_SQL
+    from src.core.metric_models import MetricSourceBinding
+    from src.core.models import Confidence
+    from src.core.models_v2 import IncidentEntry
+
+    root = tmp_path / "programs"
+    prog_dir = root / "synthetic"
+    pubs_dir = prog_dir / "publications"
+    archive_edition_dir = prog_dir / "archive" / "synthetic_weekly"
+    pubs_dir.mkdir(parents=True)
+    archive_edition_dir.mkdir(parents=True)
+
+    # Already-confirmed draft is skipped even if its archived manifest had a soft gate fail;
+    # unconfirmed failing draft surfaces as blocked_draft.
+    (archive_edition_dir / "index.json").write_text(
+        json.dumps({"issues": [{"kind": "confirmed", "issue_number": 10}]}),
+        encoding="utf-8",
+    )
+    (pubs_dir / "draft-10.manifest.json").write_text(
+        json.dumps({
+            "manifest_id": "synthetic_weekly-10-confirmed",
+            "edition": "synthetic_weekly",
+            "issue_number": 10,
+            "started_at": "2026-11-10T00:00:00+00:00",
+            "qg_results": {"QG-9": False},
+        }),
+        encoding="utf-8",
+    )
+    (pubs_dir / "draft-11.manifest.json").write_text(
+        json.dumps({
+            "manifest_id": "synthetic_weekly-11-blocked",
+            "edition": "synthetic_weekly",
+            "issue_number": 11,
+            "started_at": "2026-11-12T00:00:00+00:00",
+            "qg_results": {"QG-8": False, "QG-1": True},
+        }),
+        encoding="utf-8",
+    )
+    (pubs_dir / "draft-ok.manifest.json").write_text(
+        json.dumps({
+            "manifest_id": "synthetic_weekly-13-passing",
+            "edition": "synthetic_weekly",
+            "issue_number": 13,
+            "started_at": "2026-11-12T00:00:00+00:00",
+            "qg_results": {"QG-1": True},
+        }),
+        encoding="utf-8",
+    )
+    assert load_blocked_draft_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
+    assert load_unvalidated_binding_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
+    assert load_approval_expiry_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
+    assert load_runtime_incident_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
+    assert load_knowledge_proposal_exceptions("missing", programs_root=root, as_of=AS_OF) == ()
+    (pubs_dir / "non-dict.manifest.json").write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="not an object"):
+        load_blocked_draft_exceptions("synthetic", programs_root=root, as_of=AS_OF)
+    (pubs_dir / "non-dict.manifest.json").unlink()
+
+    (pubs_dir / "naive.manifest.json").write_text(
+        json.dumps({
+            "manifest_id": "naive",
+            "edition": "synthetic_weekly",
+            "issue_number": 12,
+            "started_at": "2026-11-12T00:00:00",
+            "qg_results": {"QG-8": False},
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="naive"):
+        load_blocked_draft_exceptions("synthetic", programs_root=root, as_of=AS_OF)
+    (pubs_dir / "naive.manifest.json").unlink()
+
+    append_context_gap(
+        feature="report",
+        program="synthetic",
+        lane="core",
+        field="workiq_latest",
+        severity="feature_blocked",
+        message="Missing WorkIQ summary",
+        impact_estimate="high",
+        programs_root=root,
+        deduplicate=False,
+    )
+    append_context_gap(
+        feature="report",
+        program="synthetic",
+        lane="core",
+        field="workiq_latest",
+        severity="feature_blocked",
+        message="Missing WorkIQ summary",
+        impact_estimate="high",
+        programs_root=root,
+        deduplicate=False,
+    )
+
+    store = RealityStore("synthetic", db_root=tmp_path / "vertex-db")
+    store.initialize()
+    store.upsert_metric_source_binding(
+        MetricSourceBinding(
+            binding_id="b-unvalidated",
+            metric_id="synthetic.availability",
+            program_id="synthetic",
+            source_kind="kusto",
+            cluster="https://cluster.kusto.windows.net",
+            database="Db",
+            kql_template="T | count",
+            result_column="Count",
+            validated=False,
+            valid_from=datetime(2026, 11, 11, 0, 0, tzinfo=timezone.utc),
+        )
+    )
+
+    with open_program_db(outbox_db_path("synthetic", programs_root=root)) as conn:
+        conn.executescript(_SCHEMA_SQL + "\n" + _APPROVAL_SCHEMA_SQL)
+        for aid, iid, exp, ev_exp in (
+            ("apr-expired", "intent-exp", "2026-11-12T00:00:00Z", "2026-11-20T00:00:00Z"),
+            ("apr-future", "intent-ok", "2026-11-25T00:00:00Z", "2026-11-25T00:00:00Z"),
+            ("apr-done", "intent-done", "2026-11-10T00:00:00Z", "2026-11-10T00:00:00Z"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO outbox_approvals (
+                    approval_id, intent_id, revision, semantic_effect_key, payload_sha256,
+                    approval_policy_version, approver_actor, approver_principal,
+                    approver_machine, approver_session, evidence_snapshot_id,
+                    evidence_expires_at, approved_at, expires_at
+                ) VALUES (?, ?, 1, 'k', 'p', 'v1', 'op', 'p', 'm', 's', 'snap-1', ?, '2026-11-01T00:00:00Z', ?)
+                """,
+                (aid, iid, ev_exp, exp),
+            )
+            conn.execute(
+                "INSERT INTO outbox_current_approvals (intent_id, approval_id, revision) VALUES (?, ?, 1)",
+                (iid, aid),
+            )
+        conn.execute(
+            """
+            INSERT INTO outbox (
+                outbox_id, domain, correlation_id, payload_json, status,
+                attempt_count, created_at, updated_at
+            ) VALUES ('ob-done', 'actuation_dispatch', 'ob-done', '{}', 'completed', 1,
+                      '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO outbox_admissions (
+                outbox_id, intent_id, approval_id, approval_revision,
+                semantic_effect_key, payload_sha256, desired_effect_hash,
+                provider, tenant, project, operation, target_identity,
+                causal_occurrence_id, expected_revision, expected_state,
+                rate_key, rate_limit, blast_radius, admitted_at
+            ) VALUES ('ob-done', 'intent-done', 'apr-done', 1, 'k', 'p', 'd',
+                      'ado', 't', 'p', 'create_task.v1', 'tgt', 'c', 1, 's',
+                      'r', 1, 1, '2026-11-01T00:00:00Z')
+            """
+        )
+
+    append_incident_entry(
+        IncidentEntry(
+            program_id="synthetic",
+            incident_id="inc-sev1",
+            signal_id="sig-sev1",
+            observed_at=datetime(2026, 11, 14, 0, 0, tzinfo=timezone.utc),
+            recorded_at=datetime(2026, 11, 14, 1, 0, tzinfo=timezone.utc),
+            belief_change_summary="Active outage in telemetry pipeline",
+            workstream_id=None,
+            severity=1,
+            confidence=Confidence.HIGH,
+        ),
+        programs_root=root,
+    )
+    append_incident_entry(
+        IncidentEntry(
+            program_id="synthetic",
+            incident_id="inc-sev3",
+            signal_id="sig-sev3",
+            observed_at=datetime(2026, 11, 14, 0, 0, tzinfo=timezone.utc),
+            recorded_at=datetime(2026, 11, 14, 1, 0, tzinfo=timezone.utc),
+            belief_change_summary="Low severity notice",
+            workstream_id=None,
+            severity=3,
+            confidence=Confidence.LOW,
+        ),
+        programs_root=root,
+    )
+    append_incident_entry(
+        IncidentEntry(
+            program_id="synthetic",
+            incident_id="inc-old",
+            signal_id="sig-old",
+            observed_at=datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc),
+            recorded_at=datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc),
+            belief_change_summary="Old resolved outage",
+            workstream_id=None,
+            severity=0,
+            confidence=Confidence.HIGH,
+        ),
+        programs_root=root,
+    )
+
+    _append_proposals(
+        "synthetic",
+        (
+            GovernedFeedbackProposal(
+                proposal_id="kp-pending",
+                program_id="synthetic",
+                subject="risk.threshold",
+                version=1,
+                parent_proposal_id=None,
+                kind=ProposalKind.THRESHOLD,
+                target="workstream:core",
+                proposed_value=FeedbackValue.integer(5),
+                observation_ids=("obs-1",),
+                owner="alice",
+                evidence_refs=("ev-1",),
+                reason="Adjust threshold",
+                privacy_class=FeedbackPrivacyClass.INTERNAL,
+                retention_class=FeedbackRetentionClass.GOVERNED,
+                status=ProposalStatus.AWAITING_APPROVAL,
+                created_at=datetime(2026, 11, 13, 0, 0, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 11, 13, 0, 0, tzinfo=timezone.utc),
+            ),
+            GovernedFeedbackProposal(
+                proposal_id="kp-exp-active",
+                program_id="synthetic",
+                subject="prompt.tune",
+                version=1,
+                parent_proposal_id=None,
+                kind=ProposalKind.PROMPT,
+                target="exec_summary",
+                proposed_value=FeedbackValue.enum("tight"),
+                observation_ids=("obs-2",),
+                owner="alice",
+                evidence_refs=("ev-2",),
+                reason="Expired active approval",
+                privacy_class=FeedbackPrivacyClass.INTERNAL,
+                retention_class=FeedbackRetentionClass.GOVERNED,
+                status=ProposalStatus.ACTIVE,
+                created_at=datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc),
+                approval=FeedbackApproval(
+                    approved_by="owner",
+                    actor_role="platform_owner",
+                    approved_at=datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc),
+                    expires_at=datetime(2026, 11, 10, 0, 0, tzinfo=timezone.utc),
+                    kill_switch="disable_prompt_tune",
+                    rollback_to_version=None,
+                    rollback_plan="revert prompt.tune",
+                    proposal_digest="sha256:abc",
+                ),
+            ),
+            GovernedFeedbackProposal(
+                proposal_id="kp-rejected",
+                program_id="synthetic",
+                subject="ignored.rule",
+                version=1,
+                parent_proposal_id=None,
+                kind=ProposalKind.RULE,
+                target="core",
+                proposed_value=FeedbackValue.boolean(False),
+                observation_ids=("obs-3",),
+                owner="alice",
+                evidence_refs=("ev-3",),
+                reason="Rejected",
+                privacy_class=FeedbackPrivacyClass.INTERNAL,
+                retention_class=FeedbackRetentionClass.GOVERNED,
+                status=ProposalStatus.REJECTED,
+                created_at=datetime(2026, 11, 1, 0, 0, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 11, 1, 0, 0, tzinfo=timezone.utc),
+            ),
+        ),
+        programs_root=root,
+    )
+
+    monkeypatch.setattr(cockpit_module, "PROGRAMS_ROOT", root)
+    monkeypatch.delenv("VERTEX_DB_PATH", raising=False)
+    files_before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    assert [item.subject_id for item in load_approval_expiry_exceptions("synthetic", programs_root=root, as_of=AS_OF)] == [
+        "apr-expired"
+    ]
+    assert [item.subject_id for item in load_runtime_incident_exceptions("synthetic", programs_root=root, as_of=AS_OF)] == [
+        "inc-sev1"
+    ]
+    assert {item.subject_id for item in load_knowledge_proposal_exceptions("synthetic", programs_root=root, as_of=AS_OF)} == {
+        "kp-pending",
+        "kp-exp-active",
+    }
+    assert len(load_context_gap_exceptions("synthetic", programs_root=root, as_of=AS_OF)) == 1
+    assert len(load_unvalidated_binding_exceptions("synthetic", programs_root=root, as_of=AS_OF)) == 1
+
+    default_res = runner.invoke(app, ["exceptions", "--program", "synthetic", "--as-of", AS_OF.isoformat()])
+    assert default_res.exit_code == 0, default_res.output
+    assert "[blocked_draft]" not in default_res.output
+    assert "[approval_expiry]" not in default_res.output
+    assert "[runtime_incident]" not in default_res.output
+    assert "[knowledge_proposal]" not in default_res.output
+
+    ext_res = runner.invoke(
+        app,
+        ["exceptions", "--program", "synthetic", "--as-of", AS_OF.isoformat(), "--extended"],
+    )
+    assert ext_res.exit_code == 0, ext_res.output
+    assert "[blocked_draft] synthetic_weekly-11-blocked" in ext_res.output
+    assert "synthetic_weekly-10-confirmed" not in ext_res.output
+    assert "[approval_expiry] apr-expired" in ext_res.output
+    assert "apr-future" not in ext_res.output
+    assert "apr-done" not in ext_res.output
+    assert "[runtime_incident] inc-sev1" in ext_res.output
+    assert "inc-sev3" not in ext_res.output
+    assert "inc-old" not in ext_res.output
+    assert "[knowledge_proposal] kp-pending" in ext_res.output
+    assert "[knowledge_proposal] kp-exp-active" in ext_res.output
+    assert "kp-rejected" not in ext_res.output
+    assert "[source_gap] report:core:workiq_latest" in ext_res.output
+    assert "(2 signals)" in ext_res.output
+    assert "[unvalidated_binding] b-unvalidated" in ext_res.output
+    assert "knowledge proposals" in ext_res.output
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == files_before
+
+
+def test_blocked_draft_skips_malformed_index_and_handles_missing_started_at(tmp_path: Path) -> None:
+    from src.core.exception_queue import load_blocked_draft_exceptions
+
+    root = tmp_path / "programs"
+    archive_dir = root / "synthetic" / "archive"
+    (archive_dir / "ed1").mkdir(parents=True)
+    (archive_dir / "ed1" / "index.json").write_text("{corrupt", encoding="utf-8")
+    (archive_dir / "ed2").mkdir(parents=True)
+    (archive_dir / "ed2" / "index.json").write_text(json.dumps({"issues": "invalid"}), encoding="utf-8")
+
+    pubs = root / "synthetic" / "publications"
+    pubs.mkdir(parents=True)
+    (pubs / "no_qg.manifest.json").write_text(json.dumps({"edition": "ed1", "issue_number": 1}), encoding="utf-8")
+    (pubs / "blocked.manifest.json").write_text(
+        json.dumps({"edition": "ed1", "issue_number": 2, "qg_results": {"QG-2": False}}),
+        encoding="utf-8",
+    )
+
+    items = load_blocked_draft_exceptions("synthetic", programs_root=root, as_of=AS_OF)
+    assert len(items) == 1
+    assert items[0].age_days == 0
+    assert "QG-2" in items[0].reason
+
+
+def test_exception_queue_missing_tables_and_naive_timestamps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlite3
+    from src.core.actuation_outbox import outbox_db_path
+    from src.core.exception_queue import (
+        get_program_reality_db_path,
+        load_approval_expiry_exceptions,
+        load_unvalidated_binding_exceptions,
+    )
+
+    monkeypatch.delenv("VERTEX_DB_PATH", raising=False)
+    root = tmp_path / "programs"
+    root.mkdir(parents=True)
+    db_path = get_program_reality_db_path("synthetic", programs_root=root)
+    db_path.parent.mkdir(parents=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE other (id TEXT)")
+    assert load_unvalidated_binding_exceptions("synthetic", programs_root=root, as_of=AS_OF) == ()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE reality_metric_source_bindings "
+            "(binding_id TEXT, program_id TEXT, metric_id TEXT, source_kind TEXT, valid_until TEXT, validated INTEGER, valid_from TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO reality_metric_source_bindings VALUES ('b1', 'synthetic', 'm1', 'ado', NULL, 0, '2026-10-01T00:00:00')"
+        )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        load_unvalidated_binding_exceptions("synthetic", programs_root=root, as_of=AS_OF)
+
+    ob_path = outbox_db_path("synthetic", programs_root=root)
+    ob_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(ob_path) as conn:
+        conn.execute("CREATE TABLE other (id TEXT)")
+    assert load_approval_expiry_exceptions("synthetic", programs_root=root, as_of=AS_OF) == ()
+
+    with sqlite3.connect(ob_path) as conn:
+        conn.execute(
+            "CREATE TABLE outbox_approvals (approval_id TEXT, intent_id TEXT, revision INTEGER, expires_at TEXT, evidence_expires_at TEXT, revoked_at TEXT)"
+        )
+        conn.execute("CREATE TABLE outbox_current_approvals (approval_id TEXT)")
+        conn.execute(
+            "INSERT INTO outbox_approvals VALUES ('ap1', 'i1', 1, '2026-10-01T00:00:00', '2026-10-01T00:00:00Z', NULL)"
+        )
+        conn.execute("INSERT INTO outbox_current_approvals VALUES ('ap1')")
+    with pytest.raises(ValueError, match="timezone-aware"):
+        load_approval_expiry_exceptions("synthetic", programs_root=root, as_of=AS_OF)

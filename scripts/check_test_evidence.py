@@ -266,7 +266,25 @@ def load_coverage_baseline(
         files[normalized] = FileCoverage(
             statements, covered_statements, branches, covered_branches
         )
+    missing_measurements = sorted(observed_sources - set(files))
+    if missing_measurements:
+        raise ValueError(
+            "coverage baseline is missing measurement entries: "
+            f"{missing_measurements}"
+        )
     return CoverageResult(files)
+
+
+def _expected_coverage_files(root: Path) -> set[str]:
+    expected_files = {
+        path.relative_to(root).as_posix()
+        for path in (root / "src").rglob("*.py")
+        if path.is_file()
+    }
+    cli_path = root / "cli.py"
+    if cli_path.is_file():
+        expected_files.add("cli.py")
+    return expected_files
 
 
 def _parse_args() -> argparse.Namespace:
@@ -311,15 +329,8 @@ def main() -> int:
     if forbidden_skips:
         raise SystemExit("Forbidden deterministic skips: " + "; ".join(forbidden_skips))
 
+    expected_files = _expected_coverage_files(Path.cwd())
     if args.coverage_baseline:
-        expected_files = {
-            path.as_posix()
-            for path in Path("src").rglob("*.py")
-            if path.is_file()
-        }
-        cli_path = Path("cli.py")
-        if cli_path.is_file():
-            expected_files.add(cli_path.as_posix())
         coverage = load_coverage_baseline(
             args.coverage_baseline,
             Path.cwd(),
@@ -327,6 +338,12 @@ def main() -> int:
         )
     elif args.coverage:
         coverage = merge_coverage_json(args.coverage)
+        missing_measurements = sorted(expected_files - set(coverage.files))
+        if missing_measurements:
+            raise SystemExit(
+                "Coverage evidence is missing measurement entries: "
+                + ", ".join(missing_measurements)
+            )
     else:
         raise SystemExit("Coverage evidence or a hash-bound coverage baseline is required.")
     statement_floor = float(policy["coverage"]["statement_floor"])

@@ -7,9 +7,11 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai._pipeline import AIPipelineError, process_generated_text
+from src.ai._runner_bridge import build_pinned_runner_context, run_structured_feature_via_runner
 from src.ai.client import AIClientError
 from src.ai.deployment_fallback import FallbackStructuredClient, LEGACY_DEPLOYMENT_ALIAS_NOTICE, resolve_ai_deployments_for_feature
 from src.ai.provider import LLMProvider
+from src.ai.structured_feature_runner import RunnerContext
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
 from src.core.edition_resolver import PROGRAMS_ROOT, ResolvedEditionPaths, resolve_edition_paths
@@ -144,7 +146,13 @@ class IntentRouter:
         return cls(client=client)
 
     def route(
-        self, request: str, *, default_edition: str = "", programs_root: Path | None = None,
+        self,
+        request: str,
+        *,
+        default_edition: str = "",
+        programs_root: Path | None = None,
+        use_structured_runner: bool = False,
+        runner_context: RunnerContext | None = None,
     ) -> RoutedInvocation:
         normalized_request = request.strip()
         if not normalized_request:
@@ -168,8 +176,27 @@ class IntentRouter:
 
         if not program_id:
             raise IntentRouterError("AI routing requires a configured edition.")
+        if routed is not None:
+            return routed
         system_prompt = _load_prompt()
         user_prompt = _build_user_prompt(request=normalized_request, default_edition=edition)
+
+        if use_structured_runner:
+            active_ctx = runner_context or build_pinned_runner_context(
+                program_id,
+                programs_root=root,
+                caller="vertex-ask-intent-router",
+                feature=_FEATURE,
+                policy_version=PROMPT_VERSION,
+            )
+            return _run_ai_route_via_runner(
+                self._client,
+                context=active_ctx,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                program_id=program_id,
+                programs_root=root,
+            )
 
         def _deterministic_fn() -> TierResult[RoutedInvocation] | None:
             if routed is None:
@@ -198,6 +225,59 @@ class IntentRouter:
         raise IntentRouterError(
             "Unsupported natural-language request for deterministic routing. Try a direct CLI command or configure Azure OpenAI for AI fallback."
         )
+
+
+def _run_ai_route_via_runner(
+    client: _StructuredProvider,
+    *,
+    context: RunnerContext,
+    system_prompt: str,
+    user_prompt: str,
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> RoutedInvocation:
+    """RVX-D09 runner path for ``intent_router`` via StructuredFeatureRunner."""
+    policy = load_ai_feature_policy(_FEATURE)
+
+    def call_provider(compiled: Any) -> Any:
+        return client.structured(
+            compiled.prompt_text,
+            "",
+            parser=lambda payload: payload,
+            max_tokens=policy.max_tokens,
+            prompt_version=PROMPT_VERSION,
+        )
+
+    deployment = getattr(client, "deployment", None) or getattr(client, "model", None) or type(client).__name__
+    invocation = run_structured_feature_via_runner(
+        feature=_FEATURE,
+        task_class="classification",
+        context=context,
+        program_id=program_id,
+        prompt_version=PROMPT_VERSION,
+        policy_version=PROMPT_VERSION,
+        schema_version="1",
+        programs_root=programs_root,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        output_schema_text='Respond with JSON: {"command": str, "args": [str], "confidence": str, "reasoning": str}.',
+        request_payload={"program_id": program_id, "user_prompt": user_prompt},
+        deployment_fingerprint=str(deployment),
+        validator_version=PROMPT_VERSION,
+        invoke_provider=call_provider,
+        parse_and_validate=_parse_routed_invocation,
+        serialize_result=lambda raw, _inv: dict(raw),
+        error_factory=IntentRouterError,
+        raise_on_rejection=True,
+        provider_error_map=lambda err: (
+            IntentRouterError(f"Intent routing failed: {err}") if isinstance(err, AIClientError) else err
+        ),
+    )
+    if invocation is None:
+        raise IntentRouterError(
+            "Unsupported natural-language request for deterministic routing. Try a direct CLI command or configure Azure OpenAI for AI fallback."
+        )
+    return invocation
 
 
 def _run_ai_route(

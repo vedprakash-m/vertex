@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from src.core.action_extraction_parity import (
+from tests.support.action_extraction_parity import (
     NormalizedAction,
     ParityFinding,
     check_action_parity,

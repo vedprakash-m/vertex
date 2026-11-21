@@ -15,7 +15,7 @@ from src.core.attribution_engine import build_inline_citations
 from src.core.deck_renderer import DeckRenderer
 from src.core.forecast_engine import ForecastAssessment, build_forecast_assessment
 from src.core.freshness_engine import build_freshness_report
-from src.core.html_renderer import HTMLRenderer, RenderContext
+from src.core.html_renderer import HTMLRenderer, RenderContext, render_projector_variant
 from src.core.jinja_filters import configure_scorecard_labels
 from src.core.journal import read_signals
 import functools
@@ -92,6 +92,7 @@ class RenderStageState:
     chart_gate_failures: tuple[Any, ...] = ()
     chart_gates_enabled: bool = True
     routed_chart_sections: tuple[Any, ...] = ()
+    projector_html: str | None = None
 
 
 class RenderStage:
@@ -330,6 +331,7 @@ class RenderStage:
             overrides_document=ctx.overrides_document,
             top_items=ctx.top_items,
             forecast=forecast,
+            eta_forecasts=tuple((ctx.eta_forecasts or {}).values()),
             items=ctx.items,
             milestones=(ctx.milestones or ()),
             milestone_assessments=(ctx.milestone_assessments or ()),
@@ -593,6 +595,7 @@ class RenderStage:
             hidden_render_sections=frozenset(ctx.overrides_document.removed_sections),
         )
 
+        projector_html = None
         if ctx.resolved_edition_type == EditionType.DECK:
             open_ask_rows, closed_ask_rows = ((), ())
             key_decision_rows = ()
@@ -707,11 +710,15 @@ class RenderStage:
         else:
             raw_rendering = ctx.resolved_v2.raw_program.get("rendering") if ctx.resolved_v2 is not None else None
             configure_scorecard_labels(raw_rendering.get("scorecard_labels") if isinstance(raw_rendering, dict) else None)
-            html_body = HTMLRenderer(ctx.edition_name, reports_root=ctx.reports_root).render(render_context)
+            renderer = HTMLRenderer(ctx.edition_name, reports_root=ctx.reports_root)
+            html_body = renderer.render(render_context)
+            if ctx.dry_run and ctx.projector_preview:
+                projector_html = render_projector_variant(renderer, render_context)
             markdown_body = TeamsRenderer(ctx.edition_name, reports_root=ctx.reports_root).render(render_context)
         snapshot = support.build_snapshot(report, ctx.scorecard_packets)
         rendered_strings = {
             "html": html_body,
+            **({"projector_html": projector_html} if projector_html is not None else {}),
             "markdown": markdown_body,
             "exec_summary": ctx.render_exec_summary_text,
             **{f"workstream:{section_id}": blurb for section_id, blurb in ctx.render_workstream_blurbs.items()},
@@ -743,6 +750,7 @@ class RenderStage:
                 email_subject=email_subject,
                 email_preheader=email_preheader,
                 html_body=html_body,
+                projector_html=projector_html,
                 markdown_body=markdown_body,
                 snapshot=snapshot,
                 rendered_strings=rendered_strings,

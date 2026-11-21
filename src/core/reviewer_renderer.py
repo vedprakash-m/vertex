@@ -312,6 +312,7 @@ class ReviewerRenderContext:
     dependency_lifecycle_rows: tuple[ReviewerTrackedEntryRow, ...] = ()
     calibration_rows: tuple[WorkstreamCalibration, ...] = ()
     persona_coverage: dict[str, Any] | None = None
+    published_verdict_line: str | None = None
 
 
 def build_render_payload(context: ReviewerRenderContext) -> dict[str, Any]:
@@ -349,6 +350,7 @@ def build_render_payload(context: ReviewerRenderContext) -> dict[str, Any]:
         "dependency_lifecycle_rows": context.dependency_lifecycle_rows,
         "calibration_rows": context.calibration_rows,
         "persona_coverage": context.persona_coverage,
+        "published_verdict_line": context.published_verdict_line,
     }
 
 

@@ -7,10 +7,12 @@ from typing import Any
 
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai._pipeline import AIPipelineError, process_generated_text
+from src.ai._runner_bridge import build_pinned_runner_context, run_structured_feature_via_runner
 from src.ai.client import AIClientError
 from src.ai.deployment_fallback import FallbackStructuredClient, LEGACY_DEPLOYMENT_ALIAS_NOTICE, resolve_ai_deployments_for_feature
 from src.ai.llm_trace import AITraceContext
 from src.ai.provider import DisabledStructuredProvider, LLMProvider
+from src.ai.structured_feature_runner import RunnerContext
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
 from src.core.edition_resolver import PROGRAMS_ROOT
@@ -49,6 +51,8 @@ class M365TopicRouter(IM365TopicRouter):
     # constructor always sets a real program_id.
     program_id: str = ""
     programs_root: Path = PROGRAMS_ROOT
+    use_structured_runner: bool = False
+    runner_context: RunnerContext | None = None
 
     @classmethod
     def from_program(
@@ -57,9 +61,17 @@ class M365TopicRouter(IM365TopicRouter):
         *,
         trace_context: AITraceContext | None = None,
         programs_root: Path = PROGRAMS_ROOT,
+        use_structured_runner: bool = False,
+        runner_context: RunnerContext | None = None,
     ) -> "M365TopicRouter":
         if get_ai_mode() == AIMode.DISABLED:
-            return cls(client=DisabledStructuredProvider(feature_name="M365TopicRouter"), program_id=program.id, programs_root=programs_root)
+            return cls(
+                client=DisabledStructuredProvider(feature_name="M365TopicRouter"),
+                program_id=program.id,
+                programs_root=programs_root,
+                use_structured_runner=use_structured_runner,
+                runner_context=runner_context,
+            )
         if program.ai is None or not program.ai.enabled:
             raise M365TopicRouterError("AI routing requires program.ai.enabled to be true.")
 
@@ -83,7 +95,13 @@ class M365TopicRouter(IM365TopicRouter):
             requests_per_minute=program.ai.requests_per_minute,
             trace_context=trace_context,
         )
-        return cls(client=client, program_id=program.id, programs_root=programs_root)
+        return cls(
+            client=client,
+            program_id=program.id,
+            programs_root=programs_root,
+            use_structured_runner=use_structured_runner,
+            runner_context=runner_context,
+        )
 
     def route_artifact(
         self,
@@ -115,6 +133,37 @@ class M365TopicRouter(IM365TopicRouter):
             return _with_deterministic_short_circuit_reasoning(fallback_decision)
 
         try:
+            if self.use_structured_runner:
+                context = self.runner_context
+                if context is None and self.program_id.strip():
+                    context = build_pinned_runner_context(
+                        self.program_id.strip(),
+                        programs_root=self.programs_root,
+                        caller="vertex-gather-m365-topic-router",
+                        feature=_FEATURE,
+                        policy_version=PROMPT_VERSION,
+                    )
+                if context is not None:
+                    ai_decision = _run_ai_route_via_runner(
+                        self.client,
+                        context=context,
+                        system_prompt=_load_prompt(),
+                        user_prompt=_build_user_prompt(
+                            display_name=display_name,
+                            subject_or_title=subject_or_title,
+                            participant_aliases=participant_aliases,
+                            sample_text=sample_text,
+                            workstream_profiles=workstream_profiles,
+                            recent_confirmed_signals=recent_confirmed_signals,
+                            recent_rejected_signals=recent_rejected_signals,
+                            recent_reassign_corrections=recent_reassign_corrections,
+                            fallback_decision=fallback_decision,
+                        ),
+                        workstream_profiles=workstream_profiles,
+                        program_id=self.program_id,
+                        programs_root=self.programs_root,
+                    )
+                    return _combine_routing_decisions(fallback_decision=fallback_decision, ai_decision=ai_decision)
             outcome = route_through_tiers(
                 _FEATURE,
                 deterministic_fn=lambda: None,
@@ -143,6 +192,55 @@ class M365TopicRouter(IM365TopicRouter):
             return _combine_routing_decisions(fallback_decision=fallback_decision, ai_decision=outcome.value)
         except (AIClientError, M365TopicRouterError, TypeError, ValueError):
             return fallback_decision
+
+
+def _run_ai_route_via_runner(
+    client: LLMProvider,
+    *,
+    context: RunnerContext,
+    system_prompt: str,
+    user_prompt: str,
+    workstream_profiles: tuple[Workstream, ...],
+    program_id: str,
+    programs_root: Path,
+) -> M365RoutingDecision:
+    """RVX-D09 runner path for ``m365_topic_router`` via StructuredFeatureRunner."""
+    policy = load_ai_feature_policy(_FEATURE)
+
+    def call_provider(compiled: Any) -> Any:
+        return client.structured(
+            compiled.prompt_text,
+            "",
+            parser=lambda payload: payload,
+            max_tokens=policy.max_tokens,
+            prompt_version=PROMPT_VERSION,
+        )
+
+    deployment = getattr(client, "deployment", None) or getattr(client, "model", None) or type(client).__name__
+    decision = run_structured_feature_via_runner(
+        feature=_FEATURE,
+        task_class="classification",
+        context=context,
+        program_id=program_id or None,
+        prompt_version=PROMPT_VERSION,
+        policy_version=PROMPT_VERSION,
+        schema_version="1",
+        programs_root=programs_root,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        output_schema_text='Respond with JSON: {"workstream_id": str|null, "confidence": float, "topics": [str], "reasoning": str}.',
+        request_payload={"program_id": program_id, "user_prompt": user_prompt},
+        deployment_fingerprint=str(deployment),
+        validator_version=PROMPT_VERSION,
+        invoke_provider=call_provider,
+        parse_and_validate=lambda payload: _parse_routing_decision(payload=payload, workstream_profiles=workstream_profiles),
+        serialize_result=lambda raw, _dec: dict(raw),
+        error_factory=M365TopicRouterError,
+        raise_on_rejection=True,
+    )
+    if decision is None:
+        raise M365TopicRouterError("M365 routing runner did not release a decision.")
+    return decision
 
 
 def _run_ai_route(

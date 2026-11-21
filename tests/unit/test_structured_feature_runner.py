@@ -1529,6 +1529,10 @@ def test_released_cache_sweep_revokes_stale_and_malformed_rows(tmp_path: Path) -
     with sqlite3.connect(db_path) as connection:
         connection.execute(
             "UPDATE released_result_cache SET cached_at = ? WHERE cache_key = ?",
+            ("2026-11-19T12:00:00+00:00", identities["good"].cache_key()),
+        )
+        connection.execute(
+            "UPDATE released_result_cache SET cached_at = ? WHERE cache_key = ?",
             ("2026-11-10T12:00:00+00:00", identities["stale"].cache_key()),
         )
         connection.execute(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from dataclasses import asdict
+from datetime import date, timedelta
 import json
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,12 @@ from src.core.people_entity_schema import CanonicalEntity, load_entities_documen
 from src.core.people_namespace_bridge import resolve_ref_to_canonical_entity_id
 from src.core.people_registry_governance import require_adopted_registry
 from src.core.program_fact_store import load_program_facts, project_dependencies, project_risk_entries
+from src.core.study_evaluator import (
+    MatchedWeeklyCycle,
+    StratumSample,
+    StudyEvaluationResult,
+    evaluate_matched_cycles,
+)
 from src.core.readiness_engine import (
     ReadinessConfig,
     ReadinessDimensionConfig,
@@ -75,6 +82,53 @@ def show_command(
 ) -> None:
     _show_readiness(program.strip(), output_format=format, programs_root=PROGRAMS_ROOT)
     raise typer.Exit(code=0)
+
+
+@app.command("study")
+def study_command(
+    evidence: Path = typer.Option(..., "--evidence", help="Path to the matched-cycle and label-audit JSON."),
+) -> None:
+    """Evaluate local study evidence and emit the statistical result as JSON."""
+    try:
+        document = json.loads(evidence.read_text(encoding="utf-8"))
+        if not isinstance(document, dict) or document.keys() != {"cycles", "strata"}:
+            raise ValueError("Expected a JSON object with cycles and strata.")
+        cycles = []
+        for row in _study_rows(document["cycles"], "cycles", {
+            "cycle_id": (str,), "week_start": (str,), "assisted_minutes": (int, float),
+            "baseline_minutes": (int, float), "quality_passed": (bool,),
+        }, {"quality_adjusted_minutes_saved": (int, float, type(None))}):
+            start = date.fromisoformat(row["week_start"])
+            if row["week_start"] != start.isoformat():
+                raise ValueError("Cycle week_start must use YYYY-MM-DD.")
+            cycles.append(MatchedWeeklyCycle(**{**row, "week_start": start}))
+        strata = tuple(StratumSample(**row) for row in _study_rows(document["strata"], "strata", {
+            "stratum_id": (str,), "sample_count": (int,), "divergence_count": (int,),
+        }, {"reverified_after_pause": (bool,)}))
+        if len({sample.stratum_id for sample in strata}) != len(strata):
+            raise ValueError("Stratum IDs must be unique.")
+        result = evaluate_launch_study_readiness(tuple(cycles), strata=strata)
+        rendered = json.dumps({"scope": "statistical_evaluation", **asdict(result)}, allow_nan=False)
+    except (UnicodeError, OSError, ValueError, OverflowError) as error:
+        typer.echo(f"Invalid study evidence: {error}", err=True)
+        raise typer.Exit(code=2) from error
+    typer.echo(rendered)
+    raise typer.Exit(code=0 if result.accepted else 1)
+
+
+def _study_rows(
+    value: object, name: str, required: dict[str, tuple[type, ...]], optional: dict[str, tuple[type, ...]],
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be an array.")
+    fields = required | optional
+    for row in value:
+        if not isinstance(row, dict) or not required.keys() <= row.keys() <= fields.keys():
+            raise ValueError(f"Invalid fields in {name}.")
+        if any(type(item) not in fields[key] or (isinstance(item, str) and not item.strip())
+               for key, item in row.items()):
+            raise ValueError(f"Invalid field value in {name}.")
+    return value
 
 
 def _show_readiness(program_id: str, *, output_format: str, programs_root: Path) -> None:
@@ -364,3 +418,12 @@ def _render_table(
         evidence = ", ".join(dimension.evidence_refs[:3]) if dimension.evidence_refs else "none"
         lines.append(f"- {dimension.gate_id}: {dimension.summary} | evidence: {evidence}")
     return "\n".join(lines)
+
+
+def evaluate_launch_study_readiness(
+    cycles: tuple[MatchedWeeklyCycle, ...],
+    *,
+    strata: tuple[StratumSample, ...],
+) -> StudyEvaluationResult:
+    """Evaluate W6.1/W6.2 matched-cycle study and Decision M agreement readiness."""
+    return evaluate_matched_cycles(cycles, strata=strata)
