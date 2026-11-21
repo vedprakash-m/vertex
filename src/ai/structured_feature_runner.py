@@ -447,6 +447,12 @@ CREATE TABLE IF NOT EXISTS released_result_cache (
     cached_at             TEXT NOT NULL,
     selection_json        TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS released_result_cache_revocations (
+    scope_kind TEXT NOT NULL,
+    scope_value TEXT NOT NULL,
+    revoked_at TEXT NOT NULL,
+    PRIMARY KEY (scope_kind, scope_value)
+);
 """
 RELEASED_RESULT_CACHE_TTL_DAYS = 7
 
@@ -483,6 +489,22 @@ def _ensure_released_cache_schema(connection: sqlite3.Connection) -> None:
     }
     if "selection_json" not in columns:
         connection.execute("ALTER TABLE released_result_cache ADD COLUMN selection_json TEXT")
+
+
+def _released_cache_is_revoked(
+    connection: sqlite3.Connection,
+    *,
+    cache_key: str,
+    feature: str,
+    principal: str,
+) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM released_result_cache_revocations "
+        "WHERE (scope_kind = 'cache_key' AND scope_value = ?) "
+        "OR (scope_kind = 'feature' AND scope_value = ?) "
+        "OR (scope_kind = 'principal' AND scope_value = ?) LIMIT 1",
+        (cache_key, feature, principal),
+    ).fetchone() is not None
 
 
 def _identity_from_selection_json(value: object) -> CacheIdentity:
@@ -567,10 +589,18 @@ class ReleasedResultCache:
         invalid_error: StateError | None = None
         stale = False
         evaluation_time = now or datetime.now(timezone.utc)
+        row: sqlite3.Row | None = None
         try:
             with open_program_db(self._db_path, durability="strict") as connection:
                 _ensure_released_cache_schema(connection)
                 cache_key = identity.cache_key()
+                if _released_cache_is_revoked(
+                    connection,
+                    cache_key=cache_key,
+                    feature=identity.feature,
+                    principal=identity.principal,
+                ):
+                    raise StateError("Released-result cache selection is revoked.")
                 row = connection.execute(
                     "SELECT feature, principal, classification, payload, released_content_hash, "
                     "release_run_id, cached_at, selection_json "
@@ -596,6 +626,8 @@ class ReleasedResultCache:
                     raise StateError("Released-result cache payload integrity check failed.")
         except StateError as error:
             invalid_error = error
+            if row is None:
+                raise
             try:
                 with open_program_db(self._db_path, durability="strict") as connection:
                     _delete_observed_released_cache_entry(connection, cache_key, row)
@@ -646,12 +678,40 @@ class ReleasedResultCache:
         else:
             if decoded is None:
                 raise StateError("Released-result cache decoder returned no value.")
-            if isinstance(deserialize, _RunnerCacheDecoder) and deserialize.evict_if_invalid(decoded) is True:
+            evict_semantic_rejection = (
+                isinstance(deserialize, _RunnerCacheDecoder)
+                and deserialize.evict_if_invalid(decoded) is True
+            )
+            if evict_semantic_rejection:
                 try:
                     with open_program_db(self._db_path, durability="strict") as connection:
                         _delete_observed_released_cache_entry(connection, cache_key, row)
                 except (sqlite3.DatabaseError, OSError):
                     raise StateError("Unable to evict invalid released-result cache entry.") from None
+            if not evict_semantic_rejection:
+                try:
+                    with open_program_db(self._db_path, durability="strict") as connection:
+                        if _released_cache_is_revoked(
+                            connection,
+                            cache_key=cache_key,
+                            feature=identity.feature,
+                            principal=identity.principal,
+                        ):
+                            raise StateError("Released-result cache selection is revoked.")
+                        current = connection.execute(
+                            "SELECT feature, principal, classification, payload, released_content_hash, "
+                            "release_run_id, cached_at, selection_json "
+                            "FROM released_result_cache WHERE cache_key = ?",
+                            (cache_key,),
+                        ).fetchone()
+                        if current is None or tuple(current) != tuple(row):
+                            raise StateError(
+                                "Released-result cache row changed after release verification."
+                            )
+                except sqlite3.DatabaseError as error:
+                    raise StateError(
+                        f"Unable to verify retained released-result cache at {self._db_path}"
+                    ) from error
             return decoded
         try:
             with open_program_db(self._db_path, durability="strict") as connection:
@@ -675,12 +735,28 @@ class ReleasedResultCache:
         if _released_content_hash(payload) != released_content_hash:
             raise StateError("Released-result cache payload integrity check failed.")
         if self._record_release is not None:
+            with open_program_db(self._db_path, durability="strict") as connection:
+                _ensure_released_cache_schema(connection)
+                if _released_cache_is_revoked(
+                    connection,
+                    cache_key=identity.cache_key(),
+                    feature=identity.feature,
+                    principal=identity.principal,
+                ):
+                    raise StateError("Released-result cache selection is revoked.")
             release_run_id = self._record_release(identity, payload)
             if not isinstance(release_run_id, str) or not release_run_id.strip():
                 raise StateError("Released-result cache release run ID must be a nonblank string.")
         try:
             with open_program_db(self._db_path, durability="strict") as connection:
                 _ensure_released_cache_schema(connection)
+                if _released_cache_is_revoked(
+                    connection,
+                    cache_key=identity.cache_key(),
+                    feature=identity.feature,
+                    principal=identity.principal,
+                ):
+                    raise StateError("Released-result cache selection is revoked.")
                 connection.execute(
                     "INSERT INTO released_result_cache "
                     "(cache_key, feature, principal, classification, payload, released_content_hash, "
@@ -732,6 +808,14 @@ class ReleasedResultCache:
             should_remove = False
             preserve_for_read = False
             try:
+                with open_program_db(self._db_path, durability="strict") as revocation_connection:
+                    if _released_cache_is_revoked(
+                        revocation_connection,
+                        cache_key=str(cache_key),
+                        feature=str(row["feature"]),
+                        principal=str(row["principal"]),
+                    ):
+                        should_remove = True
                 identity = _identity_from_selection_json(row["selection_json"])
                 if identity.cache_key() != cache_key:
                     should_remove = True
@@ -795,10 +879,59 @@ class ReleasedResultCache:
         try:
             with open_program_db(self._db_path, durability="strict") as connection:
                 _ensure_released_cache_schema(connection)
-                connection.execute("DELETE FROM released_result_cache WHERE cache_key = ?", (identity.cache_key(),))
+                connection.execute(
+                    "DELETE FROM released_result_cache WHERE cache_key = ?",
+                    (identity.cache_key(),),
+                )
                 connection.commit()
         except sqlite3.DatabaseError as error:
-            raise StateError(f"Unable to evict from released-result cache at {self._db_path}") from error
+            raise StateError(
+                f"Unable to evict from released-result cache at {self._db_path}"
+            ) from error
+
+    def revoke_identity(self, identity: CacheIdentity) -> int:
+        """Durably revoke one exact cache selection and remove its retained row."""
+        return self._revoke_scope("cache_key", identity.cache_key())
+
+    def revoke_feature(self, feature: str) -> int:
+        """Durably revoke every retained selection for one feature."""
+        return self._revoke_scope("feature", feature)
+
+    def revoke_principal(self, principal: str) -> int:
+        """Durably revoke retained AI results for privacy/identity excision."""
+        return self._revoke_scope("principal", principal)
+
+    def _revoke_scope(self, kind: str, value: str) -> int:
+        if kind not in {"cache_key", "feature", "principal"}:
+            raise StateError("Released-result cache revocation scope is invalid.")
+        if not isinstance(value, str) or not value.strip():
+            raise StateError("Released-result cache revocation value is invalid.")
+        column_by_kind = {
+            "cache_key": "cache_key",
+            "feature": "feature",
+            "principal": "principal",
+        }
+        column = column_by_kind[kind]
+        try:
+            with open_program_db(self._db_path, durability="strict") as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                _ensure_released_cache_schema(connection)
+                connection.execute(
+                    "INSERT INTO released_result_cache_revocations "
+                    "(scope_kind, scope_value, revoked_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(scope_kind, scope_value) DO UPDATE SET revoked_at = excluded.revoked_at",
+                    (kind, value, datetime.now(timezone.utc).isoformat()),
+                )
+                cursor = connection.execute(
+                    f"DELETE FROM released_result_cache WHERE {column} = ?",
+                    (value,),
+                )
+                connection.commit()
+                return cursor.rowcount
+        except sqlite3.DatabaseError as error:
+            raise StateError(
+                f"Unable to revoke released-result cache scope at {self._db_path}"
+            ) from error
 
 
 def released_result_cache_path(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> Path:
