@@ -167,6 +167,40 @@ def test_rev_run_sharepoint_fixture_preserves_explicit_version(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("content_text", ["private"], "content_text must be a string"),
+        ("version", 7, "version must be a string"),
+        ("acl", "private", "acl must be an array of objects"),
+        ("deleted", "private", "deleted/inaccessible must be booleans"),
+        ("inaccessible", 1, "deleted/inaccessible must be booleans"),
+    ],
+)
+def test_rev_run_rejects_invalid_sharepoint_fixture_types(
+    tmp_path: Path, field: str, value: object, message: str,
+) -> None:
+    fixture = _write_sharepoint_fixture(tmp_path)
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    payload["items"][0][field] = value
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runner.invoke(
+        rev_app,
+        [
+            "run",
+            "--program", "demo",
+            "--mailbox", "tpm@example.com",
+            "--sharepoint-fixture", str(fixture),
+            "--programs-root", str(tmp_path / "programs"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert message in result.output
+    assert "private" not in result.output
+
+
+@pytest.mark.parametrize(
     "status",
     [{"deleted": True}, {"inaccessible": True}],
 )

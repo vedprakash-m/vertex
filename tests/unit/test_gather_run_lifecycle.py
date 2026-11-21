@@ -65,6 +65,40 @@ def _fixture_program() -> tuple[Program, tuple[Workstream, ...]]:
     return program, workstreams
 
 
+def test_scheduled_gather_checks_authorization_before_runtime_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        gather,
+        "require_scheduled_gather_authorized",
+        lambda program_id, *, programs_root: calls.append((program_id, programs_root)),
+    )
+    monkeypatch.setattr(
+        gather,
+        "_gather_program_impl",
+        lambda *_args, **_kwargs: GatherArtifacts(
+            program_id="acme",
+            scanned_items=0,
+            discovered_signals=0,
+            new_signals=0,
+            pending_review=0,
+            trajectory_updates=0,
+            auto_reviews_written=0,
+            ado_calls=0,
+        ),
+    )
+
+    gather.gather_program(
+        "acme",
+        programs_root=tmp_path,
+        actor_identity_type=gather.ACTOR_IDENTITY_SCHEDULED,
+    )
+
+    assert calls == [("acme", tmp_path)]
+
+
 def _fixture_item() -> WorkItem:
     return WorkItem(
         id=1234,

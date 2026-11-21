@@ -716,3 +716,188 @@ def test_verified_readiness_artifact_rejects_unsafe_or_invalid_inputs(
 
   assert payload is None
   assert valid is False
+
+
+@pytest.mark.parametrize(
+  ("collection", "entry"),
+  (
+    ("source_scopes", [{"source": "ado"}]),
+    ("deployment_references", [{"feature": "summary"}]),
+  ),
+)
+def test_offline_readiness_parser_rejects_missing_exact_identity(
+  tmp_path: Path, collection: str, entry: list[dict[str, str]],
+) -> None:
+  program_dir = tmp_path / "sample"
+  program_dir.mkdir()
+  (program_dir / "readiness.yaml").write_text(
+    json.dumps(
+      {
+        "schema_version": "1.0",
+        "dimensions": {
+          "offline": {
+            "source": {"type": "offline_readiness", collection: entry},
+            "pass_condition": {"kind": "offline_readiness_complete"},
+          }
+        },
+      }
+    ),
+    encoding="utf-8",
+  )
+
+  with pytest.raises(ConfigError, match="missing"):
+    load_readiness_config("sample", programs_root=tmp_path)
+
+
+def test_offline_readiness_rejects_unsupported_kind_and_missing_artifact_root(
+  tmp_path: Path,
+) -> None:
+  program_dir = tmp_path / "sample"
+  program_dir.mkdir()
+  _write_offline_readiness_case(program_dir)
+  config = load_readiness_config("sample", programs_root=tmp_path)
+  dimension = config.dimensions[0]
+
+  with pytest.raises(ConfigError, match="unsupported offline-readiness"):
+    readiness_engine._evaluate_offline_readiness_dimension(
+      replace(
+        dimension,
+        pass_condition=replace(
+          dimension.pass_condition, kind="not_offline_readiness_complete"
+        ),
+      )
+    )
+  with pytest.raises(ConfigError, match="no artifact root"):
+    readiness_engine._evaluate_offline_readiness_dimension(
+      replace(dimension, source=replace(dimension.source, artifact_root=None))
+    )
+
+
+def test_offline_readiness_reports_missing_duplicate_and_unavailable_scope_branches(
+  tmp_path: Path,
+) -> None:
+  program_dir = tmp_path / "sample"
+  program_dir.mkdir()
+  _write_offline_readiness_case(program_dir)
+  dimension = load_readiness_config(
+    "sample", programs_root=tmp_path
+  ).dimensions[0]
+  duplicated = replace(
+    dimension.source,
+    source_scopes=(dimension.source.source_scopes[0],) * 2,
+    deployment_references=(),
+  )
+  scope_artifact = program_dir / duplicated.source_scopes[0].evidence_ref
+  scope_artifact.write_text(
+    json.dumps(
+      {
+        "source": "ado",
+        "scope_id": "sample_delivery",
+        "query_id": "query-17",
+        "query_hash": "sha256:scope17",
+        "available": False,
+      },
+      sort_keys=True,
+      separators=(",", ":"),
+    ),
+    encoding="utf-8",
+  )
+  changed_hash = "sha256:" + hashlib.sha256(scope_artifact.read_bytes()).hexdigest()
+  unavailable_scope = replace(
+    duplicated.source_scopes[0], evidence_sha256=changed_hash
+  )
+  duplicated = replace(
+    duplicated,
+    source_scopes=(unavailable_scope, unavailable_scope),
+  )
+
+  result = readiness_engine._evaluate_offline_readiness_dimension(
+    replace(dimension, source=duplicated)
+  )
+
+  assert "duplicate source scopes" in result.details["blockers"]
+  assert "unavailable source scopes" in result.details["blockers"]
+  assert "deployment references missing" in result.details["blockers"]
+
+
+def test_offline_readiness_reports_explicit_unapproved_deployment_followup(
+  tmp_path: Path,
+) -> None:
+  program_dir = tmp_path / "sample"
+  program_dir.mkdir()
+  _write_offline_readiness_case(program_dir)
+  dimension = load_readiness_config(
+    "sample", programs_root=tmp_path
+  ).dimensions[0]
+  approval = program_dir / dimension.source.deployment_references[0].approval_ref
+  approval.write_text(
+    json.dumps(
+      {
+        "feature": "summary",
+        "model_id": "vertex-model-1",
+        "deployment_id": "vertex-summary-1",
+        "approved": False,
+      },
+      sort_keys=True,
+      separators=(",", ":"),
+    ),
+    encoding="utf-8",
+  )
+  reference = replace(
+    dimension.source.deployment_references[0],
+    approval_sha256="sha256:" + hashlib.sha256(approval.read_bytes()).hexdigest(),
+  )
+  result = readiness_engine._evaluate_offline_readiness_dimension(
+    replace(
+      dimension,
+      source=replace(
+        dimension.source,
+        deployment_references=(reference,),
+      ),
+    )
+  )
+
+  assert result.details["unapproved_deployment_references"] == [
+    "summary:vertex-summary-1"
+  ]
+  assert "unapproved deployment references" in result.details["blockers"]
+
+
+@pytest.mark.parametrize(
+  ("artifact_ref", "expected_sha256", "raw"),
+  (
+    ("", "sha256:x", None),
+    ("../outside.json", "sha256:x", None),
+    ("missing.json", "sha256:x", None),
+    ("evidence.json", "", None),
+    ("evidence.json", "plain-digest", b"{}"),
+    ("evidence.json", "sha256:wrong", b"{}"),
+    ("evidence.json", None, b"\xff"),
+    ("evidence.json", None, b"[]"),
+    ("evidence.json", None, b'{"valid":true}'),
+  ),
+)
+def test_readiness_artifact_verifier_rejects_unsafe_or_invalid_content_followup(
+  tmp_path: Path,
+  artifact_ref: str,
+  expected_sha256: str | None,
+  raw: bytes | None,
+) -> None:
+  if raw is not None:
+    (tmp_path / "evidence.json").write_bytes(raw)
+  digest = expected_sha256
+  if expected_sha256 is None:
+    digest = "sha256:" + hashlib.sha256(raw or b"").hexdigest()
+
+  payload, valid = readiness_engine._load_verified_readiness_artifact(
+    program_root=tmp_path,
+    artifact_ref=artifact_ref,
+    expected_sha256=digest or "",
+  )
+
+  if raw == b'{"valid":true}':
+    assert valid is True
+    assert payload == {"valid": True}
+  else:
+    assert valid is False
+    assert payload is None
