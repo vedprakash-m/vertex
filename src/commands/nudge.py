@@ -424,6 +424,7 @@ def _orchestrate(
 ) -> FullHygieneArtifacts:
     warnings_list: list[str] = []
     optional_failures: list[str] = []
+    _assert_primary_bcc_admission(config, primary_recipient, program_id=program_id)
 
     # Load ProgramReality early to compute retired sections before any fetch
     try:
@@ -1376,7 +1377,8 @@ def _cmd_mark_sent(
     content_hash, audience_manifest = _parse_eml_audience_manifest(draft_path, prior_index=prior_index)
     raw_edition = load_yaml_mapping(
         programs_root / program_id / "editions" / f"{program_id}_nudge.yaml",
-        required=True,
+        required=False,
+        default={},
     )
     try:
         assert_nudge_communication_budget(
@@ -1916,6 +1918,35 @@ def _filter_cc_recipients(
             + ", ".join(sorted(blocked_domains))
         )
     return filtered
+
+
+def _assert_primary_bcc_admission(
+    config: NudgeConfig,
+    primary_recipient: ResolvedRecipient,
+    *,
+    program_id: str,
+) -> None:
+    policy = config.presentation.audience_policy
+    if policy is None or policy.delivery_mode != "bcc":
+        return
+    allowed_domains = {
+        domain.strip().lower()
+        for domain in policy.allowed_domains
+        if domain.strip()
+    }
+    email = primary_recipient.email.lower()
+    alias = primary_recipient.alias.lower()
+    domain = email.split("@", 1)[1] if "@" in email else ""
+    opt_out = {entry.strip().lower() for entry in policy.opt_out}
+    if allowed_domains and domain not in allowed_domains:
+        raise ConfigError(
+            f"Audience policy blocked recipient domain(s) for program {program_id!r}: "
+            f"{primary_recipient.email}"
+        )
+    if email in opt_out or alias in opt_out:
+        raise ConfigError(
+            f"Audience policy removed the primary Bcc recipient for program {program_id!r}."
+        )
 
 
 def _apply_audience_policy(
