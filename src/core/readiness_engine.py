@@ -1313,12 +1313,6 @@ def _optional_str(value: Any) -> str | None:
     return text or None
 
 
-def _optional_bool(value: Any, *, field_name: str, path: Path) -> bool:
-    if not isinstance(value, bool):
-        raise ConfigError(f"Invalid {field_name} in {path}: expected true or false.")
-    return value
-
-
 def _required_nonempty_scope_string(
     value: Any,
     *,

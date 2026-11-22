@@ -114,6 +114,64 @@ def test_mixed_results_preserve_native_evidence_and_freshness_success(tmp_path: 
     assert second.calls_made == 1
 
 
+def test_duplicate_source_revision_is_extracted_once_with_provider_revision_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.m365 import workiq_retriever
+
+    records = [
+        _record(
+            id="native-message-1",
+            conversationId="native-thread",
+            changeKey="revision-1",
+        ),
+        _record(
+            id="native-message-2",
+            conversationId="native-thread",
+            changeKey="revision-1",
+        ),
+    ]
+    bridge = Bridge(records)
+    cache = tmp_path / "freshness.json"
+    identities: list[str] = []
+    original_hash = workiq_retriever.workiq_thread_freshness_hash
+
+    def observe(**kwargs: Any) -> str:
+        identities.append(kwargs["newest_message_identity"])
+        return original_hash(**kwargs)
+
+    monkeypatch.setattr(workiq_retriever, "workiq_thread_freshness_hash", observe)
+
+    result = _retrieve(bridge, cache_path=cache)
+
+    assert result.calls_made == 2
+    assert len(result.enrichments) == 1
+    assert len(identities) == 1
+    assert "revision-1" in identities[0]
+
+
+def test_duplicate_validated_source_is_skipped_without_second_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.m365 import workiq_retriever
+    from src.m365.workiq_ask_support import StructuredDiscoveryResult
+
+    record = _record(id="native-message", conversationId="native-thread")
+    duplicate = dict(record)
+    monkeypatch.setattr(
+        workiq_retriever,
+        "validate_structured_discovery_payload_with_diagnostics",
+        lambda *_args, **_kwargs: StructuredDiscoveryResult(
+            {"emails": [record, duplicate]}, 0, True,
+        ),
+    )
+
+    result = _retrieve(Bridge([]), cache_path=tmp_path / "freshness.json")
+
+    assert len(result.enrichments) == 1
+    assert result.calls_made == 2
+
+
 @pytest.mark.parametrize("source_time", [None, "private-invalid-time"])
 def test_unqualified_source_time_never_enters_rich_extraction_or_cache(
     source_time: str | None, tmp_path: Path,

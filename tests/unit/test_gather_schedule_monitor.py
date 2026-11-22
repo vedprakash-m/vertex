@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from src.core import gather_schedule_monitor
 from src.core.alerts import read_alerts
+from src.core.exceptions import ConfigError
 from src.core.gather_run_manifest import (
     GatherRunManifest,
     GatherRunStatus,
@@ -383,6 +385,168 @@ def test_posix_principal_resolution_rejects_provider_and_result_failures(
         stdout = ""
 
     monkeypatch.setattr(gather_schedule_monitor.subprocess, "run", lambda *args, **kwargs: Failed())
+    with pytest.raises(RuntimeError, match="could not be resolved"):
+        resolve_scheduled_process_principal()
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    (
+        ("[]\n", "must be a mapping"),
+        ("schema_version: '3.0'\nscheduled_acquisition: []\n", "must be a mapping"),
+        ("schema_version: '3.0'\n", None),
+    ),
+)
+def test_scheduled_policy_rejects_malformed_shapes_and_allows_absent_policy(
+    tmp_path: Path, document: str, message: str | None,
+) -> None:
+    program_root = tmp_path / "samplefleet"
+    program_root.mkdir()
+    (program_root / "program.yaml").write_text(document, encoding="utf-8")
+
+    if message is None:
+        assert load_scheduled_acquisition_policy("samplefleet", programs_root=tmp_path) is None
+    else:
+        with pytest.raises(ConfigError, match=message):
+            load_scheduled_acquisition_policy("samplefleet", programs_root=tmp_path)
+
+
+def test_scheduled_policy_contains_read_error_without_caller_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program_root = tmp_path / "samplefleet"
+    program_root.mkdir()
+    policy_path = program_root / "program.yaml"
+    policy_path.write_text("schema_version: '3.0'\n", encoding="utf-8")
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError("private parser path")
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    with pytest.raises(ConfigError, match="Could not load scheduled-acquisition policy"):
+        load_scheduled_acquisition_policy("samplefleet", programs_root=tmp_path)
+
+
+def test_readiness_reports_all_missing_policy_authorizations(
+    tmp_path: Path,
+) -> None:
+    program_root = tmp_path / "samplefleet"
+    program_root.mkdir()
+    (program_root / "program.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "scheduled_acquisition": {
+                    "mode": "write",
+                    "authorized_principal": 7,
+                    "approval_ref": 8,
+                    "alert_delivery_ref": False,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    readiness = evaluate_scheduled_gather_readiness(
+        "samplefleet",
+        principal_resolver=lambda: "vertex-scheduler",
+        programs_root=tmp_path,
+    )
+
+    assert readiness.ready is False
+    assert readiness.blockers == (
+        "scheduled principal authorization missing",
+        "owner approval reference missing",
+        "scheduled acquisition is not explicitly read-only",
+        "alert delivery authorization missing",
+    )
+
+
+def test_principal_resolver_failure_is_fail_closed(tmp_path: Path) -> None:
+    _schedule_policy(tmp_path)
+
+    def unavailable() -> str:
+        raise OSError("identity backend unavailable")
+
+    readiness = evaluate_scheduled_gather_readiness(
+        "samplefleet",
+        principal_resolver=unavailable,
+        programs_root=tmp_path,
+    )
+
+    assert readiness.principal_authorized is False
+    assert readiness.ready is False
+    assert "scheduled principal authorization missing" in readiness.blockers
+
+
+@pytest.mark.parametrize(
+    ("platform", "system_root", "result"),
+    (
+        ("nt", "WindowsRoot", SimpleNamespace(returncode=0, stdout="DOMAIN\\Scheduler\n")),
+        ("nt", None, None),
+        ("posix", None, SimpleNamespace(returncode=0, stdout="scheduler\n")),
+    ),
+)
+def test_process_principal_resolution_uses_os_bound_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    system_root: str | None,
+    result: SimpleNamespace | None,
+) -> None:
+    fake_os = SimpleNamespace(name=platform, environ={})
+    if system_root is not None:
+        fake_os.environ["SystemRoot"] = system_root
+    monkeypatch.setattr(gather_schedule_monitor, "os", fake_os)
+    if result is None:
+        with pytest.raises(RuntimeError, match="could not be resolved"):
+            resolve_scheduled_process_principal()
+        return
+    calls: list[list[str]] = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert kwargs["timeout"] == 5
+        assert kwargs["capture_output"] is True
+        return result
+
+    monkeypatch.setattr(gather_schedule_monitor.subprocess, "run", run)
+    assert resolve_scheduled_process_principal() == result.stdout.strip()
+    assert Path(calls[0][0]).name == ("whoami.exe" if platform == "nt" else "id")
+
+
+@pytest.mark.parametrize("platform", ("nt", "posix"))
+def test_process_principal_resolution_rejects_failed_or_empty_commands(
+    monkeypatch: pytest.MonkeyPatch, platform: str,
+) -> None:
+    monkeypatch.setattr(
+        gather_schedule_monitor,
+        "os",
+        SimpleNamespace(
+            name=platform,
+            environ={"SystemRoot": "WindowsRoot"} if platform == "nt" else {},
+        ),
+    )
+    monkeypatch.setattr(
+        gather_schedule_monitor.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
+    )
+    with pytest.raises(RuntimeError, match="could not be resolved"):
+        resolve_scheduled_process_principal()
+
+
+def test_posix_process_principal_resolution_contains_subprocess_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gather_schedule_monitor,
+        "os",
+        SimpleNamespace(name="posix", environ={}),
+    )
+    monkeypatch.setattr(
+        gather_schedule_monitor.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("private")),
+    )
     with pytest.raises(RuntimeError, match="could not be resolved"):
         resolve_scheduled_process_principal()
 

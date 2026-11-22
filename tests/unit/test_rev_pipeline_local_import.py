@@ -162,6 +162,24 @@ class _UnsupportedEnumerator:
         return Unsupported(entity_type="private-entity-detail", reason="private-provider-detail")
 
 
+def test_candidate_shape_failure_counts_terminal_without_time_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.rev import pipeline
+
+    inbox = tmp_path / "rev_inbox"
+    inbox.mkdir()
+    _write_eml(inbox / "candidate-shape.eml", _SIMPLE_EML)
+    monkeypatch.setattr(pipeline, "_stage_candidates", lambda **_: ([], 0))
+
+    report = _run_cycle(deps=_build_deps(inbox), programs_root=tmp_path)
+
+    assert report.terminal_failures == 1
+    assert report.quarantined == 0
+    assert report.date_parse_failures == 0
+    assert report.candidates_staged == 0
+
+
 @pytest.mark.parametrize(
     "replacement",
     [

@@ -83,7 +83,8 @@ def load_scheduled_acquisition_policy(
     if not path.exists():
         return None
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        document = {} if loaded is None else loaded
     except (OSError, yaml.YAMLError) as error:
         raise ConfigError(f"Could not load scheduled-acquisition policy for '{program_id}'.") from error
     if not isinstance(document, Mapping):

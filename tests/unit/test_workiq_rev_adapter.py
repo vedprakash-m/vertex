@@ -116,6 +116,25 @@ def test_enumerate_dedupes_by_resource_id() -> None:
     assert _ids(result) == ["m1"]
 
 
+def test_enumerate_tombstone_removes_prior_edit_in_same_page() -> None:
+    result = _enumerator([
+        {"id": "deleted", "receivedDateTime": "2026-11-01T00:00:00Z"},
+        {"id": "kept", "receivedDateTime": "2026-11-02T00:00:00Z"},
+        {"id": "deleted", "@removed": {"reason": "deleted"}},
+        {"@removed": {"reason": "deleted"}},
+    ]).enumerate(_intent(), correlation_id="x")
+
+    assert isinstance(result, Success)
+    assert _ids(result) == ["kept"]
+
+
+def test_enumerate_empty_noncheckpoint_page_is_not_verified() -> None:
+    result = _enumerator([]).enumerate(_intent(), correlation_id="x")
+
+    assert isinstance(result, Incomplete)
+    assert result.reason == "coverage_unverified:empty"
+
+
 def test_checkpoint_page_preserves_latest_edit_and_suppresses_tombstone() -> None:
     records = (
         {"id": "edited", "subject": "old", "receivedDateTime": "2026-11-01T00:00:00Z"},
@@ -194,6 +213,80 @@ def test_checkpoint_replays_uncommitted_page_and_resumes_after_restart(tmp_path)
     )
     assert completed.enumerate(_intent(), correlation_id="complete").value == ()
     assert calls == [None, None, "cursor-2"]
+
+
+def test_checkpoint_quarantines_mismatched_exact_identity(tmp_path) -> None:
+    enumerator = WorkIQEnumerator(
+        lambda _intent, *, cursor: WorkIQPage(
+            ({"id": "different", "receivedDateTime": "2026-11-01T00:00:00Z"},),
+            None,
+        ),
+        CTX,
+        program_id="synthetic",
+        programs_root=tmp_path,
+    )
+    intent = replace(_intent(), entity_ids=("requested",))
+
+    result = enumerator.enumerate(intent, correlation_id="x")
+
+    assert isinstance(result, Incomplete)
+    assert result.reason == "mismatched_identity:1"
+    assert result.value == ()
+
+
+def test_checkpoint_quarantines_out_of_window_time(tmp_path) -> None:
+    enumerator = WorkIQEnumerator(
+        lambda _intent, *, cursor: WorkIQPage(
+            ({"id": "outside", "receivedDateTime": "2026-10-31T00:00:00Z"},),
+            None,
+        ),
+        CTX,
+        program_id="synthetic",
+        programs_root=tmp_path,
+    )
+    intent = replace(
+        _intent(),
+        from_date=date(2026, 11, 1),
+        to_date=date(2026, 11, 2),
+    )
+
+    result = enumerator.enumerate(intent, correlation_id="x")
+
+    assert isinstance(result, Incomplete)
+    assert result.reason == "outside_window:1"
+    assert result.value == ()
+
+
+def test_checkpoint_discards_uncursored_over_limit_page_before_commit(tmp_path) -> None:
+    calls = 0
+
+    def query(_intent: RetrievalIntent, *, cursor: str | None) -> WorkIQPage:
+        nonlocal calls
+        calls += 1
+        assert cursor is None
+        return WorkIQPage(
+            (
+                {"id": "newer", "receivedDateTime": "2026-11-02T00:00:00Z"},
+                {"id": "older", "receivedDateTime": "2026-11-01T00:00:00Z"},
+            ),
+            None,
+        )
+
+    enumerator = WorkIQEnumerator(
+        query,
+        CTX,
+        program_id="synthetic",
+        programs_root=tmp_path,
+    )
+    first = enumerator.enumerate(_intent(limit=1), correlation_id="first")
+    assert isinstance(first, Incomplete)
+    assert first.reason == "page_cut"
+    enumerator.commit_enumeration_checkpoint()
+
+    second = enumerator.enumerate(_intent(limit=1), correlation_id="second")
+    assert isinstance(second, Incomplete)
+    assert second.reason == "page_cut"
+    assert calls == 2
 
 
 def test_checkpoint_persists_empty_initial_window_as_unverified(tmp_path) -> None:

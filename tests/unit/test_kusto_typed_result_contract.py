@@ -262,6 +262,90 @@ def test_typed_result_refuses_schema_row_count_mismatch() -> None:
         )
 
 
+def test_scalar_required_typed_result_must_have_scalar_kind() -> None:
+    result = KustoResultSet(
+        query_id="query-a",
+        rows=({"Value": 1},),
+        observed_at=NOW,
+        schema=KustoResultSchema(
+            kind=KustoResultKind.TABLE,
+            columns=(KustoResultColumn("Value", "long"),),
+            row_count=1,
+        ),
+        row_count=1,
+    )
+
+    with pytest.raises(QueryError, match="requires a scalar"):
+        admit_kusto_execution(
+            result,
+            query_id="query-a",
+            expected_cardinality="scalar_required",
+            result_limits=None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("schema", "message"),
+    [
+        (
+            KustoResultSchema(
+                kind=KustoResultKind.TABLE,
+                columns=(KustoResultColumn("", "string"),),
+                row_count=1,
+            ),
+            "invalid or duplicate",
+        ),
+        (
+            KustoResultSchema(
+                kind=KustoResultKind.SCALAR,
+                columns=(KustoResultColumn("Value", "long"),),
+                row_count=1,
+                time_column="Timestamp",
+            ),
+            "scalar result schema",
+        ),
+    ],
+)
+def test_typed_schema_refuses_invalid_semantic_columns(
+    schema: KustoResultSchema, message: str,
+) -> None:
+    with pytest.raises(QueryError, match=message):
+        admit_kusto_execution(
+            KustoResultSet(
+                query_id="query-a",
+                rows=({"Value": 1},) if schema.columns[0].name else ({"": 1},),
+                observed_at=NOW,
+                schema=schema,
+                row_count=1,
+            ),
+            query_id="query-a",
+            expected_cardinality="zero_ok",
+            result_limits=None,
+        )
+
+
+def test_typed_schema_refuses_unsupported_kind() -> None:
+    schema = KustoResultSchema(
+        kind="unsupported",  # type: ignore[arg-type]
+        columns=(KustoResultColumn("Value", "long"),),
+        row_count=1,
+    )
+
+    with pytest.raises(QueryError, match="unsupported result kind"):
+        admit_kusto_execution(
+            KustoResultSet(
+                query_id="query-a",
+                rows=({"Value": 1},),
+                observed_at=NOW,
+                schema=schema,
+                row_count=1,
+            ),
+            query_id="query-a",
+            expected_cardinality="zero_ok",
+            result_limits=None,
+        )
+
+
 def test_hydration_preserves_typed_schema_and_result_kind(tmp_path: Path) -> None:
     query = _query()
     schema = build_kusto_result_schema(

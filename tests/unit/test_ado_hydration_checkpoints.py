@@ -20,9 +20,10 @@ from src.core.ado_hydration_checkpoints import (
     plan_checkpoint_reseeds,
     read_checkpoints,
     read_hydration_evidence,
+    CHECKPOINT_SCHEMA_VERSION,
 )
 from src.core.channel_registry_store import ChannelRegistryStore
-from src.core.exceptions import ConfigError
+from src.core.exceptions import AuthError, ConfigError, QueryError
 from src.core.integration_types import ChannelConfig, HydrationMode
 from tests.unit.test_ado_hydration import _FakeADOClient, _registration
 
@@ -417,6 +418,137 @@ def test_changed_item_reuses_verified_revision_prefix_and_records_page_evidence(
         "page_count": 1,
         "is_truncated": False,
     }
+
+
+@pytest.mark.parametrize("fallback", ["complete", "unverified", "auth_error", "query_error"])
+def test_incremental_revision_retries_full_history_when_checkpoint_delta_is_unsafe(
+    fallback: str,
+) -> None:
+    checkpoint = HydrationCheckpoint(
+        42,
+        HydrationSubresource.REVISIONS,
+        "current",
+        CHECKPOINT_SCHEMA_VERSION,
+        "2",
+        updated_at=_VERIFIED,
+        evidence_json=json.dumps({"records": [{"rev": 1}, {"rev": 2}]}),
+    )
+    calls: list[int] = []
+
+    class _UnsafeDelta(_FakeADOClient):
+        def list_work_item_revisions(
+            self, work_item_id: int, **kwargs: object
+        ) -> list[dict[str, object]]:
+            calls.append(int(kwargs.get("start_after_revision", 0)))
+            if len(calls) == 1:
+                rows = [{"rev": 2, "fields": {"System.ChangedDate": "2026-05-24T10:00:00Z"}}]
+                callback = kwargs.get("on_pagination")
+                if callable(callback):
+                    from src.core.integration_types import PaginationOutcome
+
+                    callback(PaginationOutcome(1, 1, False))
+                return rows
+            if fallback == "auth_error":
+                raise AuthError("private")
+            if fallback == "query_error":
+                raise QueryError("private")
+            rows = [
+                {
+                    "rev": 3,
+                    "fields": {"System.ChangedDate": "2026-05-24T10:00:00Z"},
+                }
+            ]
+            callback = kwargs.get("on_pagination")
+            if callable(callback):
+                from src.core.integration_types import PaginationOutcome
+
+                callback(
+                    PaginationOutcome(
+                        1,
+                        0 if fallback == "unverified" else 1,
+                        False,
+                    )
+                )
+            return rows
+
+    reg = _registration(
+        "42",
+        last_verified_at=datetime(2026, 5, 24, 9, 30, tzinfo=timezone.utc),
+    )
+    result = _provider(
+        _UnsafeDelta(),
+        {(42, HydrationSubresource.REVISIONS): checkpoint},
+    ).hydrate(
+        (reg,),
+        _SINCE,
+        "demo",
+        ADOHydrationConfig(anti_entropy_after_seconds=10**12),
+        mode=HydrationMode.FULL,
+    )
+
+    assert calls == [2, 0]
+    if fallback == "complete":
+        advance = next(
+            item
+            for item in result.resources.checkpoint_advances
+            if item.subresource is HydrationSubresource.REVISIONS
+        )
+        assert [row["rev"] for row in json.loads(advance.evidence_json or "{}")["records"]] == [3]
+    else:
+        assert not any(
+            item.subresource is HydrationSubresource.REVISIONS
+            for item in result.resources.checkpoint_advances
+        )
+        assert result.failed_ref_ids == (("42", "work_item"),)
+
+
+@pytest.mark.parametrize(
+    ("evidence_json", "cursor"),
+    [
+        (None, "2"),
+        ("{}", "not-an-int"),
+        ("not-json", "2"),
+        ('{"records":[]}', "0"),
+        ('{"records":[null]}', "2"),
+        ('{"records":{}}', "2"),
+    ],
+)
+def test_malformed_revision_checkpoint_evidence_forces_safe_full_refetch(
+    evidence_json: str | None,
+    cursor: str,
+) -> None:
+    checkpoint = HydrationCheckpoint(
+        42,
+        HydrationSubresource.REVISIONS,
+        "current",
+        CHECKPOINT_SCHEMA_VERSION,
+        cursor,
+        evidence_json=evidence_json,
+    )
+    client = _FakeADOClient()
+    result = _provider(
+        client,
+        {(42, HydrationSubresource.REVISIONS): checkpoint},
+    ).hydrate(
+        (
+            _registration(
+                "42",
+                last_verified_at=datetime(
+                    2026, 5, 24, 9, 30, tzinfo=timezone.utc
+                ),
+            ),
+        ),
+        _SINCE,
+        "demo",
+        ADOHydrationConfig(anti_entropy_after_seconds=10**12),
+        mode=HydrationMode.FULL,
+    )
+
+    assert client.revision_calls == [42]
+    assert not any(
+        error.message.startswith("Failed to hydrate work item 42 revisions")
+        for error in result.errors
+    )
 
 
 def test_relations_and_attachment_metadata_checkpoints_without_download() -> None:
