@@ -57,7 +57,7 @@ from src.core.measurement_store import (
 )
 from src.core.proposal_autonomy_ladder import PROPOSAL_CLASSES, resolve_ceiling
 from src.core.risk_register_engine import HIGH_RISK_SCORE_THRESHOLD, compute_risk_score, load_risk_register
-from src.core.risk_dedupe import detect_risk_duplicates
+from src.core.risk_dedupe import active_risk_entries, detect_risk_duplicates
 from src.core.run_telemetry import read_run_telemetry
 from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN
 from src.core.workspace_paths import is_bare_identifier
@@ -71,7 +71,6 @@ _AUTONOMY_LEVEL_PERMITTED_ACTION = {
     "l4": "Standing-policy low-risk execution",
 }
 
-_ACTIVE_RISK_STATUS_VALUES = frozenset({"open", "escalated"})
 _FRESH_EXCEPTION_REVALIDATION_EFFECT = (
     "Rechecks the current finding before any operator action. "
     "The cockpit view itself performs no mutation or dispatch."
@@ -451,7 +450,7 @@ def _build_program_summary(
             next_action=None,
         ), findings
 
-    active_risks = [risk for risk in risks if getattr(risk.status, "value", risk.status).lower() in _ACTIVE_RISK_STATUS_VALUES]
+    active_risks = list(active_risk_entries(tuple(risks)))
     active_risk_ids = {str(risk.id) for risk in active_risks}
     ambiguous_lifecycle_findings = tuple(
         finding

@@ -36,6 +36,8 @@ def test_both_missing_maps_to_info_rows(programs_root: Path) -> None:
     assert "prefetch=missing" in summary.detail and "cockpit_html=missing" in summary.detail
     assert _check(report, "Scheduled Prefetch").status == "info"
     assert _check(report, "Scheduled Cockpit").status == "info"
+    assert _check(report, "Scheduled Acquisition Readiness").status == "info"
+    assert "authorization missing" in _check(report, "Scheduled Acquisition Readiness").detail
 
 
 def test_stale_artifact_surfaces_warn_and_next_command(programs_root: Path) -> None:
@@ -78,7 +80,7 @@ def test_fresh_artifacts_report_ok(programs_root: Path) -> None:
         evaluate_fn=fake_evaluate,
     )
     summary = _check(report, "Schedule Health")
-    assert summary.status == "ok"
+    assert summary.status == "info"
     assert _check(report, "Scheduled Prefetch").status == "ok"
     assert _check(report, "Scheduled Cockpit").status == "ok"
 
@@ -175,6 +177,30 @@ def test_disabled_prefetch_source_is_reported_as_inactive(programs_root: Path) -
     assert row.metadata == {"active": False}
     assert "M365/WorkIQ channel is disabled" in row.detail
     assert "prefetch=inactive" in _check(report, "Schedule Health").detail
+
+
+def test_malformed_scheduled_policy_is_a_failed_check_not_an_exception(
+    programs_root: Path,
+) -> None:
+    (programs_root / "samplealpha" / "program.yaml").write_text(
+        "schema_version: '3.0'\nid: samplealpha\nscheduled_acquisition: []\n",
+        encoding="utf-8",
+    )
+
+    report = run_schedule_health_doctor(
+        program_id="samplealpha",
+        programs_root=programs_root,
+        now=_NOW,
+        evaluate_fn=lambda *_args, **_kwargs: (
+            ScheduleHealthFinding("prefetch", "ok", "fresh", 1.0),
+            ScheduleHealthFinding("cockpit_html", "ok", "fresh", 1.0),
+        ),
+    )
+
+    readiness = _check(report, "Scheduled Acquisition Readiness")
+    assert readiness.status == "fail"
+    assert "Could not evaluate scheduled acquisition readiness" in readiness.detail
+    assert _check(report, "Schedule Health").status == "fail"
 
 
 @pytest.fixture

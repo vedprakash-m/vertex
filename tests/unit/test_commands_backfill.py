@@ -671,6 +671,21 @@ def test_extract_offline_newsletters_skips_cleanly_when_ai_disabled(monkeypatch,
     )
 
     set_ai_mode(AIMode.DISABLED)
+    try:
+        result, warnings = backfill_mod._extract_offline_newsletters(
+            edition_name=EDITION_NAME,
+            categories=categories,
+            repo_root=tmp_path,
+            newsletter_extractor_factory=None,
+            newsletter_source_categories=frozenset({"prior_emails"}),
+        )
+    finally:
+        set_ai_mode(AIMode.ACTIVE)
+
+    assert result is None
+    assert warnings == (
+        "Newsletter extraction skipped: invocation AI is disabled by --no-ai / AIMode.DISABLED.",
+    )
 
 
 def _write_minimal_pptx(path: Path, slides: list[list[str]]) -> None:

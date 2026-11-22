@@ -1957,7 +1957,7 @@ def test_generate_report_draft_writes_outputs(repo_root: Path, tmp_path: Path) -
     manifest_payload = json.loads(artifacts.manifest_path.read_text(encoding="utf-8"))
     draft_payload = json.loads((programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.draft.json").read_text(encoding="utf-8"))
     evidence_capture = manifest_payload["metadata"]["run_evidence_snapshot"]
-    assert evidence_capture["schema_version"] == "run-evidence-capture.v2"
+    assert evidence_capture["schema_version"] == "run-evidence-capture.v3"
     selector_modes = dict(map(tuple, evidence_capture["effective_family_modes"]))
     assert set(selector_modes) == {"judgment", "workitem.state"}
     assert manifest_payload["metadata"]["family_read_paths"]["milestone"] == (

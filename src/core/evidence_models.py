@@ -66,6 +66,7 @@ class SourceRef:
     permalink: str | None = None
     extraction_method: ExtractionMethod | None = None
     canonical_id: str | None = None
+    source_time: datetime | None = None
 
 
 # ── WorkstreamEvidence ────────────────────────────────────────────────────────

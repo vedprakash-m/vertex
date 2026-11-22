@@ -499,6 +499,26 @@ class RiskStatus(EnumParserMixin, str, Enum):
     ESCALATED = "escalated"
 
 
+class LifecycleEventKind(str, Enum):
+    BREACH = "breach"
+    ESCALATION = "escalation"
+    MITIGATION_EFFECTIVENESS = "mitigation_effectiveness"
+    REVISIT = "revisit"
+    CLOSURE = "closure"
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleEvent:
+    object_id: str
+    kind: LifecycleEventKind
+    occurred_at: datetime
+    actor: str
+    note: str | None = None
+    effective: bool | None = None
+    next_review_at: datetime | None = None
+    evidence_refs: tuple[str, ...] = ()
+
+
 class RiskCategory(EnumParserMixin, str, Enum):
     TECHNICAL = "technical"
     SCHEDULE = "schedule"
@@ -1191,6 +1211,7 @@ class ClaimEntry:
     # recognizes `DependencyStatus`'s own values).
     claimed_status_family: Literal["dependency", "risk", "milestone", "action"] | None = None
     claimed_status_value: str | None = None
+    evidence_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1225,6 +1246,7 @@ class DecisionAsk:
     resurfacing_policy: ResurfacingPolicy | None = None
     affected_milestone_ids: tuple[str, ...] = ()
     last_touched_at: datetime | None = None
+    evidence_refs: tuple[str, ...] = ()
 
 
 class DecisionStatus(EnumParserMixin, str, Enum):

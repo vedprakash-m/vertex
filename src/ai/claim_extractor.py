@@ -517,6 +517,7 @@ def _parse_deterministic_claim_line(
                 payload.get("due"),
                 field_name=f"deterministic claim entry #{index} due_date",
             ),
+            evidence_refs=refs,
             claimed_status_family=_parse_optional_status_family(
                 payload.get("status_family"),
                 field_name=f"deterministic claim entry #{index} claimed_status_family",
@@ -563,6 +564,7 @@ def _parse_deterministic_decision_ask_line(
                 payload.get("owner"),
                 field_name=f"deterministic decision ask entry #{index} owner_alias",
             ),
+            evidence_refs=refs,
         )
     except ClaimExtractorError:
         return None
@@ -704,8 +706,9 @@ def _parse_claim_entry(
         raise ClaimExtractorError(f"AI claim entry #{index} must be an object.")
     if "text" not in raw_claim:
         raise ClaimExtractorError(f"AI claim entry #{index} must include text.")
-    if "entity_refs" not in raw_claim:
-        raise ClaimExtractorError(f"AI claim entry #{index} must include entity_refs.")
+    grounding_field = "evidence_refs" if "evidence_refs" in raw_claim else "entity_refs"
+    if grounding_field not in raw_claim:
+        raise ClaimExtractorError(f"AI claim entry #{index} must include evidence_refs.")
     if "due_date" not in raw_claim:
         raise ClaimExtractorError(f"AI claim entry #{index} must include due_date.")
     if "owner_alias" not in raw_claim:
@@ -715,10 +718,10 @@ def _parse_claim_entry(
 
     text = _parse_processed_text(raw_claim.get("text"), items=items, field_name=f"AI claim entry #{index} text")
     entity_refs = _parse_entity_refs(
-        raw_claim.get("entity_refs"),
+        raw_claim.get(grounding_field),
         items=items,
         fallback_item_ids=_extract_work_item_ids_from_text(text.text),
-        field_name=f"AI claim entry #{index} entity_refs",
+        field_name=f"AI claim entry #{index} {grounding_field}",
     )
     due_date = _parse_optional_date(raw_claim.get("due_date"), field_name=f"AI claim entry #{index} due_date")
     owner_alias = _parse_optional_owner_alias(raw_claim.get("owner_alias"), field_name=f"AI claim entry #{index} owner_alias")
@@ -758,6 +761,7 @@ def _parse_claim_entry(
         due_date=due_date,
         claimed_status_family=claimed_status_family,
         claimed_status_value=claimed_status_value,
+        evidence_refs=entity_refs,
     )
 
 
@@ -775,17 +779,18 @@ def _parse_decision_ask_entry(
         raise ClaimExtractorError(f"AI decision ask entry #{index} must be an object.")
     if "text" not in raw_ask:
         raise ClaimExtractorError(f"AI decision ask entry #{index} must include text.")
-    if "entity_refs" not in raw_ask:
-        raise ClaimExtractorError(f"AI decision ask entry #{index} must include entity_refs.")
+    grounding_field = "evidence_refs" if "evidence_refs" in raw_ask else "entity_refs"
+    if grounding_field not in raw_ask:
+        raise ClaimExtractorError(f"AI decision ask entry #{index} must include evidence_refs.")
     if "owner_alias" not in raw_ask:
         raise ClaimExtractorError(f"AI decision ask entry #{index} must include owner_alias.")
 
     text = _parse_processed_text(raw_ask.get("text"), items=items, field_name=f"AI decision ask entry #{index} text")
     entity_refs = _parse_entity_refs(
-        raw_ask.get("entity_refs"),
+        raw_ask.get(grounding_field),
         items=items,
         fallback_item_ids=_extract_work_item_ids_from_text(text.text),
-        field_name=f"AI decision ask entry #{index} entity_refs",
+        field_name=f"AI decision ask entry #{index} {grounding_field}",
     )
     owner_alias = _parse_optional_owner_alias(
         raw_ask.get("owner_alias"),
@@ -801,6 +806,7 @@ def _parse_decision_ask_entry(
         entity_refs=entity_refs,
         ask_date=claim_date,
         owner_alias=owner_alias,
+        evidence_refs=entity_refs,
     )
 
 

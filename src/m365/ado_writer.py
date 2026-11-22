@@ -11,12 +11,13 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import portalocker
 
 from src.core.actuation_outbox import (
     DispatchResult,
+    _load_valid_success_receipt,
     create_task_idempotency_key,
     dispatch_leased_create_task,
     enqueue_create_task_intent,
@@ -32,6 +33,7 @@ from src.core.actuation_reconciliation import (
     reconcile_effect,
 )
 from src.core.ledger.durable_outbox_store import OutboxError, load_entry, load_success_receipt
+from src.core.operation_capabilities import create_target_identity
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, open_locked_proposal_manifest, read_proposal_manifest_from_handle, write_proposal_manifest_to_handle
 from src.core.exceptions import AuthError, ConfigError, CredentialExpired, MutationOutcomeUnknown, QueryError, QueryTimeoutError, StateError
@@ -274,6 +276,22 @@ class ADOWriter:
             operation_intent_id = entry.operation_intent_id or _new_operation_intent_id()
             title = str(task_data.get("title") or "")
             area_path = task_data.get("area_path")
+            approved_marker = task_data.get("approved_remote_marker")
+            intent_marker = f"vertex-intent-{operation_intent_id}"
+            if approved_marker is None:
+                remote_tags = intent_marker
+            elif (
+                isinstance(approved_marker, str)
+                and approved_marker.startswith("vertex-effect-")
+                and approved_marker.strip()
+            ):
+                remote_tags = f"{intent_marker}; {approved_marker}"
+            else:
+                return replace(
+                    entry,
+                    entry_status="failed",
+                    status_reason="Create approved marker is malformed; no provider request was issued.",
+                )
             idempotency_key = create_task_idempotency_key(
                 program_id=proposal.program_id,
                 org=self._client.organization,
@@ -286,6 +304,7 @@ class ADOWriter:
                     "operation": "create_task.v1",
                     "operation_intent_id": operation_intent_id,
                     "proposal_id": proposal.id,
+                    "causal_occurrence_id": entry.reason,
                     "org": self._client.organization,
                     "project": self._client.project,
                     "title": title,
@@ -295,7 +314,8 @@ class ADOWriter:
                     "iteration_path": task_data.get("iteration_path"),
                     "priority": task_data.get("priority"),
                     "target_date": task_data.get("target_date"),
-                    "tags": f"vertex-intent-{operation_intent_id}",
+                    "tags": remote_tags,
+                    "approved_remote_marker": approved_marker,
                     "authorized_effect": task_data.get("authorized_effect"),
                 }
             )
@@ -341,7 +361,9 @@ class ADOWriter:
                         "org": self._client.organization,
                         "project": self._client.project,
                         "operation_intent_id": operation_intent_id,
-                        "tags": f"vertex-intent-{operation_intent_id}",
+                        "tags": remote_tags,
+                        "causal_occurrence_id": entry.reason,
+                        "approved_remote_marker": approved_marker,
                     })
                 except ValueError as error:
                     return replace(
@@ -355,7 +377,11 @@ class ADOWriter:
                         operation_intent_id=operation_intent_id,
                         area_path=area_path,
                         title=title,
-                        task_data=task_data,
+                        task_data={
+                            **task_data,
+                            "tags": remote_tags,
+                            "approved_remote_marker": approved_marker,
+                        },
                     )
                 except (AuthError, QueryError) as error:
                     return replace(
@@ -505,7 +531,9 @@ class ADOWriter:
                     "org": self._client.organization,
                     "project": self._client.project,
                     "operation_intent_id": operation_intent_id,
-                    "tags": f"vertex-intent-{operation_intent_id}",
+                    "tags": remote_tags,
+                    "causal_occurrence_id": entry.reason,
+                    "approved_remote_marker": approved_marker,
                 })
             except ValueError as error:
                 return replace(
@@ -529,7 +557,7 @@ class ADOWriter:
             # inline POST. Enqueue is idempotent on operation_intent_id, so a
             # crash-retry with the same (already-persisted) intent id reuses
             # the existing row instead of enqueueing a duplicate.
-            enqueue_create_task_intent(
+            enqueued = enqueue_create_task_intent(
                 program_id=proposal.program_id,
                 idempotency_key=idempotency_key,
                 operation_intent_id=operation_intent_id,
@@ -537,12 +565,110 @@ class ADOWriter:
                 payload_json=outbox_payload_json,
                 programs_root=self._programs_root,
             )
+            if enqueued.outbox_id != idempotency_key:
+                try:
+                    owner_payload = json.loads(enqueued.payload_json)
+                except (TypeError, ValueError) as error:
+                    return replace(
+                        attempted_entry,
+                        entry_status="failed",
+                        status_reason=(
+                            f"Semantic effect owner has invalid retained payload: {error}"
+                        ),
+                    )
+                owner_intent = (
+                    owner_payload.get("operation_intent_id")
+                    if isinstance(owner_payload, dict)
+                    else None
+                )
+                if not isinstance(owner_intent, str) or not owner_intent:
+                    return replace(
+                        attempted_entry,
+                        entry_status="failed",
+                        status_reason=(
+                            "Semantic effect owner is missing its retained operation intent."
+                        ),
+                    )
+                attempted_entry = replace(
+                    attempted_entry,
+                    operation_intent_id=owner_intent,
+                    outbox_id=enqueued.outbox_id,
+                )
+                if persist_attempt is not None:
+                    persist_attempt(attempted_entry)
+                if enqueued.status == "completed":
+                    owner_authorized: AuthorizedEffect | None = None
+                    try:
+                        owner_document, owner_receipt = _load_valid_success_receipt(
+                            outbox_db_path(
+                                proposal.program_id,
+                                programs_root=self._programs_root,
+                            ),
+                            enqueued,
+                            program_id=proposal.program_id,
+                        )
+                        owner_authorized = _authorized_create_effect(owner_payload)
+                    except (OutboxError, TypeError, ValueError, AttributeError):
+                        owner_document = {}
+                        owner_receipt = None
+                    remote_id = owner_document.get("remote_id")
+                    remote_rev = owner_document.get("remote_rev")
+                    validated_remote_id = cast(int, remote_id)
+                    validated_remote_rev = (
+                        cast(int, remote_rev)
+                        if type(remote_rev) is int
+                        else None
+                    )
+                    if (
+                        not isinstance(owner_document, dict)
+                        or owner_authorized is None
+                        or type(remote_id) is not int
+                        or validated_remote_id <= 0
+                        or (
+                            remote_rev is not None
+                            and type(remote_rev) is not int
+                        )
+                        or not _completed_create_receipt_binds(
+                            receipt_json=owner_receipt,
+                            authorized_effect=owner_authorized,
+                            remote_id=validated_remote_id,
+                            remote_rev=validated_remote_rev,
+                        )
+                    ):
+                        return replace(
+                            attempted_entry,
+                            entry_status="failed",
+                            status_reason=(
+                                "Semantic effect owner has no exact retained completion receipt."
+                            ),
+                        )
+                    applied_entry = replace(
+                        attempted_entry,
+                        entry_status="applied",
+                        work_item_id=validated_remote_id,
+                        remote_rev=validated_remote_rev,
+                        status_reason=(
+                            "adopted the existing completed semantic effect from "
+                            f"outbox {enqueued.outbox_id}"
+                        ),
+                    )
+                    self._append_audit_signal(
+                        proposal,
+                        applied_entry,
+                        applied_at=applied_at,
+                        existing_signals=existing_signals,
+                        signal_store=signal_store,
+                        raw_ref=f"ado:{applied_entry.work_item_id}",
+                        adopted_existing=True,
+                    )
+                    return applied_entry
+            dispatch_outbox_id = enqueued.outbox_id
 
             dispatch_owner = f"ado_writer:{uuid.uuid4().hex[:12]}"
             try:
                 outcome = dispatch_leased_create_task(
                     program_id=proposal.program_id,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=dispatch_outbox_id,
                     owner=dispatch_owner,
                     dispatch_fn=self._dispatch_create_task_outbox_entry,
                     programs_root=self._programs_root,
@@ -875,6 +1001,20 @@ class ADOWriter:
                 succeeded=False,
                 failure_reason="outbox payload operation is not qualified for provider dispatch",
             )
+        approved_marker = fields.get("approved_remote_marker")
+        if approved_marker is not None and (
+            not isinstance(approved_marker, str)
+            or not approved_marker.strip()
+            or approved_marker not in _parse_tags(
+                fields["tags"] if isinstance(fields.get("tags"), str) else ""
+            )
+        ):
+            return DispatchResult(
+                succeeded=False,
+                failure_reason=(
+                    "outbox payload does not bind the approved marker to the create patch"
+                ),
+            )
         try:
             authorized_effect = _authorized_create_effect(fields)
         except ValueError as error:
@@ -934,7 +1074,12 @@ class ADOWriter:
         task_data: dict[str, Any],
     ) -> tuple[int | None, int | None, dict[str, Any] | None]:
         """Require complete unique marker lookup and matching requested-field readback."""
-        tag = f"vertex-intent-{operation_intent_id}"
+        approved_marker = task_data.get("approved_remote_marker")
+        tag = (
+            approved_marker
+            if isinstance(approved_marker, str) and approved_marker.strip()
+            else f"vertex-intent-{operation_intent_id}"
+        )
         tag_wiql = f"SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS '{_escape_wiql_literal(tag)}'"
         if area_path:
             tag_wiql += f" AND [System.AreaPath] UNDER '{_escape_wiql_literal(area_path)}'"
@@ -1074,12 +1219,28 @@ def _authorized_create_effect(fields: dict[str, Any]) -> AuthorizedEffect:
         raise ValueError("authorized effect project does not match the ADO destination")
     if authorized.operation != "create_task.v1":
         raise ValueError("authorized effect operation is not create_task.v1")
-    if authorized.target_identity != f"{fields.get('project')}:new":
-        raise ValueError("authorized effect target does not match the create destination")
     desired_value = {
         item["path"].removeprefix("/fields/"): item["value"]
         for item in _build_create_task_patch(fields)
     }
+    causal_occurrence_id = fields.get("causal_occurrence_id")
+    marker_bound = isinstance(fields.get("approved_remote_marker"), str)
+    if (
+        marker_bound
+        and isinstance(causal_occurrence_id, str)
+        and causal_occurrence_id.strip()
+    ):
+        expected_target = create_target_identity(
+            provider="ado",
+            tenant=str(fields.get("org") or ""),
+            project=str(fields.get("project") or ""),
+            causal_occurrence_id=causal_occurrence_id,
+            payload=desired_value,
+        )
+    else:
+        expected_target = f"{fields.get('project')}:new"
+    if authorized.target_identity != expected_target:
+        raise ValueError("authorized effect target does not match the create destination")
     if desired_effect_hash(authorized.desired_value) != desired_effect_hash(desired_value):
         raise ValueError("authorized effect desired value does not match the retained create payload")
     preflight = reconcile_effect(authorized, ())

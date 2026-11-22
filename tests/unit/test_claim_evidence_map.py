@@ -11,6 +11,7 @@ from src.core.claim_evidence_map import (
     TruthConsistencyMode,
     build_claim_evidence_map,
     evaluate_truth_consistency,
+    grounding_refs,
 )
 
 
@@ -125,3 +126,16 @@ def test_enum_values_are_json_portable_strings() -> None:
     assert FindingKind.DANGLING_EVIDENCE_REF == "dangling_evidence_ref"
     assert TruthConsistencyMode.OBSERVE_ONLY == "observe_only"
     assert TruthConsistencyMode.RELEASE_BLOCK == "release_block"
+
+
+def test_shared_grounding_field_prefers_evidence_refs_with_legacy_fallback() -> None:
+    unified = dataclasses.make_dataclass(
+        "UnifiedClaim",
+        [("evidence_refs", tuple[str, ...]), ("entity_refs", tuple[str, ...])],
+    )(("WI:1001",), ("WI:1000",))
+    legacy = dataclasses.make_dataclass("LegacyClaim", [("entity_refs", tuple[str, ...])])(
+        ("WI:1002",),
+    )
+
+    assert grounding_refs(unified) == ("WI:1001",)
+    assert grounding_refs(legacy) == ("WI:1002",)

@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from src.core.context_compiler import (
+    ContentOrigin,
+    ContextCompileRequest,
+    DeterministicContextCompiler,
+    EvidenceSpan,
+    ValidationContext,
+)
+from src.core.program_fact_store import FactPrecedence, ProgramFactInput, ProgramFactStore
+
+
+class FixedEstimator:
+    tokenizer_id = "fixed"
+    incremental_estimates = True
+
+    def estimate(self, text: str) -> int:
+        return max(1, len(text) // 4)
+
+
+def test_compiler_adds_relevant_bitemporal_outcome_without_prompt_history_dump(
+    tmp_path: Path,
+) -> None:
+    roots = tmp_path / "programs"
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    store = ProgramFactStore("acme", db_root=tmp_path)
+    store.append_fact(
+        ProgramFactInput(
+            fact_type="risk.entry",
+            scope="program",
+            entity_refs=("RISK:historical-risk",),
+            payload={
+                "id": "historical-risk",
+                "program_id": "acme",
+                "title": "Three-year migration risk",
+                "description": "The prior launch route failed.",
+                "status": "closed",
+                "outcome": "Parallel routing removed the launch risk.",
+                "probability": "likely",
+                "impact": "high",
+                "category": "schedule",
+                "owner_alias": "owner",
+                "mitigation_plan": "Parallel routing.",
+                "mitigation_due_date": "2023-01-01",
+                "linked_workstream_ids": [],
+                "linked_work_item_ids": [],
+                "linked_milestone_ids": [],
+                "linked_claim_ids": [],
+                "linked_action_ids": [],
+                "identified_date": "2022-12-01",
+                "identified_in_vertex_issue": None,
+                "last_reviewed_date": "2023-01-02",
+                "entity_refs": [],
+            },
+            precedence=FactPrecedence.ACTIVE_PM_JUDGMENT,
+            natural_key="historical-risk",
+            created_by="test",
+        ),
+        recorded_at=now - timedelta(days=365 * 3),
+    )
+
+    request = ContextCompileRequest(
+        program_id="acme",
+        edition_id=None,
+        feature="decision_brief_advisor",
+        prompt_version="test",
+        system_instructions="Use bounded evidence.",
+        output_schema_text="{}",
+        required_evidence=(
+            EvidenceSpan(
+                evidence_id="current-risk",
+                source_family="risk",
+                text="RISK:historical-risk is under review again.",
+                required=True,
+                origin=ContentOrigin.AUTHORED,
+                trust_level="high",
+                verification_state="verified",
+                injection_screen="pass",
+            ),
+        ),
+        optional_evidence=(),
+        max_input_tokens=400,
+        reserved_output_tokens=40,
+        long_horizon_entity_refs=("RISK:historical-risk",),
+        long_horizon_as_of=now,
+    )
+    compiled = DeterministicContextCompiler(
+        token_estimator=FixedEstimator(),
+        programs_root=roots,
+    ).compile(
+        request,
+        validation_context=ValidationContext(
+            program_id="acme",
+            run_id="run-1",
+            execution_mode="advisory",
+            classification="internal",
+        ),
+    )
+
+    assert "Parallel routing removed the launch risk." in compiled.prompt_text
+    assert any(span.source_family == "long_horizon" for span in compiled.included)
+    assert len(compiled.included) <= 2
+
+
+def test_long_horizon_memory_is_hard_bounded_and_as_of_aware(tmp_path: Path) -> None:
+    roots = tmp_path / "programs"
+    as_of = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProgramFactStore("acme", db_root=tmp_path)
+    for index in range(80):
+        store.append_fact(
+            ProgramFactInput(
+                fact_type="decision.entry",
+                scope="program",
+                entity_refs=(f"DECISION:{index}",),
+                payload={
+                    "id": f"decision-{index}",
+                    "title": f"Decision {index}",
+                    "program_id": "acme",
+                    "context": "Historical context.",
+                    "status": "decided",
+                    "decision": f"Outcome {index}",
+                    "rationale": None,
+                    "alternatives_considered": [],
+                    "decided_by": "owner",
+                    "decision_date": (as_of - timedelta(days=index + 1)).date().isoformat(),
+                    "superseded_by": None,
+                    "linked_claim_id": None,
+                    "linked_risk_id": None,
+                    "linked_action_ids": [],
+                    "workstream_id": None,
+                    "entity_refs": [],
+                    "review_by": None,
+                    "linked_milestone_ids": [],
+                    "last_reviewed_date": None,
+                },
+                precedence=FactPrecedence.CONFIRMED_GOVERNANCE_DECISION,
+                natural_key=f"decision-{index}",
+                created_by="test",
+            ),
+            recorded_at=as_of - timedelta(days=index + 1),
+        )
+    outcomes = __import__("src.core.program_reality", fromlist=["ProgramReality"]).ProgramReality.load(
+        "acme", programs_root=roots, as_of=as_of
+    ).long_horizon_outcomes(max_items=4, as_of=as_of)
+
+    assert len(outcomes) == 4
+    assert all(outcome.recorded_at <= as_of for outcome in outcomes)

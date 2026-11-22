@@ -46,6 +46,47 @@ class CostReservation:
     _ledger_path: Path | None = field(default=None, repr=False)
     _ledger_id: str | None = field(default=None, repr=False)
     chain_id: int | None = None
+    chain_scope_key: str | None = None
+    feature_id: str | None = None
+    policy_version: str | None = None
+    principal: str | None = None
+    snapshot_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CostReservationRecovery:
+    reservation_id: int
+    chain_id: int | None
+    reserved_usd: float
+    status: str
+    created_at: datetime
+    settled_at: datetime | None
+    feature_id: str | None
+    policy_version: str | None
+    principal: str | None
+    snapshot_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CostChainRecovery:
+    chain_id: int
+    scope_key: str | None
+    reserved_usd: float
+    status: str
+    created_at: datetime
+    released_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class CostRecoverySnapshot:
+    reservations: tuple[CostReservationRecovery, ...]
+    chains: tuple[CostChainRecovery, ...]
+
+    @property
+    def has_open_holds(self) -> bool:
+        return any(row.status == "reserved" for row in self.reservations) or any(
+            row.status == "reserved" and row.reserved_usd > 0 for row in self.chains
+        )
 
 
 def _enforce_run_budget(state: CostRunState, estimated_cost_usd: float, budget_usd: float) -> None:
@@ -60,8 +101,14 @@ def _ensure_chain_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS ai_cost_chains (chain_id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "edition TEXT NOT NULL, run_id TEXT NOT NULL, reserved_usd REAL NOT NULL, status TEXT NOT NULL, "
-        "created_at TEXT NOT NULL, released_at TEXT)"
+        "created_at TEXT NOT NULL, released_at TEXT, scope_key TEXT)"
     )
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(ai_cost_chains)").fetchall()
+    }
+    if "scope_key" not in columns:
+        connection.execute("ALTER TABLE ai_cost_chains ADD COLUMN scope_key TEXT")
     connection.execute(
         "CREATE TABLE IF NOT EXISTS ai_cost_chain_draws ("
         "reservation_id INTEGER PRIMARY KEY REFERENCES ai_cost_reservations(reservation_id), "
@@ -79,11 +126,19 @@ class CostGuard:
         run_id: str,
         budget_usd: float,
         programs_root: Path | None = None,
+        feature_id: str | None = None,
+        policy_version: str | None = None,
+        principal: str | None = None,
+        snapshot_id: str | None = None,
     ) -> None:
         self._edition = edition
         self._run_id = run_id
         self._budget_usd = _validate_live_amount(budget_usd, field_name="budget_usd")
         self._programs_root = programs_root if programs_root is not None else PROGRAMS_ROOT
+        self._feature_id = _optional_reservation_identity(feature_id, "feature_id")
+        self._policy_version = _optional_reservation_identity(policy_version, "policy_version")
+        self._principal = _optional_reservation_identity(principal, "principal")
+        self._snapshot_id = _optional_reservation_identity(snapshot_id, "snapshot_id")
 
     @property
     def state_path(self) -> Path:
@@ -137,6 +192,7 @@ class CostGuard:
         *,
         chain_total_usd: float | None = None,
         chain: CostReservation | None = None,
+        chain_scope_key: str | None = None,
     ) -> CostReservation:
         """Atomically reserve one remote call before it can be dispatched.
 
@@ -157,6 +213,10 @@ class CostGuard:
             if estimated_cost_usd > chain_total_usd + 1e-12:
                 raise StateError("Attempt estimate exceeds its cost chain reservation")
         chain_id = chain.chain_id if chain is not None else None
+        if chain_scope_key is not None and (
+            not isinstance(chain_scope_key, str) or not chain_scope_key.strip()
+        ):
+            raise StateError("Cost chain scope must be a nonblank string.")
         fallback_state = self.current_state()
         ledger_path = self.ledger_path.resolve()
         if chain is not None and (chain_id is None or chain._ledger_path != ledger_path):
@@ -176,11 +236,17 @@ class CostGuard:
                 if chain is not None:
                     _ensure_chain_schema(connection)
                     chain_row = connection.execute(
-                        "SELECT reserved_usd, status FROM ai_cost_chains WHERE chain_id = ? AND edition = ? AND run_id = ?",
+                        "SELECT reserved_usd, status, scope_key FROM ai_cost_chains "
+                        "WHERE chain_id = ? AND edition = ? AND run_id = ?",
                         (chain_id, self._edition, self._run_id),
                     ).fetchone()
                     if row is None or chain_row is None or chain_row["status"] != "reserved":
                         raise StateError("Cost chain reservation is unknown or already released")
+                    retained_scope = chain_row["scope_key"]
+                    if chain.chain_scope_key is not None and retained_scope != chain.chain_scope_key:
+                        raise StateError("Cost chain reservation scope has changed")
+                    if chain_scope_key is not None and retained_scope != chain_scope_key:
+                        raise StateError("Cost chain reservation scope does not match this draw")
                     _verify_ledger_identity(connection, chain)
                     remaining = _coerce_state_float(chain_row["reserved_usd"], field_name="reserved_usd")
                     if estimated_cost_usd > remaining + 1e-12:
@@ -201,14 +267,25 @@ class CostGuard:
                 elif chain_total_usd is not None:
                     _ensure_chain_schema(connection)
                     chain_id = connection.execute(
-                        "INSERT INTO ai_cost_chains (edition, run_id, reserved_usd, status, created_at) "
-                        "VALUES (?, ?, ?, 'reserved', ?)",
-                        (self._edition, self._run_id, max(0.0, chain_total_usd - estimated_cost_usd), created_at),
+                        "INSERT INTO ai_cost_chains "
+                        "(edition, run_id, reserved_usd, status, created_at, scope_key) "
+                        "VALUES (?, ?, ?, 'reserved', ?, ?)",
+                        (
+                            self._edition,
+                            self._run_id,
+                            max(0.0, chain_total_usd - estimated_cost_usd),
+                            created_at,
+                            chain_scope_key,
+                        ),
                     ).lastrowid
                 cursor = connection.execute(
-                    "INSERT INTO ai_cost_reservations (edition, run_id, reserved_usd, status, created_at) "
-                    "VALUES (?, ?, ?, 'reserved', ?)",
-                    (self._edition, self._run_id, estimated_cost_usd, created_at),
+                    "INSERT INTO ai_cost_reservations "
+                    "(edition, run_id, reserved_usd, status, created_at, feature_id, policy_version, principal, snapshot_id) "
+                    "VALUES (?, ?, ?, 'reserved', ?, ?, ?, ?, ?)",
+                    (
+                        self._edition, self._run_id, estimated_cost_usd, created_at,
+                        self._feature_id, self._policy_version, self._principal, self._snapshot_id,
+                    ),
                 )
                 reservation_id = cursor.lastrowid
                 assert reservation_id is not None
@@ -226,6 +303,11 @@ class CostGuard:
             _ledger_path=ledger_path,
             _ledger_id=ledger_id,
             chain_id=chain_id,
+            chain_scope_key=chain_scope_key if chain is None else chain.chain_scope_key,
+            feature_id=self._feature_id,
+            policy_version=self._policy_version,
+            principal=self._principal,
+            snapshot_id=self._snapshot_id,
         )
         try:
             self._persist_projection(updated)
@@ -363,7 +445,7 @@ class CostGuard:
             with open_program_db(ledger_path, read_only=True) as connection:
                 ledger_id = _read_ledger_identity(connection)
                 row = connection.execute(
-                    "SELECT reserved_usd, status FROM ai_cost_reservations "
+                    "SELECT * FROM ai_cost_reservations "
                     "WHERE reservation_id = ? AND edition = ? AND run_id = ?",
                     (reservation_id, self._edition, self._run_id),
                 ).fetchone()
@@ -375,14 +457,27 @@ class CostGuard:
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' "
                     "AND name = 'ai_cost_chain_draws'"
                 ).fetchone()
-                chain_row = (
-                    connection.execute(
-                        "SELECT chain_id FROM ai_cost_chain_draws WHERE reservation_id = ?",
+                chain_columns = {
+                    str(column["name"])
+                    for column in connection.execute(
+                        "PRAGMA table_info(ai_cost_chains)"
+                    ).fetchall()
+                }
+                if draw_table is not None:
+                    scope_expression = (
+                        "chains.scope_key"
+                        if "scope_key" in chain_columns
+                        else "NULL"
+                    )
+                    chain_row = connection.execute(
+                        f"SELECT draws.chain_id, {scope_expression} AS scope_key "
+                        "FROM ai_cost_chain_draws AS draws "
+                        "JOIN ai_cost_chains AS chains ON chains.chain_id = draws.chain_id "
+                        "WHERE draws.reservation_id = ?",
                         (reservation_id,),
                     ).fetchone()
-                    if draw_table is not None
-                    else None
-                )
+                else:
+                    chain_row = None
                 state_row = connection.execute(
                     "SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, "
                     "started_at, updated_at FROM ai_cost_runs "
@@ -408,6 +503,15 @@ class CostGuard:
                         if chain_row is not None
                         else None
                     ),
+                    chain_scope_key=(
+                        str(chain_row["scope_key"])
+                        if chain_row is not None and chain_row["scope_key"] is not None
+                        else None
+                    ),
+                    feature_id=_stored_reservation_identity(row, "feature_id"),
+                    policy_version=_stored_reservation_identity(row, "policy_version"),
+                    principal=_stored_reservation_identity(row, "principal"),
+                    snapshot_id=_stored_reservation_identity(row, "snapshot_id"),
                 )
         except sqlite3.OperationalError as error:
             raise StateError("Cost reservation ledger is unavailable or has no durable identity") from error
@@ -439,6 +543,114 @@ class CostGuard:
         if chain.chain_id is None:
             raise StateError("Cost reservation is not associated with a cost chain")
         return self.release_chain(chain)
+
+    def recovery_snapshot(self) -> CostRecoverySnapshot:
+        """Return restart-safe reservation and chain evidence without mutation."""
+        path = self.ledger_path.resolve()
+        if not path.exists():
+            return CostRecoverySnapshot(reservations=(), chains=())
+        try:
+            with open_program_db(path, read_only=True) as connection:
+                _read_ledger_identity(connection)
+                chain_table = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ai_cost_chains'"
+                ).fetchone()
+                draw_table = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ai_cost_chain_draws'"
+                ).fetchone()
+                chain_expression = (
+                    "draws.chain_id"
+                    if draw_table is not None
+                    else "NULL"
+                )
+                join = (
+                    "LEFT JOIN ai_cost_chain_draws AS draws "
+                    "ON draws.reservation_id = reservations.reservation_id"
+                    if draw_table is not None
+                    else ""
+                )
+                reservation_columns = {
+                    str(column["name"])
+                    for column in connection.execute(
+                        "PRAGMA table_info(ai_cost_reservations)"
+                    ).fetchall()
+                }
+                context_columns = ", ".join(
+                    f"reservations.{name}"
+                    if name in reservation_columns
+                    else f"NULL AS {name}"
+                    for name in ("feature_id", "policy_version", "principal", "snapshot_id")
+                )
+                reservation_rows = connection.execute(
+                    f"SELECT reservations.reservation_id, {chain_expression} AS chain_id, "
+                    "reservations.reserved_usd, reservations.status, reservations.created_at, "
+                    f"reservations.settled_at, {context_columns} "
+                    f"FROM ai_cost_reservations AS reservations {join} "
+                    "WHERE reservations.edition = ? AND reservations.run_id = ? "
+                    "ORDER BY reservations.reservation_id",
+                    (self._edition, self._run_id),
+                ).fetchall()
+                if chain_table is not None:
+                    chain_columns = {
+                        str(column["name"])
+                        for column in connection.execute(
+                            "PRAGMA table_info(ai_cost_chains)"
+                        ).fetchall()
+                    }
+                    scope_expression = (
+                        "scope_key"
+                        if "scope_key" in chain_columns
+                        else "NULL"
+                    )
+                    chain_rows = connection.execute(
+                        f"SELECT chain_id, {scope_expression} AS scope_key, reserved_usd, "
+                        "status, created_at, released_at FROM ai_cost_chains "
+                        "WHERE edition = ? AND run_id = ? ORDER BY chain_id",
+                        (self._edition, self._run_id),
+                    ).fetchall()
+                else:
+                    chain_rows = []
+        except sqlite3.OperationalError as error:
+            raise StateError("Cost reservation recovery ledger is unavailable") from error
+        except sqlite3.DatabaseError as error:
+            raise StateError("Cost reservation recovery ledger is invalid") from error
+        reservations = tuple(
+            CostReservationRecovery(
+                reservation_id=_coerce_state_int(row["reservation_id"], field_name="reservation_id"),
+                chain_id=(
+                    _coerce_state_int(row["chain_id"], field_name="chain_id")
+                    if row["chain_id"] is not None
+                    else None
+                ),
+                reserved_usd=_coerce_state_float(row["reserved_usd"], field_name="reserved_usd"),
+                status=str(row["status"]),
+                created_at=_parse_state_datetime(row["created_at"], field_name="created_at")
+                or _raise_missing_state_datetime("created_at"),
+                settled_at=_parse_state_datetime(row["settled_at"], field_name="settled_at")
+                if row["settled_at"] is not None
+                else None,
+                feature_id=_stored_reservation_identity(row, "feature_id"),
+                policy_version=_stored_reservation_identity(row, "policy_version"),
+                principal=_stored_reservation_identity(row, "principal"),
+                snapshot_id=_stored_reservation_identity(row, "snapshot_id"),
+            )
+            for row in reservation_rows
+        )
+        chains = tuple(
+            CostChainRecovery(
+                chain_id=_coerce_state_int(row["chain_id"], field_name="chain_id"),
+                scope_key=str(row["scope_key"]) if row["scope_key"] is not None else None,
+                reserved_usd=_coerce_state_float(row["reserved_usd"], field_name="reserved_usd"),
+                status=str(row["status"]),
+                created_at=_parse_state_datetime(row["created_at"], field_name="created_at")
+                or _raise_missing_state_datetime("created_at"),
+                released_at=_parse_state_datetime(row["released_at"], field_name="released_at")
+                if row["released_at"] is not None
+                else None,
+            )
+            for row in chain_rows
+        )
+        return CostRecoverySnapshot(reservations=reservations, chains=chains)
 
     def settle_call(self, reservation: CostReservation, actual_cost_usd: float, *, ai_calls: int = 1) -> CostRunState:
         """Settle exactly the call reservation that preceded a response."""
@@ -865,10 +1077,21 @@ def _ensure_sqlite_schema(connection: sqlite3.Connection) -> None:
             actual_usd REAL,
             status TEXT NOT NULL CHECK (status IN ('reserved', 'settled')),
             created_at TEXT NOT NULL,
-            settled_at TEXT
+            settled_at TEXT,
+            feature_id TEXT,
+            policy_version TEXT,
+            principal TEXT,
+            snapshot_id TEXT
         )
         """
     )
+    reservation_columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(ai_cost_reservations)").fetchall()
+    }
+    for column in ("feature_id", "policy_version", "principal", "snapshot_id"):
+        if column not in reservation_columns:
+            connection.execute(f"ALTER TABLE ai_cost_reservations ADD COLUMN {column} TEXT")
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS ai_cost_ledger_identity (
@@ -877,6 +1100,19 @@ def _ensure_sqlite_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _optional_reservation_identity(value: object, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise StateError(f"Invalid cost guard reservation {field_name}")
+    return value.strip()
+
+
+def _stored_reservation_identity(row: sqlite3.Row, field_name: str) -> str | None:
+    value = row[field_name] if field_name in row.keys() else None
+    return _optional_reservation_identity(value, field_name)
 
 
 def _ensure_ledger_identity(connection: sqlite3.Connection) -> str:

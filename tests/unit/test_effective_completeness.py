@@ -79,6 +79,8 @@ def _manifest(**overrides) -> GatherRunManifest:
                 False,
                 "FULL",
                 ORACLE_RESULT_OPERATOR_EXPORT_MATCH,
+                None,
+                1,
             ),
         ),
         channel_outcomes=(ChannelOutcomeEntry("icm", False, None, 0.0),),
@@ -86,8 +88,8 @@ def _manifest(**overrides) -> GatherRunManifest:
     return replace(base, **overrides)
 
 
-_TRUNCATED = (QueryResultEntry("q", "scope-a", "wiql", T0, 200, (), "h", True, "FULL"),)
-_ERRORED = (QueryResultEntry("q", "scope-a", "wiql", T0, 0, (), "h", False, "ERROR", None, "timeout"),)
+_TRUNCATED = (QueryResultEntry("q", "scope-a", "wiql", T0, 200, (), "h", True, "FULL", page_count=1),)
+_ERRORED = (QueryResultEntry("q", "scope-a", "wiql", T0, 0, (), "h", False, "ERROR", None, "timeout", 1),)
 _DEGRADED = (ChannelOutcomeEntry("icm", True, "source failure", 0.0),)
 
 _DOWNGRADE_CASES = [
@@ -150,6 +152,27 @@ class TestProjection:
         assert result.value is None
         assert result.downgraded is True
         assert reason in result.reasons
+
+    def test_unverified_one_page_and_configured_only_paths_are_not_full(self) -> None:
+        from src.core.effective_completeness import project_effective_completeness
+
+        one_page = replace(
+            _manifest().query_results[0],
+            page_count=None,
+        )
+        result = project_effective_completeness(
+            _vector(),
+            _manifest(query_results=(one_page,)),
+        )
+        assert result.value is None
+        assert "query_page_evidence_missing:scope-a" in result.reasons
+
+        configured_only = project_effective_completeness(
+            _vector(),
+            _manifest(query_results=()),
+        )
+        assert configured_only.value is None
+        assert "query_evidence_missing" in configured_only.reasons
 
     def test_partial_visibility_is_a_reason(self) -> None:
         from src.core.effective_completeness import project_effective_completeness

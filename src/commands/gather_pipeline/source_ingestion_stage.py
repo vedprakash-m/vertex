@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 from src.commands.gather_pipeline.support import build_captured_window
@@ -13,6 +13,20 @@ class IngestionRunRecorder(Protocol):
     def initialize(self) -> object: ...
 
     def record_ingestion_run(self, run: IngestionRun) -> None: ...
+
+
+def build_sprint_planning_custom_fields(fields: dict[str, Any]) -> dict[str, object]:
+    points = fields.get("Microsoft.VSTS.Scheduling.StoryPoints")
+    source_field = "Microsoft.VSTS.Scheduling.StoryPoints"
+    if points is None:
+        points = fields.get("Microsoft.VSTS.Scheduling.Effort")
+        source_field = "Microsoft.VSTS.Scheduling.Effort"
+    if points is None:
+        return {}
+    return {
+        "story_points": points,
+        "story_points_source": f"ADO:System:{source_field}",
+    }
 
 
 def build_signal_source_ingestion_run_id(program_id: str, source_ref: str, as_of: datetime) -> str:

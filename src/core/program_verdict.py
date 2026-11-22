@@ -271,6 +271,22 @@ def load_latest_program_verdict(
     return _published_verdict_from_payload(program_id, path, verdict)
 
 
+def load_authoritative_program_risk(
+    program_id: str,
+    *,
+    programs_root: Path,
+    archive_root: Path | None = None,
+) -> RiskLevel | None:
+    """Resolve the shared retained verdict authority for cross-program consumers."""
+    verdict = load_latest_program_verdict(
+        program_id,
+        programs_root=programs_root,
+        archive_root=archive_root,
+        confirmed_only=True,
+    )
+    return verdict.health if verdict is not None else None
+
+
 def _published_verdict_from_payload(
     program_id: str, path: Path, verdict: dict
 ) -> PublishedProgramVerdict:
@@ -450,7 +466,10 @@ def evaluate_program_verdict(inputs: ProgramVerdictInputs) -> ProgramVerdict:
     capture, snapshot = inputs.capture, inputs.snapshot
     validate_run_evidence_snapshot(capture)
     if (
-        capture.schema_version != "run-evidence-capture.v2"
+        capture.schema_version not in {
+            "run-evidence-capture.v2",
+            "run-evidence-capture.v3",
+        }
         or hash_jsonable(snapshot) != capture.report_snapshot_hash
     ):
         raise ConfigError("Program verdict capture or report snapshot identity is inconsistent.")

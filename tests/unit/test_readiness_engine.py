@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -336,3 +339,380 @@ def test_build_readiness_snapshot_dependency_health_highlights_cross_org_failure
     "failing_dependency_ids": ["dep-cross-org"],
     "cross_org_failing_dependency_ids": ["dep-cross-org"],
   }
+
+
+def _write_readiness_artifact(program_dir: Path, ref: str, payload: dict[str, object]) -> str:
+  path = program_dir / ref
+  path.parent.mkdir(parents=True, exist_ok=True)
+  content = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+  path.write_bytes(content)
+  return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
+def _write_offline_readiness_case(program_dir: Path) -> None:
+  scope_hashes = (
+    _write_readiness_artifact(
+      program_dir,
+      "evidence/scope-ado.json",
+      {
+        "source": "ado",
+        "scope_id": "sample_delivery",
+        "query_id": "query-17",
+        "query_hash": "sha256:scope17",
+        "available": True,
+      },
+    ),
+    _write_readiness_artifact(
+      program_dir,
+      "evidence/scope-kusto.json",
+      {
+        "source": "kusto",
+        "scope_id": "sample_release",
+        "query_id": "query-kpi",
+        "query_hash": "sha256:kpi17",
+        "available": True,
+      },
+    ),
+  )
+  approval_hash = _write_readiness_artifact(
+    program_dir,
+    "approvals/summary.json",
+    {
+      "feature": "summary",
+      "model_id": "vertex-model-1",
+      "deployment_id": "vertex-summary-1",
+      "approved": True,
+    },
+  )
+  shadow_hash = _write_readiness_artifact(
+    program_dir,
+    "shadow/cycle-7.json",
+    {
+      "artifact_type": "ai_shadow",
+      "mode": "shadow",
+      "released": True,
+      "ai_run_id": "run-7",
+      "content_sha256": "sha256:shadow7",
+      "deployment_ids": ["vertex-summary-1"],
+    },
+  )
+  cycle_hash = _write_readiness_artifact(
+    program_dir,
+    "evidence/cycle-7.json",
+    {
+      "status": "complete",
+      "shadow_artifact_ref": "shadow/cycle-7.json",
+      "measured_cycle_seconds": 12.5,
+    },
+  )
+  (program_dir / "readiness.yaml").write_text(
+    f"""
+schema_version: "1.0"
+dimensions:
+  sample_offline_readiness:
+    name: Optional source offline readiness
+    gate_id: QG-RELO-W3.8
+    source:
+      type: offline_readiness
+      source_scopes:
+        - source: ado
+          scope_id: sample_delivery
+          query_id: query-17
+          query_hash: sha256:scope17
+          evidence_ref: evidence/scope-ado.json
+          evidence_sha256: {scope_hashes[0]}
+        - source: kusto
+          scope_id: sample_release
+          query_id: query-kpi
+          query_hash: sha256:kpi17
+          evidence_ref: evidence/scope-kusto.json
+          evidence_sha256: {scope_hashes[1]}
+      deployment_references:
+        - feature: summary
+          model_id: vertex-model-1
+          deployment_id: vertex-summary-1
+          approval_ref: approvals/summary.json
+          approval_sha256: {approval_hash}
+      shadow_artifact_ref: shadow/cycle-7.json
+      shadow_artifact_sha256: {shadow_hash}
+      measured_cycle_ref: evidence/cycle-7.json
+      measured_cycle_sha256: {cycle_hash}
+    pass_condition:
+      kind: offline_readiness_complete
+""".lstrip(),
+    encoding="utf-8",
+  )
+
+
+def test_offline_readiness_requires_exact_approved_shadow_cycle_evidence(tmp_path: Path) -> None:
+  programs_root = tmp_path / "programs"
+  program_dir = programs_root / "sample"
+  program_dir.mkdir(parents=True)
+  _write_offline_readiness_case(program_dir)
+
+  config = load_readiness_config("sample", programs_root=programs_root)
+  snapshot = build_readiness_snapshot(
+    "sample",
+    config,
+    loaders=ReadinessFetchLoaders(),
+    fetched_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+  )
+
+  result = snapshot.dimensions[0]
+  assert result.passed is True
+  assert result.status == "green"
+  assert [
+    {
+      key: value
+      for key, value in scope.items()
+      if key != "evidence_sha256"
+    }
+    for scope in result.details["source_scopes"]
+  ] == [
+    {
+      "source": "ado",
+      "scope_id": "sample_delivery",
+      "query_id": "query-17",
+      "query_hash": "sha256:scope17",
+      "evidence_ref": "evidence/scope-ado.json",
+    },
+    {
+      "source": "kusto",
+      "scope_id": "sample_release",
+      "query_id": "query-kpi",
+      "query_hash": "sha256:kpi17",
+      "evidence_ref": "evidence/scope-kusto.json",
+    },
+  ]
+  assert result.details["deployment_references"][0]["approval_ref"] == "approvals/summary.json"
+  assert result.evidence_refs == (
+    "ado:sample_delivery",
+    "kusto:sample_release",
+    "shadow/cycle-7.json",
+    "evidence/cycle-7.json",
+  )
+
+
+@pytest.mark.parametrize(
+  ("artifact_ref", "payload", "expected_blocker"),
+  (
+    (
+      "evidence/scope-ado.json",
+      {"source": "ado", "scope_id": "wrong", "query_id": "query-17", "query_hash": "sha256:scope17", "available": True},
+      "source scope evidence invalid",
+    ),
+    (
+      "approvals/summary.json",
+      {"feature": "summary", "model_id": "vertex-model-1", "deployment_id": "vertex-summary-1", "approved": False},
+      "deployment approval evidence invalid",
+    ),
+    (
+      "shadow/cycle-7.json",
+      {"artifact_type": "ai_shadow", "mode": "shadow", "released": False, "ai_run_id": "run-7", "content_sha256": "sha256:x"},
+      "shadow artifact unavailable",
+    ),
+    (
+      "evidence/cycle-7.json",
+      {"status": "complete", "shadow_artifact_ref": "shadow/wrong.json", "measured_cycle_seconds": 12.5},
+      "measured cycle evidence missing",
+    ),
+  ),
+)
+def test_offline_readiness_never_passes_without_every_qualification(
+  tmp_path: Path, artifact_ref: str, payload: dict[str, object], expected_blocker: str,
+) -> None:
+  programs_root = tmp_path / "programs"
+  program_dir = programs_root / "sample"
+  program_dir.mkdir(parents=True)
+  _write_offline_readiness_case(program_dir)
+  (program_dir / artifact_ref).write_text(
+    json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+  )
+
+  snapshot = build_readiness_snapshot(
+    "sample",
+    load_readiness_config("sample", programs_root=programs_root),
+    loaders=ReadinessFetchLoaders(),
+    fetched_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+  )
+
+  result = snapshot.dimensions[0]
+  assert result.passed is False
+  assert result.status == "red"
+  assert result.observed_value == "blocked"
+  assert expected_blocker in result.details["blockers"]
+
+
+@pytest.mark.parametrize(
+  ("field", "value", "message"),
+  [
+    ("source_scopes", {}, "source_scopes must be a list"),
+    ("source_scopes", ["bad"], r"source_scopes\[0\] must be a mapping"),
+    ("deployment_references", {}, "deployment_references must be a list"),
+    ("deployment_references", ["bad"], r"deployment_references\[0\] must be a mapping"),
+  ],
+)
+def test_offline_readiness_parser_rejects_invalid_collection_shapes(
+  tmp_path: Path,
+  field: str,
+  value: object,
+  message: str,
+) -> None:
+  program_dir = tmp_path / "programs" / "sample"
+  program_dir.mkdir(parents=True)
+  document = {
+    "schema_version": "1.0",
+    "dimensions": {
+      "offline": {
+        "source": {
+          "type": "offline_readiness",
+          field: value,
+        },
+        "pass_condition": {"kind": "offline_readiness_complete"},
+      },
+    },
+  }
+  (program_dir / "readiness.yaml").write_text(
+    __import__("yaml").safe_dump(document, sort_keys=False),
+    encoding="utf-8",
+  )
+
+  with pytest.raises(readiness_engine.ConfigError, match=message):
+    load_readiness_config("sample", programs_root=tmp_path / "programs")
+
+
+def test_offline_readiness_parser_requires_nonempty_scope_fields(tmp_path: Path) -> None:
+  program_dir = tmp_path / "programs" / "sample"
+  program_dir.mkdir(parents=True)
+  (program_dir / "readiness.yaml").write_text(
+    """schema_version: "1.0"
+dimensions:
+  offline:
+    source:
+      type: offline_readiness
+      source_scopes:
+        - source: ado
+          scope_id: ""
+          query_id: q
+          query_hash: h
+          evidence_ref: e
+          evidence_sha256: d
+    pass_condition:
+      kind: offline_readiness_complete
+""",
+    encoding="utf-8",
+  )
+
+  with pytest.raises(readiness_engine.ConfigError, match="entry 0 is missing scope_id"):
+    load_readiness_config("sample", programs_root=tmp_path / "programs")
+
+
+def test_offline_readiness_reports_missing_duplicate_unavailable_and_unapproved(
+  tmp_path: Path,
+) -> None:
+  program_dir = tmp_path / "programs" / "sample"
+  program_dir.mkdir(parents=True)
+  _write_offline_readiness_case(program_dir)
+  config = load_readiness_config("sample", programs_root=program_dir.parent)
+  original = config.dimensions[0]
+
+  missing = replace(
+    config,
+    dimensions=(
+      replace(
+        original,
+        source=replace(original.source, source_scopes=(), deployment_references=()),
+      ),
+    ),
+  )
+  missing_result = build_readiness_snapshot(
+    "sample", missing, loaders=ReadinessFetchLoaders(),
+    fetched_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+  ).dimensions[0]
+  assert "source scopes missing" in missing_result.details["blockers"]
+  assert "deployment references missing" in missing_result.details["blockers"]
+
+  duplicate = replace(
+    config,
+    dimensions=(
+      replace(
+        original,
+        source=replace(
+          original.source,
+          source_scopes=(original.source.source_scopes[0], original.source.source_scopes[0]),
+        ),
+      ),
+    ),
+  )
+  duplicate_result = build_readiness_snapshot(
+    "sample", duplicate, loaders=ReadinessFetchLoaders(),
+    fetched_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+  ).dimensions[0]
+  assert "duplicate source scopes" in duplicate_result.details["blockers"]
+
+  scope_payload = {
+    "source": "ado",
+    "scope_id": "sample_delivery",
+    "query_id": "query-17",
+    "query_hash": "sha256:scope17",
+    "available": False,
+  }
+  scope_hash = _write_readiness_artifact(program_dir, "evidence/scope-ado.json", scope_payload)
+  scope = replace(original.source.source_scopes[0], evidence_sha256=scope_hash)
+  approval_payload = {
+    "feature": "summary",
+    "model_id": "vertex-model-1",
+    "deployment_id": "vertex-summary-1",
+    "approved": False,
+  }
+  approval_hash = _write_readiness_artifact(program_dir, "approvals/summary.json", approval_payload)
+  approval = replace(original.source.deployment_references[0], approval_sha256=approval_hash)
+  unavailable = replace(
+    config,
+    dimensions=(
+      replace(
+        original,
+        source=replace(
+          original.source,
+          source_scopes=(scope, original.source.source_scopes[1]),
+          deployment_references=(approval,),
+        ),
+      ),
+    ),
+  )
+  unavailable_result = build_readiness_snapshot(
+    "sample", unavailable, loaders=ReadinessFetchLoaders(),
+    fetched_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+  ).dimensions[0]
+  assert "unavailable source scopes" in unavailable_result.details["blockers"]
+  assert "unapproved deployment references" in unavailable_result.details["blockers"]
+
+
+@pytest.mark.parametrize(
+  ("artifact_ref", "digest", "content"),
+  [
+    ("../outside.json", "sha256:" + "0" * 64, b"{}"),
+    ("missing.json", "not-sha256", b"{}"),
+    ("missing.json", "sha256:" + "0" * 64, None),
+    ("evidence.json", "sha256:" + "0" * 64, b"{}"),
+    ("invalid.json", "sha256:" + hashlib.sha256(b"[not-json]").hexdigest(), b"[not-json]"),
+    ("list.json", "sha256:" + hashlib.sha256(b"[]").hexdigest(), b"[]"),
+  ],
+)
+def test_verified_readiness_artifact_rejects_unsafe_or_invalid_inputs(
+  tmp_path: Path,
+  artifact_ref: str,
+  digest: str,
+  content: bytes | None,
+) -> None:
+  if content is not None and artifact_ref in {"evidence.json", "invalid.json", "list.json"}:
+    (tmp_path / artifact_ref).write_bytes(content)
+
+  payload, valid = readiness_engine._load_verified_readiness_artifact(
+    program_root=tmp_path,
+    artifact_ref=artifact_ref,
+    expected_sha256=digest,
+  )
+
+  assert payload is None
+  assert valid is False

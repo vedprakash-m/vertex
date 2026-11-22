@@ -116,6 +116,7 @@ class _CostChain:
         "feature_state",
         "feature_hold_key",
         "feature_hold_usd",
+        "scope_key",
     )
 
     def __init__(
@@ -124,6 +125,7 @@ class _CostChain:
         prices: dict[str, tuple[float, float]],
         deployments: Sequence[str],
         attempts: int,
+        scope_key: str = "unbound",
     ) -> None:
         self.guard = guard
         self.prices = prices
@@ -133,6 +135,7 @@ class _CostChain:
         self.feature_state: _FeatureBudgetState | None = None
         self.feature_hold_key: tuple[object, int] | None = None
         self.feature_hold_usd = 0.0
+        self.scope_key = scope_key
 
     def covers(self, client: AIClient) -> bool:
         guard = client._run_cost_guard
@@ -239,6 +242,17 @@ def open_cost_chain(primary: Any, deployments: Sequence[str]) -> _CostChain | No
         prices,
         deployments,
         primary.MAX_RETRIES + 1,
+        json.dumps(
+            (
+                primary._trace_context.metadata.get("program_id"),
+                primary._trace_context.metadata.get("ai_feature"),
+                primary._trace_context.edition,
+                primary._trace_context.run_id,
+                primary._trace_context.metadata.get("policy_version"),
+                tuple(deployments),
+            ),
+            separators=(",", ":"),
+        ),
     )
 
 
@@ -440,6 +454,7 @@ class AIClient:
                         reservation = self._run_cost_guard.reserve_call(
                             estimated_cost_usd,
                             chain_total_usd=chain_total_usd,
+                            chain_scope_key=chain.scope_key,
                         )
                         chain.reservation = reservation
                         chain.admit_feature_hold(
@@ -876,6 +891,10 @@ class AIClient:
             edition=trace_context.edition,
             run_id=trace_context.run_id,
             budget_usd=run_budget_usd,
+            feature_id=trace_context.metadata.get("ai_feature"),
+            policy_version=trace_context.metadata.get("policy_version"),
+            principal=trace_context.metadata.get("principal"),
+            snapshot_id=trace_context.metadata.get("snapshot_id"),
         )
 
 

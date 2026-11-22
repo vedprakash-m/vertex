@@ -269,6 +269,8 @@ class ReportConfig:
     executive_style: bool = False
     calibration_pilot: bool = False
     charts: ChartEditionSettings | None = None
+    communication_max_asks: int = 5
+    communication_cooldown_days: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1454,6 +1456,25 @@ def _parse_report_config(raw_config: dict[str, Any]) -> ReportConfig:
     offline = m365.get("offline", {}) if isinstance(m365, dict) else {}
     archive = raw_config["archive"]
     logging = raw_config.get("logging", {})
+    communication_budget = raw_config.get("communication_budget", {})
+    if not isinstance(communication_budget, dict):
+        raise ConfigError("communication_budget must be a mapping in config.yaml")
+    communication_max_asks = communication_budget.get(
+        "max_asks", communication_budget.get("max_material_asks", 5)
+    )
+    communication_cooldown_days = communication_budget.get("cooldown_days")
+    if (
+        isinstance(communication_max_asks, bool)
+        or not isinstance(communication_max_asks, int)
+        or communication_max_asks < 0
+    ):
+        raise ConfigError("communication_budget.max_asks must be a non-negative integer")
+    if communication_cooldown_days is not None and (
+        isinstance(communication_cooldown_days, bool)
+        or not isinstance(communication_cooldown_days, int)
+        or communication_cooldown_days < 0
+    ):
+        raise ConfigError("communication_budget.cooldown_days must be a non-negative integer")
     resolved_ado_timeout_seconds = int(raw_config.get("ado_fetch_timeout_seconds") or ado.get("api_timeout_seconds") or 45)
     layout_mode = _parse_layout_mode(raw_config.get("layout_mode"))
     cadence_note = _parse_cadence_note(raw_config.get("cadence_note"))
@@ -1609,6 +1630,8 @@ def _parse_report_config(raw_config: dict[str, Any]) -> ReportConfig:
         executive_style=bool(raw_config.get("executive_style", False)),
         calibration_pilot=bool(raw_config.get("calibration_pilot", False)),
         charts=chart_settings,
+        communication_max_asks=communication_max_asks,
+        communication_cooldown_days=communication_cooldown_days,
     )
 
 

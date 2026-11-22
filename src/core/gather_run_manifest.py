@@ -109,6 +109,7 @@ class QueryResultEntry:
     completeness_state: str
     oracle_result: str | None = None
     failure_category: str | None = None
+    page_count: int | None = None
 
 
 # D-19/AG-2.12: the closed set of completeness-oracle outcomes a
@@ -173,6 +174,10 @@ class ChannelOutcomeEntry:
     ado_call_count: int = 0
     retry_count: int = 0
     throttle_count: int = 0
+    source_permission_status: str = "unknown"
+    exact_target_status: str = "unknown"
+    quarantine_status: str = "none"
+    checkpoint_status: str = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,8 +270,28 @@ def _sorted_query_results(entries: tuple[QueryResultEntry, ...]) -> tuple[QueryR
     return tuple(sorted(entries, key=lambda e: (e.query_id, e.scope_id)))
 
 
+def _query_result_hash_json(entry: QueryResultEntry) -> dict[str, Any]:
+    payload = _to_jsonable(entry)
+    if entry.page_count is None:
+        payload.pop("page_count", None)
+    return payload
+
+
 def _sorted_channel_outcomes(entries: tuple[ChannelOutcomeEntry, ...]) -> tuple[ChannelOutcomeEntry, ...]:
     return tuple(sorted(entries, key=lambda e: e.channel))
+
+
+def _channel_outcome_hash_json(entry: ChannelOutcomeEntry) -> dict[str, Any]:
+    payload = _to_jsonable(entry)
+    for key, default in (
+        ("source_permission_status", "unknown"),
+        ("exact_target_status", "unknown"),
+        ("quarantine_status", "none"),
+        ("checkpoint_status", "unknown"),
+    ):
+        if payload[key] == default:
+            payload.pop(key)
+    return payload
 
 
 def _sorted_failed_refs(entries: tuple[FailedRefEntry, ...]) -> tuple[FailedRefEntry, ...]:
@@ -277,8 +302,14 @@ def compute_manifest_hash(manifest: GatherRunManifest) -> str:
     """D-16: sort arrays, exclude ``manifest_hash`` itself, hash the rest."""
     payload = _to_jsonable(manifest)
     payload.pop("manifest_hash", None)
-    payload["query_results"] = _to_jsonable(_sorted_query_results(manifest.query_results))
-    payload["channel_outcomes"] = _to_jsonable(_sorted_channel_outcomes(manifest.channel_outcomes))
+    payload["query_results"] = [
+        _query_result_hash_json(entry)
+        for entry in _sorted_query_results(manifest.query_results)
+    ]
+    payload["channel_outcomes"] = [
+        _channel_outcome_hash_json(entry)
+        for entry in _sorted_channel_outcomes(manifest.channel_outcomes)
+    ]
     payload["failed_refs"] = _to_jsonable(_sorted_failed_refs(manifest.failed_refs))
     payload["alert_ids"] = sorted(manifest.alert_ids)
     if manifest.legacy_cutoff_at is None:
@@ -305,7 +336,11 @@ def hash_ado_items(rows: list[dict[str, Any]]) -> str:
 def hash_query_results(entries: tuple[QueryResultEntry, ...]) -> str:
     """D-16: ``query_results.json`` is sorted by query ID/scope ID and hashed
     separately from the manifest's own (also-sorted) ``query_results[]``."""
-    return hash_content(canonical_json(_sorted_query_results(entries)))
+    return hash_content(
+        canonical_json(
+            tuple(_query_result_hash_json(entry) for entry in _sorted_query_results(entries))
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +577,7 @@ def _manifest_from_payload(payload: dict[str, Any]) -> GatherRunManifest:
             completeness_state=row["completeness_state"],
             oracle_result=row.get("oracle_result"),
             failure_category=row.get("failure_category"),
+            page_count=row.get("page_count"),
         )
         for row in payload.get("query_results", [])
     )
@@ -554,6 +590,10 @@ def _manifest_from_payload(payload: dict[str, Any]) -> GatherRunManifest:
             ado_call_count=row.get("ado_call_count", 0),
             retry_count=row.get("retry_count", 0),
             throttle_count=row.get("throttle_count", 0),
+            source_permission_status=row.get("source_permission_status", "unknown"),
+            exact_target_status=row.get("exact_target_status", "unknown"),
+            quarantine_status=row.get("quarantine_status", "none"),
+            checkpoint_status=row.get("checkpoint_status", "unknown"),
         )
         for row in payload.get("channel_outcomes", [])
     )

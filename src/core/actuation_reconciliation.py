@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Literal, Mapping
+from typing import Callable, cast, Literal, Mapping
 
 from src.core.audience_manifest import AudienceManifest, AudienceManifestEntry
 from src.core.ledger.durable_outbox_store import (
@@ -578,6 +578,7 @@ class ReconciliationObservation:
     disposition: ReconciliationDisposition
     reason: str
     remote_id: int | None = None
+    effect_reconciliation: EffectReconciliation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -612,6 +613,99 @@ def _qualified_reconciliation_capability(entry: OutboxEntry) -> OperationCapabil
     return capability
 
 
+def _authorized_effect_for_entry(entry: OutboxEntry) -> AuthorizedEffect:
+    operation, payload = _retained_operation(entry)
+    raw = payload.get("authorized_effect")
+    if not isinstance(raw, dict):
+        raise OutboxError(
+            "Effect reconciliation requires retained authorized-effect evidence"
+        )
+    try:
+        authorized = AuthorizedEffect.from_dict(raw)
+    except ValueError as error:
+        raise OutboxError("Retained authorized-effect evidence is invalid") from error
+    if (
+        authorized.program_id != payload.get("program_id")
+        or authorized.operation != operation
+        or payload.get("operation_intent_id") != authorized.intent_id
+        or payload.get("org") != authorized.tenant_id
+        or payload.get("project") != authorized.project
+    ):
+        raise OutboxError(
+            "Retained authorized-effect evidence does not bind the outbox intent"
+        )
+    return authorized
+
+
+def _reconciliation_binds_authorized_effect(
+    expected: AuthorizedEffect,
+    observed: EffectReconciliation,
+    *,
+    remote_id: int,
+) -> bool:
+    if not observed.completed:
+        return False
+    recipients = expected.intended_recipients or (None,)
+    if tuple(receipt.recipient for receipt in observed.receipts) != recipients:
+        return False
+    manifest_hash = audience_manifest_hash(expected.audience_manifest)
+    effect_hash = desired_effect_hash(expected.desired_value)
+    resulting_revisions: set[int] = set()
+    for receipt in observed.receipts:
+        if (
+            not isinstance(expected.precondition_observed_at, datetime)
+            or not isinstance(receipt.dispatched_at, datetime)
+            or not isinstance(receipt.observed_at, datetime)
+        ):
+            return False
+        precondition_at = _as_utc(expected.precondition_observed_at)
+        dispatched_at = _as_utc(receipt.dispatched_at)
+        observed_at = _as_utc(receipt.observed_at)
+        if (
+            precondition_at is None
+            or dispatched_at is None
+            or observed_at is None
+            or receipt.terminal_status != "completed"
+            or type(receipt.resulting_revision) is not int
+            or receipt.resulting_revision <= 0
+            or type(receipt.attempt_count) is not int
+            or receipt.attempt_count <= 0
+            or not receipt.provider_request_id
+            or not receipt.provider_request_id.strip()
+            or not receipt.provider_correlation_id
+            or not receipt.provider_correlation_id.strip()
+            or not receipt.response_hash
+            or not receipt.response_hash.strip()
+            or receipt.evidence_version != expected.evidence_version
+            or receipt.policy_version != expected.policy_version
+            or receipt.rollback_mechanism != expected.rollback_mechanism
+            or receipt.observed_value_hash != effect_hash
+            or dispatched_at < precondition_at
+            or observed_at < dispatched_at
+        ):
+            return False
+        resulting_revisions.add(receipt.resulting_revision)
+    if len(resulting_revisions) != 1:
+        return False
+    return all(
+        receipt.intent_id == expected.intent_id
+        and receipt.approval_id == expected.approval_id
+        and receipt.provider == expected.provider
+        and receipt.tenant_id == expected.tenant_id
+        and receipt.project == expected.project
+        and receipt.operation == expected.operation
+        and receipt.target_identity == expected.target_identity
+        and receipt.remote_effect_id == str(remote_id)
+        and receipt.desired_effect_hash == effect_hash
+        and receipt.preflight_revision == expected.preflight_revision
+        and receipt.execution_principal == expected.execution_principal
+        and receipt.audience_manifest_hash == manifest_hash
+        and receipt.authorized_audience_recipients
+        == expected.audience_manifest.included_person_entity_ids
+        for receipt in observed.receipts
+    )
+
+
 def _outbox_receipt(
     entry: OutboxEntry,
     *,
@@ -620,11 +714,14 @@ def _outbox_receipt(
     reconciled_by: str,
     reason: str,
     remote_id: int | None = None,
+    effect_reconciliation: EffectReconciliation | None = None,
+    compensation_operation: str | None = None,
 ) -> dict[str, object]:
     operation, payload = _retained_operation(entry)
     recorded_at = datetime.now(timezone.utc).isoformat()
     return {
         "schema_version": "1",
+        "program_id": payload.get("program_id"),
         "outbox_id": entry.outbox_id,
         "operation": operation,
         "operation_intent_id": payload.get("operation_intent_id"),
@@ -635,14 +732,27 @@ def _outbox_receipt(
         "terminal_status": terminal_status,
         "disposition": disposition.value,
         "remote_id": remote_id,
-        "remote_rev": None,
+        "remote_rev": (
+            effect_reconciliation.receipts[0].resulting_revision
+            if effect_reconciliation is not None
+            and effect_reconciliation.receipts
+            else None
+        ),
         "remote_response_hash": None,
         "reconciled_by": reconciled_by,
         "reconciled_by_marker": True,
         "reason": reason,
         "attempt_count": entry.attempt_count,
+        "fencing_token": entry.lease_fencing_token,
+        "compensation_required": False,
         "acknowledged_at": recorded_at,
         "recorded_at": recorded_at,
+        "effect_reconciliation": (
+            effect_reconciliation.to_dict()
+            if effect_reconciliation is not None
+            else None
+        ),
+        "compensation_operation": compensation_operation,
     }
 
 
@@ -680,27 +790,54 @@ def reconcile_uncertain_effect(
                 reason="confirmed provider observation lacks a valid remote id",
             )
         else:
-            receipt = _outbox_receipt(
-                entry,
-                disposition=observation.disposition,
-                terminal_status="completed",
-                reconciled_by=reconciled_by,
-                reason=observation.reason,
-                remote_id=observation.remote_id,
-            )
-            confirmed = mark_reconciled_confirmed(
-                db_path,
-                entry.outbox_id,
-                reconciled_by=reconciled_by,
-                receipt_json=json.dumps(
-                    receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-                ),
-            )
-            return EffectReconciliationOutcome(
-                entry=confirmed,
-                remote_id=observation.remote_id,
-                status="completed",
-            )
+            try:
+                authorized = _authorized_effect_for_entry(entry)
+            except OutboxError as error:
+                observation = ReconciliationObservation(
+                    disposition=ReconciliationDisposition.INCONCLUSIVE,
+                    reason=str(error),
+                )
+            else:
+                effect_reconciliation = observation.effect_reconciliation
+                remote_id = cast(int, observation.remote_id)
+                if (
+                    effect_reconciliation is None
+                    or not _reconciliation_binds_authorized_effect(
+                        authorized,
+                        effect_reconciliation,
+                        remote_id=remote_id,
+                    )
+                ):
+                    observation = ReconciliationObservation(
+                        disposition=ReconciliationDisposition.INCONCLUSIVE,
+                        reason="marker confirmation lacks exact authorized-effect evidence",
+                    )
+                else:
+                    receipt = _outbox_receipt(
+                        entry,
+                        disposition=observation.disposition,
+                        terminal_status="completed",
+                        reconciled_by=reconciled_by,
+                        reason=observation.reason,
+                        remote_id=remote_id,
+                        effect_reconciliation=effect_reconciliation,
+                    )
+                    confirmed = mark_reconciled_confirmed(
+                        db_path,
+                        entry.outbox_id,
+                        reconciled_by=reconciled_by,
+                        receipt_json=json.dumps(
+                            receipt,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ),
+                    )
+                    return EffectReconciliationOutcome(
+                        entry=confirmed,
+                        remote_id=observation.remote_id,
+                        status="completed",
+                    )
 
     if observation.disposition is ReconciliationDisposition.ABSENT:
         receipt = _outbox_receipt(
@@ -765,12 +902,22 @@ def request_compensation(
         raise OutboxError(
             f"Operation {operation!r} has no approved compensation capability"
         )
+    if not capability.compensation_operation:
+        raise OutboxError(
+            f"Operation {operation!r} has no named compensation operation"
+        )
+    inverse = lookup_capability(capability.compensation_operation)
+    if not isinstance(inverse, OperationCapability) or inverse.dispatchable:
+        raise OutboxError(
+            f"Operation {operation!r} has no registered offline compensation policy"
+        )
     return mark_compensation_required(
         db_path,
         outbox_id,
         owner=owner,
         fencing_token=fencing_token,
         reason=reason,
+        compensation_operation=capability.compensation_operation,
     )
 
 

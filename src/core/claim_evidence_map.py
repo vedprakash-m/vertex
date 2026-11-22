@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 
 class FindingKind(str, Enum):
@@ -26,6 +27,14 @@ class ClaimEvidenceLink:
     claim_id: str
     claim_text: str
     evidence_refs: tuple[str, ...]
+
+
+def grounding_refs(value: Any) -> tuple[str, ...]:
+    """Return shared grounding output, retaining compatibility with legacy claims."""
+    refs = getattr(value, "evidence_refs", ())
+    if refs:
+        return tuple(str(ref) for ref in refs)
+    return tuple(str(ref) for ref in getattr(value, "entity_refs", ()))
 
 
 @dataclass(frozen=True, slots=True)

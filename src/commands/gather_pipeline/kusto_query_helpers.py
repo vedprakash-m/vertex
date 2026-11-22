@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timezone
+import json
 from time import perf_counter
 from typing import Any, Callable
 from uuid import NAMESPACE_URL, uuid5
@@ -14,10 +15,12 @@ from src.commands.gather_pipeline.support import (
     parse_date,
     roll_query_value_history,
 )
+from src.commands.gather_workiq_helpers import _truncate_signal_text
 from src.core.integration_types import KustoResultSet
 from src.core.kusto_hydration import compute_kusto_slo_breach
 from src.core.kusto_ref_utils import extract_kusto_entity_refs as _extract_kusto_entity_refs
 from src.core.kusto_query_loader import query_history_contract_identity
+from src.core.kusto_result_contract import build_kusto_result_schema
 from src.core.kusto_signal_extractor import format_kusto_result_text
 from src.core.metric_binding_validator import coerce_metric_value, kusto_metric_result_error
 from src.core.models_v2 import KustoQuery, Signal
@@ -196,6 +199,10 @@ def build_kusto_signal(
     )
     event_timestamp = timestamp.isoformat()
     raw_ref = f"kusto:{query.id}:{event_timestamp}"
+    schema = build_kusto_result_schema(
+        rows,
+        expected_cardinality=query.expected_cardinality,
+    )
     return Signal(
         id=str(uuid5(NAMESPACE_URL, f"{program_id}|{raw_ref}|{query.id}")),
         timestamp=timestamp,
@@ -214,6 +221,92 @@ def build_kusto_signal(
             "validated": query.validated,
             "event_timestamp": event_timestamp,
             "row_count": len(rows),
+            "result_kind": schema.kind.value,
+        },
+    )
+
+
+def build_kusto_kpi_signal(
+    *,
+    query: KustoQuery,
+    rows: list[dict[str, Any]],
+    program_id: str,
+    as_of: datetime,
+    entity_refs: tuple[str, ...] | None = None,
+) -> Signal | None:
+    if not rows or kusto_metric_result_error(
+        query.id, query.expected_cardinality, rows,
+        metric_id=query.metric_id, result_column=query.result_column,
+        slo_target=query.slo_target, comparison=query.comparison,
+        result_limits=query.result_limits,
+    ):
+        return None
+    timestamp = kusto_event_timestamp(rows, as_of=as_of)
+    event_timestamp = timestamp.isoformat()
+    raw_ref = f"kusto_kpi:{query.id}:{event_timestamp}"
+    first_row = rows[0]
+    unbound = query.engine == "kusto" and query.metric_id is None
+    result_value = (
+        None
+        if unbound and (len(rows) != 1 or query.result_column is None)
+        else kusto_kpi_value(query, first_row)
+    )
+    observed_value = coerce_metric_value(result_value) if not unbound else None
+    schema = build_kusto_result_schema(
+        rows, expected_cardinality=query.expected_cardinality,
+    )
+    if query.engine == "kusto":
+        text = format_kusto_result_text(KustoResultSet(
+            query_id=query.id,
+            rows=tuple(rows),
+            observed_at=timestamp,
+            metric_id=query.metric_id,
+            result_column=query.result_column,
+            unit=query.unit,
+            slo_target=query.slo_target,
+            comparison=query.comparison,
+            observed_value=observed_value,
+            is_breach=compute_kusto_slo_breach(
+                observed_value, query.slo_target, query.comparison,
+            ),
+            row_count=len(rows),
+        ))
+    else:
+        label = query.label or query.section or query.id
+        text = f"KPI {label}: {result_value if result_value is not None else 'rows available'}"
+    workstream_id = query.workstream_ids[0] if query.workstream_ids else None
+    signal_entity_refs = merge_entity_refs(
+        provider_refs=entity_refs if entity_refs is not None else _extract_kusto_entity_refs(rows),
+        workstream_id=workstream_id,
+    )
+    return Signal(
+        id=str(uuid5(NAMESPACE_URL, f"{program_id}|{raw_ref}|{query.id}")),
+        timestamp=timestamp,
+        source="kusto_kpi",
+        program_id=program_id,
+        workstream_id=workstream_id,
+        workstream_ids=query.workstream_ids,
+        entity_refs=signal_entity_refs,
+        text=_truncate_signal_text(text),
+        raw_ref=raw_ref,
+        confidence=confidence_from_string(query.confidence),
+        metadata={
+            "query_id": query.id,
+            "cluster": query.cluster,
+            "database": query.database,
+            "engine": query.engine,
+            "validated": query.validated,
+            "event_timestamp": event_timestamp,
+            "row_count": len(rows),
+            "label": query.label,
+            "result_column": query.result_column,
+            "result_value": result_value,
+            "unit": query.unit,
+            "result_kind": schema.kind.value,
+            "result_json": (
+                json.dumps(first_row, default=str, sort_keys=True)
+                if not unbound or len(rows) == 1 else None
+            ),
         },
     )
 

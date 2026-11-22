@@ -210,8 +210,13 @@ def _compute_residual_text(transcript_text: str, deterministic_actions: tuple[Me
     exact line) from the transcript, leaving only the content the LLM tier
     should scan -- Section 8.10.4 step 2's "residual content," not the
     whole transcript again."""
-    matched_lines = {action.source_span.strip() for action in deterministic_actions}
-    kept_lines = [line for line in transcript_text.splitlines() if line.strip() not in matched_lines]
+    matched_lines = [action.source_span for action in deterministic_actions]
+    kept_lines: list[str] = []
+    for line in transcript_text.splitlines():
+        try:
+            matched_lines.remove(line)
+        except ValueError:
+            kept_lines.append(line)
     return "\n".join(kept_lines)
 
 

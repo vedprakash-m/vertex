@@ -4,7 +4,13 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from src.core.integration_types import KustoHydrationOutput, KustoResultSet
+from src.core.integration_types import (
+    KustoHydrationOutput,
+    KustoResultColumn,
+    KustoResultKind,
+    KustoResultSchema,
+    KustoResultSet,
+)
 from src.core.kusto_signal_extractor import (
     KustoSignalExtractor,
     format_kusto_result_text,
@@ -239,6 +245,85 @@ def test_kusto_signal_extractor_interprets_unbound_timeseries_without_inventing_
     )
     assert "increased" not in result.signals[0].text
     assert "BREACH" not in result.signals[0].text
+
+
+def test_kusto_signal_extractor_honors_typed_table_kind_over_row_heuristics() -> None:
+    rows = (
+        {"Timestamp": "2026-11-19T10:00:00Z", "Value": 8.0},
+        {"Timestamp": "2026-11-19T12:00:00Z", "Value": 9.5},
+    )
+    text = format_kusto_result_text(
+        KustoResultSet(
+            query_id="snapshot-table",
+            rows=rows,
+            observed_at=datetime(2026, 11, 19, 12, 30, tzinfo=timezone.utc),
+            row_count=2,
+            schema=KustoResultSchema(
+                kind=KustoResultKind.TABLE,
+                columns=(
+                    KustoResultColumn("Timestamp", "datetime"),
+                    KustoResultColumn("Value", "real"),
+                ),
+                row_count=2,
+                time_column=None,
+                value_columns=(),
+            ),
+        )
+    )
+
+    assert "[kind=table, interpretation=unqualified]" in text
+    assert "points=" not in text
+    assert "trend=" not in text
+
+
+def test_kusto_signal_extractor_preserves_typed_time_series_trend() -> None:
+    rows = (
+        {"ObservedAt": "2026-11-19T12:00:00Z", "Latency": 9.5},
+        {"ObservedAt": "2026-11-19T10:00:00Z", "Latency": 8.0},
+    )
+    text = format_kusto_result_text(
+        KustoResultSet(
+            query_id="typed-latency",
+            rows=rows,
+            observed_at=datetime(2026, 11, 19, 12, 30, tzinfo=timezone.utc),
+            row_count=2,
+            schema=KustoResultSchema(
+                kind=KustoResultKind.TIME_SERIES,
+                columns=(
+                    KustoResultColumn("ObservedAt", "datetime"),
+                    KustoResultColumn("Latency", "real"),
+                ),
+                row_count=2,
+                time_column="ObservedAt",
+                value_columns=("Latency",),
+            ),
+        )
+    )
+
+    assert "[kind=timeseries, interpretation=unqualified]" in text
+    assert '"ObservedAt":"2026-11-19T10:00:00Z","Latency":8.0' in text
+    assert "trend=increasing" in text
+    assert "trend=" not in text.replace("trend=increasing", "")
+
+
+def test_kusto_signal_extractor_refuses_typed_schema_drift_without_values() -> None:
+    text = format_kusto_result_text(
+        KustoResultSet(
+            query_id="drifted",
+            rows=({"Name": "must-not-surface"},),
+            observed_at=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+            row_count=1,
+            schema=KustoResultSchema(
+                kind=KustoResultKind.TABLE,
+                columns=(KustoResultColumn("Count", "long"),),
+                row_count=1,
+            ),
+        )
+    )
+
+    assert "[kind=table, interpretation=ambiguous]" in text
+    assert "refusal=schema drift" in text
+    assert "must-not-surface" not in text
 
 
 def test_kusto_signal_extractor_uses_declared_measure_for_unbound_timeseries() -> None:

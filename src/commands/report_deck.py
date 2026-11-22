@@ -22,9 +22,10 @@ from src.core.milestone_engine import (
     summarize_milestone_target_date_history,
 )
 from src.core.models import DeltaKind, DeltaSet, DimensionRisk, ItemDelta, RiskLevel, ScorecardDelta, WorkItem
-from src.core.models_v2 import Assumption, AssumptionStatus, DecisionEntry, DecisionStatus, Milestone, MilestoneAssessment, MilestoneStatus, RiskEntry, RiskStatus
+from src.core.models_v2 import Assumption, AssumptionStatus, DecisionEntry, DecisionStatus, Milestone, MilestoneAssessment, MilestoneStatus, RiskEntry
 from src.core.program_reality import FactAssessment, ProgramReality
 from src.core.risk_register_engine import assess_risk_staleness, compute_risk_score, risk_summary_sort_key
+from src.core.risk_dedupe import active_risk_entries
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.store_factory import build_signal_store_for_program_id, build_trajectory_store_for_program_id
 from src.core.telemetry_summary import build_program_telemetry_summary
@@ -240,10 +241,14 @@ def _build_deck_risk_rows(
     reality: ProgramReality | None = None,
 ) -> tuple[DeckRiskRow, ...]:
     resolved_reality = reality or ProgramReality.load(program_id, programs_root=programs_root)
+    all_risk_assessments = tuple(resolved_reality.risks())
+    active_ids = {entry.id for entry in active_risk_entries(tuple(
+        assessment.record for assessment in all_risk_assessments
+    ))}
     risk_assessments = tuple(
         assessment
-        for assessment in resolved_reality.risks()
-        if assessment.record.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}
+        for assessment in all_risk_assessments
+        if assessment.record.id in active_ids
     )
     ordered_risk_assessments = sorted(
         risk_assessments,

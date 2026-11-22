@@ -7,6 +7,12 @@
 
 ## Changelog
 
+- Last updated: 2026-11-21 — RELO-W2/W3 adds hydrated-evidence checkpoints, shared fail-closed completeness, bounded WorkIQ/SharePoint restart semantics, typed Kusto interpretation and cancellation, and explicit scheduled-acquisition degradation. Live provider permission, revocation and operational evidence remain separate.
+
+- Last updated: 2026-11-21 — RELO W2/W3 local acquisition and capture acceptance is implemented: ADO evidence/checkpoint recovery, anti-entropy and shared completeness; immutable scope/binding/snapshot invalidation; bounded native-ID WorkIQ continuation with unqualified-time quarantine; typed Kusto evidence and cooperative cancellation; SharePoint restart/ACL/deletion fixtures; and fail-closed optional/scheduled readiness. Live provider, owner and scheduled-principal evidence remain independently gated.
+- Last updated: 2026-11-21 - Completed the RELO-W4 local implementation wave: confirmed verdict authority across report, cockpit, fleet, triage, brief, escalation and review; attributable sprint planning; canonical grounded action extraction; enforced communication budgets; shared claim release grounding; domain lifecycle and bounded historical relevance; verified maintained-context reply closure; and an authority-labelled, fingerprint-revalidated exception/evaluation protocol. D9/owner/blind/live and human WCAG/proficiency evidence remain separate qualification gates (§9.8-§9.12, §18).
+- Last updated: 2026-11-21 — RELO-W5's local governed-actuation architecture now has operation-scoped semantic binding, exact payload/approval/principal/evidence marker reservations, exact authorized-effect reconciliation, authoritative terminal receipts, `succeeded`/`audited` restart, deterministic record/replay fault coverage and named compensation policy. Only `create_task.v1` remains dispatch-capable; unqualified ADO mutations and Teams/email remain fail-closed, and real-provider, recipient-delivery and compensation execution qualification remain separate evidence gates.
+- Last updated: 2026-11-21 — Add RELO-W6 local qualification enrollment and evidence contracts for dual-label study, matched cycles, routing/economics, blind UAT, dependency-gated retirement, canonical traceability, maturity transitions, governed feedback, continuity holdouts, scale/restore profiles and terminal-state predicates (§18.1, §19.2). These tools enroll and verify owner-selected evidence; live labels, client/projector UAT, private-data review, owner decisions, provider qualification and restore execution remain separate acceptance gates.
 - Last updated: 2026-11-19 — Knowledge candidates cover the eight required maintained-context classes and retain explicit OS-principal review/renewal plus verified resolution history; live policy population and qualification remain gated (§7.4, §10.2).
 - Last updated: 2026-11-19 — Ratified RELO-D19 (ADR-0020 decision 17): only typed, approved, evidence-linked feedback remains reusable. Confirm now records hash-only governed telemetry, while offline proposals require privacy, contamination, development, frozen-holdout, human-approval and shadow gates before promotion; rollback restores a governed prior version. Raw edit-pattern learning and confirm-time distillation are no longer runtime prompt inputs.
 
@@ -279,9 +285,9 @@ BL-L1: complete (2026-07-22)
 | **OperationTrace** | A purely internal, Vertex-generated `correlation_id` linking every artifact one logical pipeline run produces (source acquisition, fact write, context manifest, AI release decision, rendered output, actuation intent/receipt) into one queryable trace. Never touches an external system; observability only, never a write blocker. See §12.2a of `vertex-tech-spec.md`. |
 | **Solicitation** | A targeted, human-approved question Vertex proposes to a stakeholder when required evidence is stale or missing (e.g. no recent update on a claim nearing its due date). Never auto-sent — routed through the same nudge/Teams/email review-and-approval pipeline as any other outbound draft. A reply feeds back into re-evaluating the originating context gap. |
 
-**Outbox lifecycle admission:** A stored actuation cannot skip from pending/leased to completion, redispatch recorded success, or downgrade a dispatched effect to automatically retryable. The shared store checks transition order transactionally after owner/token admission; rejected transitions preserve retained evidence. Qualified W5 admission additionally rejects changed approval revision/payload, stale evidence, disabled scope/rule, exhausted rate/blast capacity, target/revision/state drift, an existing marker/effect or a conflicting active intent. Revocation atomically cancels pending/leased children and exposes dispatched children for reconciliation. Existing local registry delivery may still complete a leased event directly. This is deterministic admission/state integrity, not proof of receipt completeness, recipient/target correctness or effectively-once delivery across all providers.
+**Outbox lifecycle admission:** A stored actuation cannot skip from pending/leased to completion, redispatch recorded success, or downgrade a dispatched effect to automatically retryable. The shared store checks transition order transactionally after owner/token admission; rejected transitions preserve retained evidence. Qualified W5 admission additionally binds the retained authorized-effect document to exact approval ID/principal, policy, evidence snapshot, desired value, operation, destination and semantic marker; rejects changed approval revision/payload, stale evidence, disabled scope/rule, exhausted rate/blast capacity, target/revision/state drift, a changed marker/effect reservation or a conflicting active intent; and cancels pending/leased children atomically on revocation or expiry. Confirmed reconciliation requires exact target, value, principal, recipient/manifest and resulting revision evidence. `succeeded` and `audited` rows restart from the retained authoritative receipt without another provider callback. This is complete local state integrity, not live provider qualification or proof of externally visible delivery.
 
-**Create acknowledgement durability:** Newly completed create-task dispatch retains an append-once provider acknowledgement receipt atomically with its succeeded transition in the existing outbox database. It records remote ID, exact payload hash and available identity/destination/response evidence independently of the secondary ledger. A post-request response without a positive integer/nonboolean work-item ID is uncertain, not completed or automatically retryable. Legacy rows are not backfilled. This bounded acknowledgement does not certify full terminal receipts, resulting revision, approval/principal/audience or desired-effect correctness.
+**Create acknowledgement durability:** Completed create-task dispatch retains an append-once provider acknowledgement receipt atomically with its succeeded transition. It records remote ID/revision, exact payload hash, approval/authorized-effect reconciliation and compensation intent independently of the secondary ledger. Terminal, failure, reconciliation and compensation transitions retain atomic state receipts. A post-request response without a positive integer/nonboolean work-item ID remains uncertain, not completed or automatically retryable. Restart from `succeeded` or `audited` consumes the same retained receipt; a changed/missing receipt refuses. No legacy rows are backfilled, and real remote acknowledgement, authenticated provider principal and cross-provider delivery remain separately qualified.
 
 **Observed create revision:** First-create acknowledgements, durable receipts and applied manifests retain the provider's positive integer revision, not a guessed `1`. Missing/null revision remains unavailable; a malformed supplied revision is uncertain and cannot complete or automatically retry. This adds evidence to the acknowledgement contract, not a full remote-state proof or certification of legacy/recovery-adoption revisions.
 
@@ -295,7 +301,9 @@ BL-L1: complete (2026-07-22)
 
 **Requested create-field recovery:** Recovery now also compares every additional field selected by the existing create-patch builder in the same batch read. Missing, malformed or mismatching requested fields block adoption before success audit or dispatch. Assignees require a matching explicit string/`uniqueName` identity, not display-name inference; other additional fields use type-and-value equality. Title normalization and intent-tag membership remain unchanged. This supersedes title/marker-only recovery for new observations; conservative refusal of provider-normalized strings, proposal/retained-intent binding, remote consistency and authoritative reconciliation remain separate requirements.
 
-**Retained create binding:** New attempts persist their original outbox reference before dispatch. Recovery must match that reference's current program/destination/intent key and the retained row's domain, correlation and exact serialized proposal/payload before provider lookup. Missing or changed retained evidence refuses with reconciliation guidance, not a new create or adoption. Missing intent on an attempted/referenced entry cannot generate a replacement identity. Legacy manifests without a reference remain supported but unqualified for this binding; no authenticated approval, tamper resistance, legacy backfill or uncertain-row closeout is implied.
+**Retained create binding:** New attempts persist their original outbox reference before dispatch. Recovery must match that reference's current program/destination/intent key and the retained row's domain, correlation and exact serialized proposal/payload before provider lookup. Semantic effect and approved-marker bindings are atomic first-writer reservations, and a repeated semantic effect under another intent returns the existing outbox owner rather than enqueueing a second provider request. Missing or changed retained evidence refuses with reconciliation guidance, not a new create or adoption. Missing intent on an attempted/referenced entry cannot generate a replacement identity. Legacy manifests without a reference remain supported but unqualified; no authenticated approval, provider fencing, live mutation permission, or legacy backfill is implied.
+
+**RELO-W5 local qualification boundary:** A deterministic synthetic harness records/replays before-lease, after-lease, definite-failure, response-loss confirmed/absent/conflict, pre-receipt crash, succeeded/audited restart, semantic duplicate and compensation scenarios. Replay assertions cover final state, durable receipts, provider callbacks/effects and alerts; zero duplicate provider effects are permitted in the synthetic matrix. The operation registry includes ADO mutation and Teams/email shapes for identity/admission/policy, but only `create_task.v1` is dispatchable and its real ADO transport remains separately gated. Teams/email markers, recipient delivery, irreversible-send compensation and live provider identity/effect semantics still require provider-owned evidence before any parent qualification claim.
 
 **Create audit review recovery:** Verified create recovery can restore a missing review when the exact target audit signal was saved before a review-write failure. It preserves the original signal and every existing review decision, including dismissed/deferred operator decisions. Failed repair remains explicit and does not mark the manifest applied; unverified remote state cannot repair the review. This is bounded missing-review recovery, not an atomic signal/review/manifest transaction or historical sweep.
 
@@ -972,6 +980,9 @@ Three contract files define structural rules:
 - Injected Kusto executors do not bypass authored row admission at hydration, direct/KPI signal/history, report primary/fallback or live chart-gather boundaries. Refused rows cannot become successful observations, refresh successful history/time or reach chart sanitization/cache writes. Previous valid history/cache bytes survive refusal and independent valid queries continue. Empty consumer-only lists and previously cached artifacts do not establish original SDK schema/completeness or current contract lineage.
 - Chart gather loads cache from the selected workspace only. Legacy undeclared zero-ok entries require exact program/query identity and nonnegative age below the query TTL; retention grace does not extend freshness. Declared limits or scalar-required cardinality require live admission until cache lineage exists. A refused cache write is an explicit integration failure, never a successful written-row claim; previous valid bytes and independent queries remain.
 - Chart-cache reuse also requires the current query-definition hash, binding source/KQL, render mode/renderer/configuration and authored admission. Gather and report writeback share this identity; missing/null legacy hashes remain readable but require live refresh, and malformed hashes are refused explicitly. Definition equality is not proof of original-result completeness or permission.
+- Gather commit, completeness and publication paths retain bounded evidence for exact source target, permission, checkpoint, page/quarantine and snapshot binding. Missing or degraded evidence is unknown/partial, never an inferred FULL population.
+- ADO detail checkpoints are per provider/item/subresource and persist canonical evidence atomically with verification. A crash after gather promotion is recoverable from replayable intent, and bounded anti-entropy refresh prevents stale checkpoints from suppressing independently changed history.
+- Kusto typed results preserve scalar/table/time-series semantics and compact value/trend/SLO evidence. Cooperative cancellation is bounded; an uncooperative timeout stops later work rather than silently overlapping provider calls.
 
 **UIL Channel Abstraction (Phases 0–5 complete):**
 
@@ -1079,7 +1090,7 @@ For newsletter editions, `--dry-run --projector-preview` emits a separate projec
 - **🟢 Ready:** Completed narratives, set overrides, passing quality gates
 - **Draft readiness score:** Percentage with breakdown
 
-**Maintained-context attention (RELO-W4.11x):** Triage, cockpit and reviewer surfaces project existing active context-gap observations alongside pending context revisions. The shared projection uses the selected program root and an explicit evaluation time; it introduces no approval database or additional history writes. Gaps remain distinct from proposals, with unknown owner/due information explicit. Supported structural repairs leave active attention under existing ranking rules; evaluation, drafts and replies do not renew review or establish authenticated resolution. Unreadable gap history is visibly unavailable, not healthy/empty. Context limitations do not change business-health scoring.
+**Maintained-context attention (RELO-W4.11x):** Triage, cockpit and reviewer surfaces project existing active context-gap observations alongside pending context revisions. The shared projection uses the selected program root and an explicit evaluation time. Gaps remain distinct from proposals, with unknown owner/due information explicit. A reply is bound to its packet, gap, source hash and retained baseline; origin verification and approval remain separate. `context close-reply` records closure only after an authorized OS principal verifies that the accepted reply value is present in the manually maintained target. A later target reversion reopens the gap. Evaluation, import and draft creation alone never renew review or close a gap. Unreadable gap history is visibly unavailable, not healthy/empty. Context limitations do not change business-health scoring.
 
 **Authored review coverage (RELO-W4.11y):** Read-only inventory makes discovered authored files without an existing review rule visible as unassessed or unclassified. Containers are not reviewed documents, and shared/entity/field domains that were not enumerated remain explicitly unassessed. This metadata-only scope does not parse content, certify review currency, infer complete context coverage or change freshness/publish policy.
 
@@ -1195,7 +1206,7 @@ onboarding also produce unknown trend. Existing trend detail discloses
 incomplete coverage in all five formats. Keep publication staleness and
 context diagnostics separate; this is not live source or fleet qualification.
 
-**Observe-only program verdict:** Ordinary program-backed reports retain a
+**Shared retained program verdict:** Ordinary program-backed reports retain a
 versioned deterministic verdict observation in local manifest metadata,
 bound to the existing report/capture and its complete observation inputs.
 It preserves known adverse risk and applies Medium/High schedule floors
@@ -1203,8 +1214,12 @@ at miss probability >=0.50/>=0.80; overdue targets and past p50 dates floor
 at Medium. Terminal items do not acquire overdue findings. Unqualified
 capture/trust/validation/policy and other unevaluated inputs remain explicit
 gaps: no Low/Done clearance, confidence NONE and unknown completion.
-This does not replace rendered health, change publication gates, generate
-authoritative asks or authorize actions; all-consumer migration is pending.
+Confirmed archive observations are the cross-surface authority for report
+health, cockpit, fleet, triage, brief, escalation, review and doctor.
+Unconfirmed draft observations remain bounded advisory fallback only where no
+confirmed authority exists. The shared selector fails closed on corrupt or
+foreign retained evidence. A verdict display still does not change publication
+gates, create authoritative asks or authorize an external action.
 New ordinary drafts additionally retain the observation envelope's canonical
 content hash in draft state. Confirmation verifies that reference, the
 capture/snapshot/input bindings and the content hashes before consuming the
@@ -1226,7 +1241,11 @@ Report risk selection also retains sorted duplicate, merge, fork, cycle and
 dangling lifecycle findings as warnings. They do not drop, merge or mutate
 risks, and cockpit withholds its active-risk aggregate as Unknown when an
 explicit duplicate key affects multiple active risks or a conflicting active
-lifecycle is present. Derived-key similarity remains warning-only.
+lifecycle is present. Derived-key similarity remains warning-only. An
+inactive duplicate with exactly one active canonical successor may move to
+validated risk-archive history only after its source, claim, action, milestone,
+entity and outcome lineage is merged into the canonical active record; archive
+reads remain separate from current risk truth.
 
 Selected milestone records, computed assessments and load diagnostics also
 participate in the observation. Computed Missed floors schedule/health at
@@ -1238,6 +1257,23 @@ from the milestone heuristic's uncertainty placeholder. Missing/ambiguous
 assessments, coverage and input qualification remain explicit; neither
 completed milestones nor critical-path compatibility flags establish global
 Done, validated completion or duration-criticality.
+
+**Planning and action extraction (RELO-W4.4/W4.5):** Sprint planning is an
+executable observation over attributable ADO story points, capacity and
+completed-sprint point totals. It refuses cycles, never overcommits point
+capacity and never substitutes item throughput for missing history. Meeting
+and signal action extraction share one marker grammar. Valid marker identities
+and exact source spans are preserved, malformed markers remain residual input,
+and LLM output is admitted only with verbatim residual grounding and approved
+work-item references.
+
+**Closed-loop maintenance (RELO-W4.9/W4.10):** Risk, dependency, decision,
+action, claim and intervention histories retain breach, escalation, mitigation
+effectiveness, revisit and closure events in bitemporal program facts.
+Long-horizon context selects at most eight relevant accepted terminal outcomes
+for requested entity references; it is bounded, time-travel aware and never a
+substitute for an unbounded prompt replay. Missing, unreadable historical
+evaluation fails as unavailable rather than silently degrading to empty.
 
 **ADO item normalization:** Hydration, report/gather/freshness, child items and
 analytics history share one policy. Terminal Closed/Done/Resolved/Completed/
@@ -1289,7 +1325,7 @@ When no meaningful ADO source timestamp is known, source age is unknown—not th
 
 **Privacy boundary:** ADO nudge comments never quote WorkIQ content. Use neutral language: "Recent non-ADO activity was detected for this item."
 
-**Nudge cooldown:** Max 1 nudge per item per `cooldown_days` (default 14 days; configurable in `hygiene.cooldown_days`).
+**Communication budget and nudge cooldown:** Every governed audience artifact is capped at five material asks/changes by default, overridable with `communication_budget.max_asks`. Send consumers enforce that cap and the selected cooldown before a real send, attestation or confirmed-send record. Nudge item cooldown remains separately anchored to the attested/imported send record and defaults to 14 days. Dry-run surfaces deterministic observe findings without mutation.
 
 **Vitality trend:** Aggregate vitality stored in `vitality.json` on confirm. Trend computed from confirmed archive history.
 
@@ -1351,7 +1387,7 @@ An applied create retains its remote outcome when a subsequent local action-asso
 
 **Extraction:** During `vertex confirm`, claims and decision-asks are extracted from narratives through an AI-first path when AI is enabled, with governed regex fallback retained for calibration, resilience, and explicit reproducibility runs. Max 20 claims per confirm. Deduplication against existing open claims (same entity_refs + similar due_date within ±7 days).
 
-**Claim evidence release rule:** Before confirmation, only `WI:<id>` references from the captured confirm snapshot are approved claim evidence. Missing evidence, unsupported claims and dangling or other unapproved reference families hard-block release through `RELO-QG-05`; the gate cannot be forced, does not rewrite claims, and decision asks remain outside this claim-only rule (RELO-W4.8).
+**Claim evidence release rule:** Claim and decision-ask DTOs and persisted rows retain one compatibility-safe `evidence_refs` grounding field, with `entity_refs` retained for existing readers. Before confirmation, only `WI:<id>` references from the captured confirm snapshot are approved claim evidence. Missing evidence, unsupported claims and dangling or other unapproved reference families hard-block release through `RELO-QG-05`; the gate cannot be forced, does not rewrite claims, and decision asks remain outside this claim-only rule (RELO-W4.8).
 
 **Lifecycle:** Claims start as `open`. Status updates (`met`, `contradicted`, `stale`) are appended to `claims.jsonl` as sidecar entries. Claims are never auto-closed — author resolves via `vertex claims resolve`.
 
@@ -1480,7 +1516,7 @@ The L1 engine provides a typed telemetry substrate for hypothesis-driven program
 
 **Composition:** a `CockpitSnapshot` (see Glossary) aggregates program status, source health, AI-generated intelligence (release-gated `ProgramSynthesis` through-line, when one exists), operational economics (AI spend/tier routing), earned autonomy/trust state per proposal class, and time-savings value — each built by its own best-effort reader so one subsystem's failure never blanks the whole cockpit.
 
-**Local actuation evidence (RELO-W4.12c, in progress):** Fresh cockpit reliability counts describe the selected program's existing actuation journal, not all unfinished work or provider outcomes. Missing or unsafe journal evidence is unavailable rather than zero; observed uncertain, dead-letter, terminal-failure and compensation-required states remain visible as warnings. SQLite may create or update a WAL shared-memory sidecar during a read; its acceptability remains unresolved. This does not complete the current exception inbox or establish reconciliation or operational readiness.
+**Exception inbox and evaluation protocol (RELO-W4.12/W4.13):** `cockpit exceptions` is the local authority-labelled inbox over current risks, retained action history, claims, drafts, approvals, incidents, knowledge proposals, context gaps and bindings. Every item carries evidence, observed diff/preview, authority/availability, a fingerprint-bound read-only revalidation command and explicit no-mutation scope. Claim/action journals refuse read repair; retained action segments are read in recorded order while pruned history remains unevaluated. The HTML protocol is static, keyboard-readable and has no action controls. `readiness vertical-evaluate` evaluates deterministic status/dependency/meeting-close factual non-inferiority and cost/review-time evidence, and returns not-qualified when D9, owner, approved blind, live or real-program evidence is absent. Mechanical and synthetic contracts do not establish WCAG human audit, provider readiness or measured operator proficiency.
 
 **Value measurement is honesty-gated**, not aspirational: a workflow may only claim a `measured` time-savings figure after 8+ real, timer-based before/after `WorkflowMeasurement` pairs clear a bootstrap statistical confidence interval (`TimeSavingsCertification`). Below that evidence bar, value renders as `proxy` or `calibrated`, explicitly labeled — never silently presented as a hard number a leader could cite without caveat.
 
@@ -1797,6 +1833,8 @@ REV re-bases M365 discovery on delegated, deterministic Graph API surfaces so th
 **Phase 2 (implemented):** LLM extractor (`LLMRevExtractor`, `--extractor llm`) + judge harness (`judge_extractions()`); quality-floor gate (G-xtract-prec ≥80%, G-accept-prec ≥85%, per-type recall ≥50%, Cohen's kappa ≥0.70); corpus export (PII-scrubbed backup bundle); extraction + judge caches (90d TTL + LRU-500); pre-commit hook; gap-fill loop driver (`_drive_gap_lifecycle`); processed-dir rotation; local-import health telemetry in `doctor --rev-health`.
 
 **Phase 3 multi-surface (implemented, 2026-06-24):** calendar `.ics` events via `IcsEnumerator`+`IcsHydrator` (`icalendar>=5.0`; SEQUENCE-highest VEVENT wins; RRULE expansion ≤52; cancellation; organizer CN only — no `mailto:` per OA-9 privacy); SharePoint/local docs via `LocalFileEnumerator`+`LocalFileHydrator` (`python-docx>=1.1`; VBA macro denial; `pypdf` PDF text extraction; `pdf_no_text` quarantine). Teams export **BLOCKED** pending enterprise ZIP format feasibility spike (P3-2a).
+
+**RELO W2/W3 local acceptance:** `vertex rev run` now keeps exact native/cursor/tombstone/occurrence semantics through bounded restarts. Records rejected for identity or source time remain diagnostics only; a successful valid empty response is not mailbox completeness, and nullable chronology is retained only for independently admitted evidence. SharePoint fixture acquisition records ACL/deletion state plus version/offset provenance and is restart-safe. These mechanisms do not grant live provider access or certify population coverage.
 
 #### 12.7.2 Functional requirements (FR-PCI-1..13)
 
@@ -2286,6 +2324,10 @@ These are properties that must hold at all times. Violations are bugs.
 
 **Two-lane evaluation harness:** promotion/demotion evidence is gathered through two separated lanes, per `(program_id, proposal_class)`. A **CI regression lane** gates every code/prompt merge against a synthetic fixture corpus — fast, deterministic, always-on. A **human-holdout lane** gates enforce-mode promotion itself — real labeled outcomes from a human reviewer, never a synthetic fixture. An LLM-as-judge may assist the holdout lane's diagnostics (surfacing likely-mislabeled cases for human review) but is never treated as sole ground truth for a promotion decision — only a human holdout label counts. `vertex cockpit`'s trust view (§9.28) surfaces current level, precision, acceptance rate, and promotion evidence per proposal class.
 
+**RELO-W6 qualification evidence:** `scripts/verify_relo_w6.py` creates value-free enrollment packets and mechanically verifies RELO-W6.1-W6.12 without collecting or authenticating private evidence. Study enrollment requires frozen dual-label/model-assisted labeling, explicit human adjudication, risk and dependency strata, post-RELO source diversity, and at least eight complete matched cycles. Routing enrollment keeps deterministic/local coverage separate from cache reuse and reports the unavailable or below-floor case rather than claiming avoidance. Blind output UAT records only artifact identity and checklist state locally; live Outlook/projector observations and reviewer decisions remain owner evidence.
+
+Retirement packets must name replacement paths, caller inventories, shadow/tests, dependency readiness and rollback evidence. Maturity transitions are append-only per proposal/action class; governed feedback remains typed and cannot self-update. Continuity, scale/restore and terminal-state packets fail closed on missing frozen profiles, hash parity, owner decisions or operator proficiency. A mechanically complete packet is `owner_review`, not production qualification; synthetic tests never satisfy a live evidence gate.
+
 ---
 
 ## §19 Success Criteria
@@ -2327,6 +2369,7 @@ Evidence refresh: full execution evidence is recorded in `governance/test-eviden
 | `vertex doctor --kb` validates knowledge integrity | No structural errors |
 | Live dry-run smoke completes | `vertex report --edition acme_weekly --dry-run` succeeds |
 | V-11 production readiness | All coding-implementable workstreams (WS-1…WS-25) code-complete; contract tests + unit tests passing (exact counts derived at CI time by `scripts/derive_spec_counts.py`; as of 2026-06-16: ~1,259 contracts + ~4,700+ unit); remaining items are OPERATOR/HUMAN GATE/CALENDAR gates documented in `.archive/specs/gaps.md` (local-only) |
+| RELO-W6 local qualification enrollment | Every W6.1-W6.12 packet has a strict template/verifier; nonlocal owner/live/provider/UAT/restore evidence remains explicitly unassessed |
 
 ### 19.3 Phase Scope Boundaries
 

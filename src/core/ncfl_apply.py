@@ -43,7 +43,12 @@ from src.core.ncfl_apply_policy import (
 from src.core.ncfl_models import ContextUpdateProposal
 from src.core.exceptions import ConfigError, StateError
 from src.core.knowledge_store import get_shared_knowledge_root
-from src.core.ncfl_proposal_store import _queue_lock, _update_proposal_status, load_proposals
+from src.core.ncfl_proposal_store import (
+    _queue_lock,
+    _update_proposal_status,
+    load_proposals,
+    reply_origin_verification_error,
+)
 from src.core.ncfl_store_policy import is_ncfl_apply_writable_target_store
 from src.core.people_registry_identity import load_registry_manifest
 from src.core.people_registry_writer import (
@@ -230,7 +235,30 @@ def _apply_retained_proposal(
             action="refused_unbound_approval",
             note="Retained proposal acceptance changed or is unavailable; re-review before applying.",
         )
-    return _apply_bound_proposal(matches[0], actor=actor, programs_root=programs_root, dry_run=dry_run)
+    retained = matches[0]
+    if retained.source_type == "context_gap_reply":
+        origin_error = reply_origin_verification_error(
+            retained, programs_root=programs_root,
+        )
+        if origin_error is not None:
+            return NcflApplyResult(
+                proposal_id=proposal.proposal_id,
+                target_store=proposal.target_store,
+                target_key=proposal.target_key,
+                target_field=proposal.target_field,
+                action="refused_unbound_approval",
+                note=origin_error,
+            )
+        if retained.solicitation_id is None or retained.gap_fingerprint is None:
+            return NcflApplyResult(
+                proposal_id=proposal.proposal_id,
+                target_store=proposal.target_store,
+                target_key=proposal.target_key,
+                target_field=proposal.target_field,
+                action="needs_rereview",
+                note="Reply proposal is missing its solicitation or gap binding; re-import and re-review it.",
+            )
+    return _apply_bound_proposal(retained, actor=actor, programs_root=programs_root, dry_run=dry_run)
 
 
 def _apply_bound_proposal(

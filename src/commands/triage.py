@@ -58,6 +58,7 @@ from src.core.program_fact_store import (
     FactReviewState,
 )
 from src.core.program_reality import ProgramReality
+from src.core.program_verdict import load_authoritative_program_risk
 from src.core.store_factory import build_signal_store_for_program_id, build_trajectory_store_for_program_id
 from src.core.nudge_state_store import load_nudge_state
 from src.core.overrides_store import load_overrides, merge_overrides
@@ -1260,6 +1261,9 @@ def _build_cross_program_dependency_understatement_lines(
 
 
 def _load_latest_program_overall_risk(program_id: str, *, programs_root: Path) -> RiskLevel | None:
+    verdict_risk = load_authoritative_program_risk(program_id, programs_root=programs_root)
+    if verdict_risk is not None:
+        return verdict_risk
     program_path = programs_root / program_id / "program.yaml"
     if not program_path.exists():
         return None

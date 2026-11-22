@@ -62,6 +62,36 @@ def test_lifecycle_fields_round_trip_yaml_and_fact_projection(tmp_path: Path) ->
     assert {name: getattr(projected, name) for name in _LIFECYCLE} == _LIFECYCLE
 
 
+def test_program_context_risk_projection_preserves_lifecycle_fields(tmp_path: Path) -> None:
+    from src.core.program_context import _parse_risk, _risk_entry_from_model
+
+    risk = _risk(**_LIFECYCLE)
+    root = tmp_path / "programs"
+    save_risk_register("acme", (risk,), programs_root=root)
+    projected, = project_risk_entries(load_program_facts("acme", programs_root=root, fact_types=("risk.entry",)))
+
+    for context_risk in (_risk_entry_from_model(projected), _parse_risk(_risk_entry_to_record(risk))):
+        assert {name: getattr(context_risk, name) for name in _LIFECYCLE} == _LIFECYCLE
+
+
+def test_current_program_fact_projection_never_imports_archived_risk_history(tmp_path: Path) -> None:
+    root = tmp_path / "programs"
+    active = _risk("active", title="Active")
+    archived = _risk("archived", title="Archived", status=RiskStatus.CLOSED)
+    save_risk_register("acme", (active, archived), programs_root=root)
+
+    from scripts.archive_obsolete_risks import execute_archive
+
+    archived = replace(archived, kind="candidate")
+    save_risk_register("acme", (active, archived), programs_root=root)
+    execute_archive("acme", programs_root=root)
+
+    projected = project_risk_entries(load_program_facts(
+        "acme", programs_root=root, fact_types=("risk.entry",),
+    ))
+    assert [risk.id for risk in projected] == ["active"]
+
+
 def test_unset_fields_keep_saved_yaml_byte_identical(tmp_path: Path) -> None:
     root = tmp_path / "programs"
     save_risk_register("acme", (_risk(),), programs_root=root)

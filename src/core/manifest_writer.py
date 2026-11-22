@@ -131,6 +131,14 @@ def build_run_evidence_snapshot(
         or pin.content_sha256 != fact_snapshot_content_sha256(snapshot.facts)
     ):
         raise ConfigError("Run evidence retained fact content does not match its pin.")
+    if any(fact.program_id != pin.program_id for fact in snapshot.facts):
+        raise ConfigError("Run evidence retained fact entity does not match its program.")
+    if any(
+        _foreign_program_entity_ref(ref, pin.program_id)
+        for fact in snapshot.facts
+        for ref in fact.entity_refs
+    ):
+        raise ConfigError("Run evidence retained fact entity binding is invalid.")
     if (
         (gather.run_id if gather else None, gather.manifest_hash if gather else None)
         != (manifest.gather_run_id, manifest.gather_run_hash)
@@ -145,22 +153,29 @@ def build_run_evidence_snapshot(
             "Run evidence saved-query identity is unavailable. Inspect failed gather diagnostics "
             "and gather again before regenerating the draft."
         )
+    source_scopes = tuple(sorted((
+        SourceScopeContract(row.query_id, row.scope_id, row.wiql_hash)
+        for row in (gather.query_results if gather else ())
+    ), key=lambda row: (row.query_id, row.scope_id)))
+    binding_declarations = tuple(sorted((
+        EvidenceBinding(fact.revision_id, tuple(sorted(set(fact.entity_refs))))
+        for fact in snapshot.facts
+    ), key=lambda row: row.fact_revision_id))
+    selectors = tuple(sorted(effective_family_modes))
     capture = RunEvidenceSnapshot(
         program_id=pin.program_id, fact_snapshot_id=pin.snapshot_id,
         fact_content_sha256=pin.content_sha256 or "",
         as_of=_capture_clock(snapshot.as_of), valid_at=_capture_clock(snapshot.valid_at),
         gather_run_id=manifest.gather_run_id, gather_run_hash=manifest.gather_run_hash,
-        source_scopes=tuple(sorted((
-            SourceScopeContract(row.query_id, row.scope_id, row.wiql_hash)
-            for row in (gather.query_results if gather else ())
-        ), key=lambda row: (row.query_id, row.scope_id))),
-        binding_declarations=tuple(sorted((
-            EvidenceBinding(fact.revision_id, tuple(sorted(set(fact.entity_refs))))
-            for fact in snapshot.facts
-        ), key=lambda row: row.fact_revision_id)),
+        source_scopes=source_scopes,
+        binding_declarations=binding_declarations,
         fetched_item_ids=tuple(sorted(item.id for item in report_snapshot.items)),
         report_snapshot_hash=manifest.snapshot_hash, config_hash=manifest.config_hash, sha256="",
-        effective_family_modes=tuple(sorted(effective_family_modes)),
+        effective_family_modes=selectors,
+        source_scope_sha256=_selection_identity("source-scope-set.v1", source_scopes),
+        binding_set_sha256=_selection_identity("evidence-binding-set.v1", binding_declarations),
+        selector_sha256=_selection_identity("authority-selector-set.v1", selectors),
+        schema_version="run-evidence-capture.v3",
     )
     capture = replace(capture, sha256=hash_jsonable(_capture_content(capture)))
     return validate_run_evidence_snapshot(capture)
@@ -173,9 +188,39 @@ def validate_run_evidence_snapshot(capture: RunEvidenceSnapshot) -> RunEvidenceS
 def _capture_content(capture: RunEvidenceSnapshot) -> dict[str, Any]:
     payload = asdict(capture)
     payload.pop("sha256")
+    if capture.schema_version in {
+        "run-evidence-capture.v1",
+        "run-evidence-capture.v2",
+    }:
+        payload.pop("source_scope_sha256")
+        payload.pop("binding_set_sha256")
+        payload.pop("selector_sha256")
     if capture.schema_version == "run-evidence-capture.v1":
         payload.pop("effective_family_modes")
     return payload
+
+
+def _legacy_capture_content_with_identity_slots(capture: RunEvidenceSnapshot) -> dict[str, Any]:
+    payload = asdict(capture)
+    payload.pop("sha256")
+    if capture.schema_version == "run-evidence-capture.v1":
+        payload.pop("effective_family_modes")
+    return payload
+
+
+def _selection_identity(kind: str, value: object) -> str:
+    return hash_jsonable({"kind": kind, "value": _to_jsonable(value)})
+
+
+def _foreign_program_entity_ref(value: object, program_id: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    prefix, separator, entity_program_id = value.partition(":")
+    return (
+        separator == ":"
+        and prefix.upper() == "PROGRAM"
+        and entity_program_id != program_id
+    )
 
 
 def _capture_clock(value: Any) -> datetime:
@@ -193,6 +238,22 @@ def decode_run_evidence_snapshot(value: object) -> RunEvidenceSnapshot:
         schema_version = payload.get("schema_version")
         expected_fields = {field.name for field in fields(RunEvidenceSnapshot)}
         actual_fields = set(payload)
+        if schema_version in {
+            "run-evidence-capture.v1",
+            "run-evidence-capture.v2",
+        }:
+            for legacy_identity in (
+                "source_scope_sha256",
+                "binding_set_sha256",
+                "selector_sha256",
+            ):
+                payload.pop(legacy_identity, None)
+            expected_fields -= {
+                "source_scope_sha256",
+                "binding_set_sha256",
+                "selector_sha256",
+            }
+            actual_fields = set(payload)
         if schema_version == "run-evidence-capture.v1":
             expected_fields.remove("effective_family_modes")
         if actual_fields != expected_fields:
@@ -229,16 +290,28 @@ def decode_run_evidence_snapshot(value: object) -> RunEvidenceSnapshot:
             or capture.fetched_item_ids != tuple(sorted(set(capture.fetched_item_ids)))
             or scopes != tuple(sorted(set(scopes))) or revisions != tuple(sorted(set(revisions)))
             or any(row.entity_refs != tuple(sorted(set(row.entity_refs))) for row in capture.binding_declarations)
+            or any(
+                _foreign_program_entity_ref(ref, capture.program_id)
+                for row in capture.binding_declarations
+                for ref in row.entity_refs
+            )
             or (capture.gather_run_id is None) != (capture.gather_run_hash is None)
             or any(value is not None and (not isinstance(value, str) or not value.strip())
                    for value in (capture.gather_run_id, capture.gather_run_hash))
-            or capture.schema_version not in {"run-evidence-capture.v1", "run-evidence-capture.v2"}
+            or capture.schema_version not in {
+                "run-evidence-capture.v1",
+                "run-evidence-capture.v2",
+                "run-evidence-capture.v3",
+            }
             or (
                 capture.schema_version == "run-evidence-capture.v1"
                 and family_modes
             )
             or (
-                capture.schema_version == "run-evidence-capture.v2"
+                capture.schema_version in {
+                    "run-evidence-capture.v2",
+                    "run-evidence-capture.v3",
+                }
                 and family_modes
                 and (
                     any(
@@ -251,9 +324,41 @@ def decode_run_evidence_snapshot(value: object) -> RunEvidenceSnapshot:
                     or len({family for family, _ in family_modes}) != len(family_modes)
                 )
             )
+            or (
+                capture.schema_version in {
+                    "run-evidence-capture.v1",
+                    "run-evidence-capture.v2",
+                }
+                and (
+                    capture.source_scope_sha256
+                    or capture.binding_set_sha256
+                    or capture.selector_sha256
+                )
+            )
+            or (
+                capture.schema_version == "run-evidence-capture.v3"
+                and (
+                    capture.source_scope_sha256
+                    != _selection_identity("source-scope-set.v1", capture.source_scopes)
+                    or capture.binding_set_sha256
+                    != _selection_identity("evidence-binding-set.v1", capture.binding_declarations)
+                    or capture.selector_sha256
+                    != _selection_identity("authority-selector-set.v1", family_modes)
+                )
+            )
             or capture.capture_state != "unqualified_capture"
             or capture.limitations != RunEvidenceSnapshot.__dataclass_fields__["limitations"].default
-            or capture.sha256 != hash_jsonable(_capture_content(capture))
+            or capture.sha256 not in {
+                hash_jsonable(_capture_content(capture)),
+                *(
+                    (hash_jsonable(_legacy_capture_content_with_identity_slots(capture)),)
+                    if capture.schema_version in {
+                        "run-evidence-capture.v1",
+                        "run-evidence-capture.v2",
+                    }
+                    else ()
+                ),
+            }
         ):
             raise ValueError("Invalid capture content")
         return capture

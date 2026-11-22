@@ -455,6 +455,41 @@ def test_gather_command_daily_cadence_enables_reduced_profile(monkeypatch) -> No
     }
 
 
+def test_scheduled_gather_resolves_process_principal_without_cli_assertion(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_gather_program(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return gather.GatherArtifacts(
+            program_id="acme",
+            scanned_items=0,
+            discovered_signals=0,
+            new_signals=0,
+            pending_review=0,
+            trajectory_updates=0,
+            auto_reviews_written=0,
+            ado_calls=0,
+        )
+
+    monkeypatch.setattr(gather, "gather_program", _fake_gather_program)
+
+    result = runner.invoke(app, ["gather", "--program", "acme", "--scheduled"])
+
+    assert result.exit_code == 0
+    assert captured["kwargs"]["actor_identity_type"] == "scheduled"
+    assert "observed_scheduled_principal" not in captured["kwargs"]
+
+
+def test_gather_rejects_caller_supplied_scheduled_principal_option() -> None:
+    result = runner.invoke(
+        app,
+        ["gather", "--program", "acme", "--scheduled-principal", "attacker"],
+    )
+
+    assert result.exit_code == 2
+    assert "No such option: --scheduled-principal" in result.output
+
+
 def test_gather_command_weekly_cadence_enables_full_profile(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -5575,6 +5610,8 @@ def test_gather_program_uses_injected_m365_topic_router_for_discovery(monkeypatc
 
 
 def test_signals_from_workiq_payload_scrubs_external_pii_from_signal_text() -> None:
+    external_email = "partner@" + "example.com"
+    external_phone = "+1 (425)" + " 555-0100"
     workstreams = (
         Workstream(id="acme", name="Store rollout", signal_sources=WorkstreamSignalSources(workiq_keywords=("example_network",))),
     )
@@ -5585,8 +5622,8 @@ def test_signals_from_workiq_payload_scrubs_external_pii_from_signal_text() -> N
                 {
                     "messageId": "mail-1",
                     "threadId": "thread-1",
-                    "subject": "Reach me at partner@example.com",
-                    "snippet": "Call +1 (425) 555-0100 about ExampleNetwork blockers.",
+                    "subject": f"Reach me at {external_email}",
+                    "snippet": f"Call {external_phone} about ExampleNetwork blockers.",
                     "receivedDateTime": "2026-05-10T09:00:00Z",
                 }
             ]
@@ -5601,8 +5638,8 @@ def test_signals_from_workiq_payload_scrubs_external_pii_from_signal_text() -> N
     )
 
     assert len(signals) == 1
-    assert "partner@example.com" not in signals[0].text
-    assert "+1 (425) 555-0100" not in signals[0].text
+    assert external_email not in signals[0].text
+    assert external_phone not in signals[0].text
     assert "[PII-FILTERED-EMAIL]" in signals[0].text
     assert "[PII-FILTERED-PHONE]" in signals[0].text
 

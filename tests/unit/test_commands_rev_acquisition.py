@@ -139,6 +139,66 @@ def test_rev_run_sharepoint_fixture_preserves_typed_lineage(tmp_path: Path) -> N
     assert candidate.source_ref.vault_hash
 
 
+def test_rev_run_sharepoint_fixture_preserves_explicit_version(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    fixture = _write_sharepoint_fixture(tmp_path)
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    payload["items"][0]["version"] = "7.1"
+    payload["items"][0]["acl"] = [
+        {"kind": "group", "id": "launch-readers", "roles": ["read"]}
+    ]
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runner.invoke(
+        rev_app,
+        [
+            "run",
+            "--program", "demo",
+            "--mailbox", "tpm@example.com",
+            "--sharepoint-fixture", str(fixture),
+            "--programs-root", str(programs_root),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    candidate = load_pending_candidates("demo", programs_root=programs_root)[0]
+    assert isinstance(candidate.source_ref, SharePointDocRef)
+    assert candidate.source_ref.version == "7.1"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [{"deleted": True}, {"inaccessible": True}],
+)
+def test_rev_run_sharepoint_fixture_rejects_non_authoritative_items(
+    tmp_path: Path, status: dict[str, bool]
+) -> None:
+    programs_root = tmp_path / "programs"
+    fixture = _write_sharepoint_fixture(tmp_path)
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    payload["items"][0].update(status)
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runner.invoke(
+        rev_app,
+        [
+            "run",
+            "--program", "demo",
+            "--mailbox", "tpm@example.com",
+            "--sharepoint-fixture", str(fixture),
+            "--programs-root", str(programs_root),
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    report, _ = json.JSONDecoder().raw_decode(result.output)
+    assert report["enumerated"] == 1
+    assert report["hydrated"] == 0
+    assert report["candidates_staged"] == 0
+    assert report["processed_successfully"] == 0
+    assert load_pending_candidates("demo", programs_root=programs_root) == ()
+
+
 @pytest.mark.parametrize(
     "options,message",
     [

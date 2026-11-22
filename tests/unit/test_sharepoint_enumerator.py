@@ -113,6 +113,47 @@ def test_duplicate_items_across_pages_are_deduped() -> None:
     assert [c.partial_metadata["page_id"] for c in result.value] == ["a"]
 
 
+@pytest.mark.parametrize("source_subtype", ["lt_deck", "ref_doc"])
+def test_preserves_acl_and_source_subtype_without_authorizing_it(source_subtype: str) -> None:
+    item = GraphDriveItem(
+        item_id="i-a",
+        drive_id="drv",
+        name="governance.pptx",
+        etag="e-1",
+        version="3",
+        site_id="site",
+        acl=({"kind": "group", "id": "group-1", "roles": ("read",)},),
+    )
+    result = _enumerator(
+        [_page("a", source_subtype=source_subtype)],
+        _resolver({"a": Success(item)}),
+    ).enumerate(_INTENT, correlation_id="c")
+
+    assert isinstance(result, Success)
+    metadata = result.value[0].partial_metadata
+    assert metadata["acl"] == item.acl
+    assert metadata["source_subtype"] == source_subtype
+    assert metadata["version"] == "3"
+    assert metadata["acl_authorization_claimed"] is False
+
+
+@pytest.mark.parametrize("status", ["deleted", "inaccessible"])
+def test_status_changes_are_visible_for_fail_closed_hydration(status: str) -> None:
+    item = GraphDriveItem(
+        item_id="i-a",
+        drive_id="drv",
+        deleted=status == "deleted",
+        inaccessible=status == "inaccessible",
+    )
+    result = _enumerator(
+        [_page("a")],
+        _resolver({"a": Success(item)}),
+    ).enumerate(_INTENT, correlation_id="c")
+
+    assert isinstance(result, Success)
+    assert result.value[0].partial_metadata[status] is True
+
+
 @pytest.mark.parametrize(
     "failure",
     [Forbidden(scope="files", reason="no consent"), RateLimited(provider="graph_sharepoint", retry_after_seconds=2.0)],

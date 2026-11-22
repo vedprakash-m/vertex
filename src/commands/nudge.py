@@ -28,7 +28,7 @@ from src.ai._pipeline import process_generated_text
 from src.commands import gather as gather_helpers
 from src.core.ado_client import ADOClient
 from src.core.ado_semantics import latest_meaningful_ado_update
-from src.core.audience_scope_recipients import merge_audience_scope_recipients, resolve_audience_scope_recipients
+from src.core.audience_scope_recipients import merge_audience_scope_recipients, refuse_removed_primary_bcc_recipient, resolve_audience_scope_recipients
 from src.core.business_days import business_days_since
 from src.core.context_gap_store import append_context_gap
 from src.core.edition_resolver import PROGRAMS_ROOT, get_legacy_nudge_output, get_nudge_paths, get_program_output_dir
@@ -69,9 +69,13 @@ from src.core.nudge_query import NudgeADOClient, fetch_section_candidates
 from src.core.nudge_resolution import build_subject_prefix, resolve_sections
 from src.core.nudge_state_store import (
     compute_prune_before,
+    load_nudge_state,
     record_nudge_state,
     reset_nudge_item_state,
     update_nudge_state,
+)
+from src.core.communication_budget import (
+    assert_nudge_communication_budget,
 )
 from src.core.people_enrichment import maybe_alert_enrichment_due
 from src.core.program_fact_store import append_nudge_event
@@ -323,13 +327,13 @@ def generate_full_hygiene_nudges(
     resolved_overrides: dict[str, int] = dict(stale_overrides or {})
     _apply_legacy_stale_flags(resolved_overrides, config, stale_a=stale_a, stale_b=stale_b, stale_c=stale_c)
 
-    # Recipient resolution
     try:
         primary_recipient = _resolve_primary_recipient(
             config.delivery.recipient, knowledge.people_directory, program_id=program_id
         )
     except ConfigError:
         raise
+    refuse_removed_primary_bcc_recipient(primary_recipient=primary_recipient, audience_policy=config.presentation.audience_policy, program_id=program_id)
 
     # Load prior nudge state for audit/analytics only (no longer used for filtering)
 
@@ -420,6 +424,7 @@ def _orchestrate(
 ) -> FullHygieneArtifacts:
     warnings_list: list[str] = []
     optional_failures: list[str] = []
+    _assert_primary_bcc_admission(config, primary_recipient, program_id=program_id)
 
     # Load ProgramReality early to compute retired sections before any fetch
     try:
@@ -461,7 +466,6 @@ def _orchestrate(
     exempt_by_section: dict[int, int] = defaultdict(int)
 
     # State file retention: derive from max stale threshold × 3 (≥30 days)
-    # cooldown_days config is preserved for backward-compat but no longer drives filtering.
     max_stale_bd = max(
         (resolved_overrides.get(s.id, s.stale_business_days) for s in active_sections),
         default=7,
@@ -471,6 +475,11 @@ def _orchestrate(
     # Assign first-section ownership; apply exemptions and waivers only
     owned_by_section: dict[int, int] = {}  # item_id → owner section index
     total_waiver_filtered = 0
+    prior_nudge_state = {
+        entry.work_item_id: entry
+        for entry in load_nudge_state(state_path)
+        if entry.origin in {"mark_sent", "import_sent", "legacy_unknown"}
+    }
     for item_id, indices in item_memberships.items():
         if not indices:
             continue
@@ -481,6 +490,15 @@ def _orchestrate(
         if item_id in active_waiver_ids:
             waiver_by_section[first_idx] += 1
             total_waiver_filtered += 1
+            continue
+        prior = prior_nudge_state.get(item_id)
+        cooldown_days = active_sections[first_idx].cooldown_days or config.evaluation.cooldown_days
+        if (
+            prior is not None
+            and cooldown_days > 0
+            and now_utc - prior.nudged_at < timedelta(days=cooldown_days)
+        ):
+            exempt_by_section[first_idx] += 1
             continue
         owned_by_section[item_id] = first_idx
 
@@ -1357,6 +1375,21 @@ def _cmd_mark_sent(
     prior_index = _load_published_index(np.published_eml_index_path)
     source_run_id, item_ids = _extract_generated_item_ids_for_draft(np.audit_path, draft_filename=draft_path.name)
     content_hash, audience_manifest = _parse_eml_audience_manifest(draft_path, prior_index=prior_index)
+    raw_edition = load_yaml_mapping(
+        programs_root / program_id / "editions" / f"{program_id}_nudge.yaml",
+        required=False,
+        default={},
+    )
+    try:
+        assert_nudge_communication_budget(
+            raw_edition=raw_edition,
+            audience_manifest=audience_manifest,
+            prior_index=prior_index,
+            work_item_ids=item_ids,
+            now=claimed_sent_at,
+        )
+    except StateError as error:
+        raise typer.BadParameter(str(error)) from error
     if bound_solicitation:
         approvals = _load_draft_approvals(_approval_index_path(np))
         if not any(
@@ -1885,6 +1918,35 @@ def _filter_cc_recipients(
             + ", ".join(sorted(blocked_domains))
         )
     return filtered
+
+
+def _assert_primary_bcc_admission(
+    config: NudgeConfig,
+    primary_recipient: ResolvedRecipient,
+    *,
+    program_id: str,
+) -> None:
+    policy = config.presentation.audience_policy
+    if policy is None or policy.delivery_mode != "bcc":
+        return
+    allowed_domains = {
+        domain.strip().lower()
+        for domain in policy.allowed_domains
+        if domain.strip()
+    }
+    email = primary_recipient.email.lower()
+    alias = primary_recipient.alias.lower()
+    domain = email.split("@", 1)[1] if "@" in email else ""
+    opt_out = {entry.strip().lower() for entry in policy.opt_out}
+    if allowed_domains and domain not in allowed_domains:
+        raise ConfigError(
+            f"Audience policy blocked recipient domain(s) for program {program_id!r}: "
+            f"{primary_recipient.email}"
+        )
+    if email in opt_out or alias in opt_out:
+        raise ConfigError(
+            f"Audience policy removed the primary Bcc recipient for program {program_id!r}."
+        )
 
 
 def _apply_audience_policy(

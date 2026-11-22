@@ -110,3 +110,23 @@ def merge_audience_scope_recipients(
             seen.add(key)
             merged.append(candidate)
     return merged
+
+
+def refuse_removed_primary_bcc_recipient(
+    *,
+    primary_recipient: ResolvedRecipient,
+    audience_policy: NudgeAudiencePolicy | None,
+    program_id: str,
+) -> None:
+    """Fail before state/artifact reads when policy excludes the primary Bcc."""
+    if audience_policy is None or audience_policy.delivery_mode != "bcc":
+        return
+    identities = {
+        primary_recipient.alias.strip().lower(),
+        primary_recipient.email.strip().lower(),
+    }
+    opt_out = {entry.strip().lower() for entry in audience_policy.opt_out}
+    if identities & opt_out:
+        raise ConfigError(
+            f"Audience policy removed the primary Bcc recipient for program {program_id!r}."
+        )

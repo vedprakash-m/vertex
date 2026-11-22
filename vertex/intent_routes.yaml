@@ -500,11 +500,21 @@ commands:
         - --from
         - --program
         - --to
+      exception:
+        flags:
+        - --extended
+        value_options:
+        - --as-of
+        - --expect-fingerprint
+        - --kind
+        - --program
+        - --subject
       exceptions:
         flags:
         - --extended
         value_options:
         - --as-of
+        - --format
         - --program
       explain:
         flags: []
@@ -593,6 +603,15 @@ commands:
         - --actor
         - --edition
         - --issue
+      close-reply:
+        flags:
+        - --dry-run
+        value_options:
+        - --actor
+        - --edition
+        - --issue
+        - --proposal-id
+        - --reason
       dismiss:
         flags: []
         value_options:
@@ -1011,6 +1030,7 @@ commands:
       - --lt-deck
       - --pipelines
       - --probe
+      - --scheduled
       - --sharepoint
       - --sprints
       - --verbose
@@ -1502,6 +1522,14 @@ commands:
         - --format
         - --program
       study:
+        flags: []
+        value_options:
+        - --evidence
+      vertical-evaluate:
+        flags: []
+        value_options:
+        - --protocol
+      w6:
         flags: []
         value_options:
         - --evidence

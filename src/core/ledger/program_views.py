@@ -28,7 +28,7 @@ from src.core.workspace_paths import PROGRAMS_ROOT
 PROJECTION_SCHEMA_VERSION = "2"
 # Bumped when projection logic changes (independent of schema_version).
 # Incremental logic forces a full rebuild when the stored projector_version differs.
-_PROJECTOR_VERSION = "5"
+_PROJECTOR_VERSION = "6"
 # Maximum events in a delta before we skip the incremental short-circuit and
 # do a full rebuild.  Keeps the incremental path bounded and predictable.
 _MAX_INCREMENTAL_DELTA = 50
@@ -56,6 +56,34 @@ class ProjectionResult:
     event_count: int
     coverage_earliest: str | None
     coverage_latest: str | None
+    projection_sha256: str = ""
+
+
+_PROJECTION_STATE_QUERIES = {
+    "proj_program": "SELECT * FROM proj_program ORDER BY program_id",
+    "proj_phase": "SELECT * FROM proj_phase ORDER BY phase_id",
+    "proj_schedule_baseline": "SELECT * FROM proj_schedule_baseline ORDER BY schedule_id, baseline_name",
+    "proj_workstream": "SELECT * FROM proj_workstream ORDER BY workstream_id",
+    "proj_risk": "SELECT * FROM proj_risk ORDER BY risk_id",
+    "proj_milestone": "SELECT * FROM proj_milestone ORDER BY milestone_id",
+    "proj_deliverable": "SELECT * FROM proj_deliverable ORDER BY deliverable_id",
+    "proj_sku_generation": "SELECT * FROM proj_sku_generation ORDER BY sku_generation_id",
+    "proj_decision": "SELECT * FROM proj_decision ORDER BY decision_id",
+    "proj_assumption": "SELECT * FROM proj_assumption ORDER BY assumption_id",
+    "proj_dependency": "SELECT * FROM proj_dependency ORDER BY dependency_id",
+    "proj_commitment": "SELECT * FROM proj_commitment ORDER BY commitment_id",
+    "proj_kpi": "SELECT * FROM proj_kpi ORDER BY kpi_id",
+    "proj_kpi_series": "SELECT * FROM proj_kpi_series ORDER BY kpi_id, observed_at, dimensions_hash",
+    "proj_incident": "SELECT * FROM proj_incident ORDER BY incident_id",
+    "proj_knowledge_article": "SELECT * FROM proj_knowledge_article ORDER BY article_id",
+    "proj_playbook": "SELECT * FROM proj_playbook ORDER BY playbook_id",
+    "proj_published_artifact": "SELECT * FROM proj_published_artifact ORDER BY artifact_id, published_at",
+    "entity_links": "SELECT * FROM entity_links ORDER BY from_entity, link_kind, to_entity, event_id",
+    "event_orphan_links": "SELECT * FROM event_orphan_links ORDER BY event_id, orphaned_by",
+    "event_shadow_links": "SELECT * FROM event_shadow_links ORDER BY event_id, field_name, shadowed_by",
+    "field_locks": "SELECT * FROM field_locks ORDER BY entity_id, field",
+    "gaps": "SELECT * FROM gaps ORDER BY event_id",
+}
 
 
 class ProjectionConflictError(RuntimeError):
@@ -231,8 +259,9 @@ def _project_events_to_sqlite_locked(
             _overlay_gap_acknowledgements_from_decisions(connection, triage_decisions=triage_decisions)
             watermark = visible_events[-1].event_id if visible_events else ""
             coverage_earliest, coverage_latest = _coverage_range(effective_events)
+            projection_sha256 = _projection_state_sha256(connection)
             connection.execute(
-                "INSERT INTO projection_meta (schema_version, built_at, event_watermark, as_of, knowledge_as_of, coverage_earliest, coverage_latest, projector_version, event_input_digest, acknowledged_gaps_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO projection_meta (schema_version, built_at, event_watermark, as_of, knowledge_as_of, coverage_earliest, coverage_latest, projector_version, event_input_digest, acknowledged_gaps_digest, derived_state_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     PROJECTION_SCHEMA_VERSION,
                     datetime.now(timezone.utc).isoformat(),
@@ -244,6 +273,7 @@ def _project_events_to_sqlite_locked(
                     _PROJECTOR_VERSION,
                     _event_input_digest(program_id, visible_events),
                     _acknowledged_gaps_digest(triage_decisions),
+                    projection_sha256,
                 ),
             )
         temp_path.replace(projection_path)
@@ -256,6 +286,7 @@ def _project_events_to_sqlite_locked(
         event_count=len(effective_events),
         coverage_earliest=coverage_earliest,
         coverage_latest=coverage_latest,
+        projection_sha256=projection_sha256,
     )
 
 
@@ -302,7 +333,8 @@ def _project_events_incremental_to_sqlite_locked(
     if not projection_path.exists():
         return rebuild()
 
-    existing_meta = canonical_projection_dump(projection_path)["projection_meta"]
+    existing_dump = canonical_projection_dump(projection_path, reject_stale=False)
+    existing_meta = existing_dump["projection_meta"]
     if not existing_meta:
         return rebuild()
 
@@ -333,6 +365,7 @@ def _project_events_incremental_to_sqlite_locked(
             event_count=len(apply_supersession(visible_events)),
             coverage_earliest=meta_row.get("coverage_earliest"),
             coverage_latest=meta_row.get("coverage_latest"),
+            projection_sha256=str(meta_row.get("derived_state_sha256") or ""),
         )
     # Bounded window: if the delta is too large, full rebuild is safer.
     if len(delta_events) > _MAX_INCREMENTAL_DELTA:
@@ -476,7 +509,7 @@ def _incremental_fold(
 
         # Update projection metadata (watermark + coverage range)
         connection.execute(
-            "UPDATE projection_meta SET event_watermark = ?, built_at = ?, coverage_earliest = ?, coverage_latest = ?, event_input_digest = ?, acknowledged_gaps_digest = ?",
+            "UPDATE projection_meta SET event_watermark = ?, built_at = ?, coverage_earliest = ?, coverage_latest = ?, event_input_digest = ?, acknowledged_gaps_digest = ?, derived_state_sha256 = ?",
             (
                 new_watermark,
                 datetime.now(timezone.utc).isoformat(),
@@ -484,8 +517,10 @@ def _incremental_fold(
                 coverage_latest,
                 _event_input_digest(program_id, visible_events),
                 _acknowledged_gaps_digest(triage_decisions),
+                _projection_state_sha256(connection),
             ),
         )
+        projection_sha256 = _dump_projection_meta(connection)[0]["derived_state_sha256"]
 
     return ProjectionResult(
         program_id=program_id,
@@ -494,6 +529,7 @@ def _incremental_fold(
         event_count=len(effective_events),
         coverage_earliest=coverage_earliest,
         coverage_latest=coverage_latest,
+        projection_sha256=str(projection_sha256),
     )
 
 
@@ -520,7 +556,7 @@ def project_events_to_memory(
         watermark = visible_events[-1].event_id if visible_events else ""
         coverage_earliest, coverage_latest = _coverage_range(effective_events)
         connection.execute(
-            "INSERT INTO projection_meta (schema_version, built_at, event_watermark, as_of, knowledge_as_of, coverage_earliest, coverage_latest, projector_version, event_input_digest, acknowledged_gaps_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO projection_meta (schema_version, built_at, event_watermark, as_of, knowledge_as_of, coverage_earliest, coverage_latest, projector_version, event_input_digest, acknowledged_gaps_digest, derived_state_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 PROJECTION_SCHEMA_VERSION,
                 datetime.now(timezone.utc).isoformat(),
@@ -532,6 +568,7 @@ def project_events_to_memory(
                 _PROJECTOR_VERSION,
                 _event_input_digest(program_id, visible_events),
                 _acknowledged_gaps_digest(triage_decisions),
+                _projection_state_sha256(connection),
             ),
         )
         connection.commit()
@@ -565,7 +602,9 @@ def project_events_to_memory(
         connection.close()
 
 
-def canonical_projection_dump(projection_path: Path) -> dict[str, list[dict[str, Any]]]:
+def canonical_projection_dump(
+    projection_path: Path, *, reject_stale: bool = True,
+) -> dict[str, list[dict[str, Any]]]:
     """INV-AF-13 (WO-2 item 6): routed through ``open_program_db()`` in
     read-only mode — this function only ever runs ``SELECT`` queries and
     never commits. The prior raw sqlite3 connect call would silently create
@@ -575,7 +614,7 @@ def canonical_projection_dump(projection_path: Path) -> dict[str, list[dict[str,
     guards on ``projection_path.exists()`` first.
     """
     with open_program_db(projection_path, read_only=True) as connection:
-        return {
+        projection = {
             "proj_program": _dump_table(connection, "SELECT * FROM proj_program ORDER BY program_id"),
             "proj_phase": _dump_table(connection, "SELECT * FROM proj_phase ORDER BY phase_id"),
             "proj_schedule_baseline": _dump_table(connection, "SELECT * FROM proj_schedule_baseline ORDER BY schedule_id, baseline_name"),
@@ -601,6 +640,17 @@ def canonical_projection_dump(projection_path: Path) -> dict[str, list[dict[str,
             "gaps": _dump_table(connection, "SELECT * FROM gaps ORDER BY event_id"),
             "projection_meta": _dump_projection_meta(connection),
         }
+        meta = projection["projection_meta"]
+        if reject_stale and meta and meta[0].get("projector_version") == _PROJECTOR_VERSION:
+            expected = meta[0].get("derived_state_sha256")
+            if (
+                not isinstance(expected, str)
+                or expected != _projection_state_sha256(connection)
+            ):
+                raise ConfigError(
+                    "Program projection state is stale or inconsistent; replay the ledger before reuse."
+                )
+        return projection
 
 
 def collapse_shadow_links(rows: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> dict[str, str | None]:
@@ -1797,6 +1847,17 @@ def _dump_projection_meta(connection: sqlite3.Connection) -> list[dict[str, Any]
     return rows
 
 
+def _projection_state_sha256(connection: sqlite3.Connection) -> str:
+    state = {
+        table: _dump_table(connection, query)
+        for table, query in _PROJECTION_STATE_QUERIES.items()
+    }
+    encoded = json.dumps(
+        state, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
 def _aggregate_provenance(events: Iterable[EventEnvelope]) -> tuple[str, str | None, str | None]:
     event_tuple = tuple(sorted(events, key=lambda item: item.recorded_at))
     derived = json.dumps([event.event_id for event in event_tuple])
@@ -2068,7 +2129,8 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             coverage_latest TEXT,
             projector_version TEXT,
             event_input_digest TEXT,
-            acknowledged_gaps_digest TEXT
+            acknowledged_gaps_digest TEXT,
+            derived_state_sha256 TEXT
         );
         """
     )

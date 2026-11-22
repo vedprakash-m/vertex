@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.core.maturity_engine import ProposalClassCounters, load_earned_autonomy_state
+from src.core.maturity_evidence import read_maturity_transitions
 from src.core.proposal_audit import record_proposal_event
 from src.core.proposal_autonomy_ladder import (
     PROPOSAL_CLASSES,
@@ -109,6 +110,38 @@ def test_advance_proposal_class_autonomy_persists_state(tmp_path: Path) -> None:
     state = load_earned_autonomy_state("samplealpha", programs_root=programs_root)
     assert state is not None
     assert state.proposal_classes["risk"].level == "l1"
+    transitions = read_maturity_transitions("samplealpha", programs_root=programs_root)
+    assert [(row["from_level"], row["to_level"], row["action"]) for row in transitions] == [
+        ("l0", "l1", "promoted")
+    ]
+    assert transitions[0]["content_sha256"]
+
+
+def test_maturity_transition_reader_rejects_tampering(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    advance_proposal_class_autonomy("samplealpha", "risk", now=_NOW, programs_root=programs_root)
+    path = programs_root / "samplealpha" / "journal" / "maturity_transitions.jsonl"
+    row = path.read_text(encoding="utf-8").replace('"to_level": "l1"', '"to_level": "l4"')
+    path.write_text(row, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="digest"):
+        read_maturity_transitions("samplealpha", programs_root=programs_root)
+
+
+def test_maturity_transition_reader_rejects_foreign_program(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    advance_proposal_class_autonomy("samplealpha", "risk", now=_NOW, programs_root=programs_root)
+    path = programs_root / "samplealpha" / "journal" / "maturity_transitions.jsonl"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            '"program_id": "samplealpha"',
+            '"program_id": "foreign"',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="foreign"):
+        read_maturity_transitions("samplealpha", programs_root=programs_root)
 
 
 def test_advance_is_idempotent_once_at_ceiling(tmp_path: Path) -> None:

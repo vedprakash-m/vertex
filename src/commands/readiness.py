@@ -26,6 +26,7 @@ from src.core.study_evaluator import (
     StudyEvaluationResult,
     evaluate_matched_cycles,
 )
+from src.core.relo_w6 import verify_w6_packet
 from src.core.readiness_engine import (
     ReadinessConfig,
     ReadinessDimensionConfig,
@@ -116,6 +117,44 @@ def study_command(
     raise typer.Exit(code=0 if result.accepted else 1)
 
 
+@app.command("vertical-evaluate")
+def vertical_evaluate_command(
+    protocol: Path = typer.Option(..., "--protocol", help="Vertical comparison protocol JSON."),
+) -> None:
+    """Evaluate the local program artifact protocol without certifying external evidence."""
+    from src.core.vertical_artifact_evaluation import (
+        evaluate_vertical_artifact_protocol,
+        vertical_artifact_report_to_json,
+    )
+
+    try:
+        payload = json.loads(protocol.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("protocol must be a JSON object")
+        report = evaluate_vertical_artifact_protocol(payload)
+    except (UnicodeError, OSError, ValueError) as error:
+        typer.echo(f"Invalid vertical protocol: {error}", err=True)
+        raise typer.Exit(code=2) from error
+    typer.echo(
+        json.dumps(vertical_artifact_report_to_json(report), indent=2, sort_keys=True)
+    )
+    raise typer.Exit(code=0 if report.qualification_status.value == "qualified" else 1)
+@app.command("w6")
+def w6_evidence_command(
+    evidence: Path = typer.Option(..., "--evidence", help="Path to a RELO-W6 evidence packet JSON."),
+) -> None:
+    """Verify one explicit W6 evidence packet without certifying external gates."""
+    try:
+        document = json.loads(evidence.read_text(encoding="utf-8"))
+        result = verify_w6_packet(
+            document,
+            repo_root=Path(__file__).resolve().parents[2],
+        )
+    except (UnicodeError, OSError, ValueError, OverflowError) as error:
+        typer.echo(f"Invalid W6 evidence: {error}", err=True)
+        raise typer.Exit(code=2) from error
+    typer.echo(json.dumps(result.to_payload(), indent=2, allow_nan=False, sort_keys=True))
+    raise typer.Exit(code=0 if result.classification == "owner_review" else 1)
 def _study_rows(
     value: object, name: str, required: dict[str, tuple[type, ...]], optional: dict[str, tuple[type, ...]],
 ) -> list[dict[str, Any]]:

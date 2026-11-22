@@ -38,7 +38,8 @@ import yaml
 
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.migration_log import append_migration_log
-from src.core.models_v2 import RiskKind
+from src.core.models_v2 import RiskEntry, RiskKind
+from src.core.risk_dedupe import merge_inactive_duplicate_provenance
 from src.core.risk_register_engine import (
     _risk_entry_to_record,
     get_risk_register_path,
@@ -59,6 +60,7 @@ class ArchivedRisk:
     kind: str
     status: str
     content_hash: str
+    merged_into_risk_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +81,14 @@ class RiskArchiveManifest:
             "reason": self.reason,
             "archived_count": self.archived_count,
             "archive_path": self.archive_path,
-            "archived": [asdict(entry) for entry in self.archived],
+            "archived": [
+                {
+                    key: value
+                    for key, value in asdict(entry).items()
+                    if key != "merged_into_risk_id" or value is not None
+                }
+                for entry in self.archived
+            ],
         }
 
 
@@ -87,21 +96,23 @@ def select_archive_candidates(
     program_id: str,
     *,
     programs_root: Path = PROGRAMS_ROOT,
-) -> tuple[list[object], list[object]]:
+) -> tuple[list[RiskEntry], list[RiskEntry]]:
     """Return ``(to_archive, to_keep)`` partitioned by the archive criteria.
 
     ``to_archive`` are machine-derived terminal rows; ``to_keep`` are everything
     else (strategic risks, open candidates, etc.). Never raises on an absent
     register -- returns empty lists.
     """
-    entries = list(load_risk_register(program_id, programs_root=programs_root))
-    to_archive: list[object] = []
-    to_keep: list[object] = []
-    for entry in entries:
+    entries = tuple(load_risk_register(program_id, programs_root=programs_root))
+    merged_entries, merged_into = merge_inactive_duplicate_provenance(entries)
+    to_archive: list[RiskEntry] = []
+    to_keep: list[RiskEntry] = []
+    for entry, original in zip(merged_entries, entries):
         is_machine = entry.kind in (RiskKind.CANDIDATE.value, RiskKind.HYGIENE.value)
         is_terminal = entry.status.value in _TERMINAL_STATUSES
-        if is_machine and is_terminal:
-            to_archive.append(entry)
+        is_merged_duplicate = original.id in merged_into
+        if (is_machine and is_terminal) or is_merged_duplicate:
+            to_archive.append(original)
         else:
             to_keep.append(entry)
     return to_archive, to_keep
@@ -116,6 +127,9 @@ def plan_archive(
     to_archive, _to_keep = select_archive_candidates(program_id, programs_root=programs_root)
     archived_records = []
     archived_summaries: list[ArchivedRisk] = []
+    _kept, merged_into = merge_inactive_duplicate_provenance(
+        tuple(load_risk_register(program_id, programs_root=programs_root))
+    )
     for entry in to_archive:
         record = _risk_entry_to_record(entry)
         archived_records.append(record)
@@ -126,6 +140,7 @@ def plan_archive(
                 kind=entry.kind,
                 status=entry.status.value,
                 content_hash=_content_hash(record),
+                merged_into_risk_id=merged_into.get(entry.id),
             )
         )
     created_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

@@ -398,6 +398,9 @@ def _format_sprint_summary(
     team_capacity_part = _format_sprint_team_capacity_summary(signal)
     if team_capacity_part is not None:
         parts.append(team_capacity_part)
+    plan_part = _format_sprint_plan_summary(signal)
+    if plan_part is not None:
+        parts.append(plan_part)
     open_comparison_part = _format_sprint_open_comparison_summary(signal, previous_signal)
     if open_comparison_part is not None:
         parts.append(open_comparison_part)
@@ -503,6 +506,25 @@ def _format_sprint_pace_summary(
                 return f"pace {abs(pace_delta_pct)}pts behind {expected_completion_pct}% elapsed"
             return f"pace {abs(pace_delta_pct)}pts behind"
     return None
+
+
+def _format_sprint_plan_summary(signal: Signal) -> str | None:
+    metadata = signal.metadata or {}
+    plan = metadata.get("sprint_plan")
+    if not isinstance(plan, dict):
+        return None
+    selected = plan.get("selected")
+    deferred = plan.get("deferred")
+    if not isinstance(selected, list) or not isinstance(deferred, list):
+        return None
+    point_capacity = plan.get("point_capacity")
+    selected_points = plan.get("selected_story_points")
+    if point_capacity is None or not isinstance(selected_points, str):
+        return "plan unavailable: no completed-sprint story-point inputs"
+    return (
+        f"plan {len(selected)} selected / {selected_points}pt "
+        f"against {point_capacity}pt capacity; {len(deferred)} deferred"
+    )
 
 
 def _format_sprint_timing_summary(

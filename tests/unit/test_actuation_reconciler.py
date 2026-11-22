@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,7 @@ from src.core.ledger.durable_outbox_store import (
 )
 from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN
 from tests.support.actuation_reconciliation import synthetic_authorized_effect_document
+from tests.support.actuation_reconciliation import synthetic_completed_reconciliation
 
 
 def _uncertain_create(programs_root: Path) -> tuple[str, Path]:
@@ -42,6 +44,7 @@ def _uncertain_create(programs_root: Path) -> tuple[str, Path]:
         operation_intent_id="intent-1",
     )
     payload = {
+        "program_id": "fixture",
         "operation": "create_task.v1",
         "operation_intent_id": "intent-1",
         "proposal_id": "proposal-1",
@@ -107,7 +110,17 @@ def test_reconcile_uncertain_effect_records_authoritative_terminal_outcome(
         db_path,
         key,
         reconciled_by="synthetic-double",
-        provider_lookup=lambda entry: observation,
+        provider_lookup=lambda entry: (
+            replace(
+                observation,
+                effect_reconciliation=synthetic_completed_reconciliation(
+                    synthetic_authorized_effect_document(),
+                    remote_id=observation.remote_id or 0,
+                ),
+            )
+            if observation.disposition is ReconciliationDisposition.CONFIRMED
+            else observation
+        ),
     )
 
     assert outcome.entry.status == expected_status
@@ -179,7 +192,7 @@ def test_reconcile_uncertain_effect_refuses_unqualified_operation_before_lookup(
         "comment-1",
         domain=ACTUATION_DISPATCH_DOMAIN,
         correlation_id="comment-1",
-        payload_json=json.dumps({"operation": "add_comment.v1"}),
+        payload_json=json.dumps({"operation": "teams_message.v1"}),
     )
     leased = lease_next(db_path, ACTUATION_DISPATCH_DOMAIN, owner="worker")
     assert leased is not None

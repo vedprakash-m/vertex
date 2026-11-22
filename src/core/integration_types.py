@@ -247,6 +247,7 @@ class DiscoveryQueryResult:
     cap_reached: bool
     completeness_state: str
     failure_category: str | None = None
+    page_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -120,6 +120,68 @@ def test_execute_archive_moves_rows_and_writes_manifest(tmp_path: Path) -> None:
     assert (tmp_path / "samplealpha" / "risk_register.yaml.bak").exists()
 
 
+def test_execute_archive_merges_inactive_duplicate_provenance_before_archiving(tmp_path: Path) -> None:
+    active = _risk("canonical", status="open", title="Duplicate risk")
+    active.update({
+        "entity_refs": ["WI:1"],
+        "source_signal_ids": ["signal-current"],
+        "linked_claim_ids": ["claim-current"],
+        "dedupe_key": "same-risk",
+    })
+    duplicate = _risk(
+        "duplicate",
+        status="closed",
+        title="Duplicate risk",
+    )
+    duplicate.update({
+        "entity_refs": ["WI:1", "WI:2"],
+        "source_signal_ids": ["signal-old"],
+        "linked_claim_ids": ["claim-old"],
+        "linked_action_ids": ["action-old"],
+        "dedupe_key": "same-risk",
+        "outcome": "resolved",
+        "effectiveness": "effective",
+    })
+    _write_register(tmp_path / "samplealpha", [active, duplicate])
+
+    manifest = execute_archive("samplealpha", programs_root=tmp_path)
+
+    assert [row.risk_id for row in manifest.archived] == ["duplicate"]
+    assert manifest.archived[0].merged_into_risk_id == "canonical"
+    current = yaml.safe_load(
+        (tmp_path / "samplealpha" / "risk_register.yaml").read_text(encoding="utf-8")
+    )["risks"]
+    assert [row["id"] for row in current] == ["canonical"]
+    assert current[0]["entity_refs"] == ["WI:1", "WI:2"]
+    assert current[0]["source_signal_ids"] == ["signal-current", "signal-old"]
+    assert current[0]["linked_claim_ids"] == ["claim-current", "claim-old"]
+    assert current[0]["linked_action_ids"] == ["action-old"]
+    assert current[0]["outcome"] == "resolved"
+    assert current[0]["effectiveness"] == "effective"
+    archived = yaml.safe_load(
+        (tmp_path / "samplealpha" / manifest.archive_path).read_text(encoding="utf-8")
+    )["risks"][0]
+    assert archived["id"] == duplicate["id"]
+    assert archived["source_signal_ids"] == ["signal-old"]
+    assert archived["linked_claim_ids"] == ["claim-old"]
+    assert "merged_into_risk_id" not in archived
+
+
+def test_execute_archive_refuses_ambiguous_active_duplicate_merge(tmp_path: Path) -> None:
+    first = _risk("first", status="open", title="Duplicate risk")
+    second = _risk("second", status="escalated", title="Duplicate risk")
+    first["dedupe_key"] = second["dedupe_key"] = "same-risk"
+    _write_register(tmp_path / "samplealpha", [first, second])
+
+    manifest = execute_archive("samplealpha", programs_root=tmp_path)
+
+    assert manifest.archived_count == 0
+    current = yaml.safe_load(
+        (tmp_path / "samplealpha" / "risk_register.yaml").read_text(encoding="utf-8")
+    )["risks"]
+    assert [row["id"] for row in current] == ["first", "second"]
+
+
 def test_rollback_restores_archived_rows(tmp_path: Path) -> None:
     _write_register(
         tmp_path / "samplealpha",

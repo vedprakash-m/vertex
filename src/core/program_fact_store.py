@@ -1518,6 +1518,43 @@ class ProgramFactStore:
             ).fetchall()
         return tuple(self._row_to_revision(row) for row in rows)
 
+    def list_accepted_revisions_for_types(
+        self,
+        fact_types: tuple[str, ...],
+        *,
+        as_of: datetime,
+        valid_at: datetime | None = None,
+        limit: int = 200,
+    ) -> tuple[ProgramFactRevision, ...]:
+        if not fact_types or limit < 1 or not self._db_path.exists():
+            return ()
+        placeholders = ", ".join("?" for _ in fact_types)
+        world_time = valid_at or as_of
+        with open_program_db(self._db_path, read_only=True) as connection:
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'program_fact_revisions'"
+            ).fetchone() is None:
+                return ()
+            rows = connection.execute(
+                f"""
+                SELECT * FROM program_fact_revisions
+                WHERE program_id = ?
+                  AND review_state = ?
+                  AND fact_type IN ({placeholders})
+                  AND recorded_at <= ?
+                  AND (valid_from IS NULL OR valid_from <= ?)
+                  AND (valid_until IS NULL OR valid_until > ?)
+                ORDER BY recorded_at DESC, revision_id DESC
+                LIMIT ?
+                """,
+                (
+                    self._program_id, FactReviewState.ACCEPTED.value, *fact_types,
+                    _serialize_datetime(as_of), _serialize_datetime(world_time),
+                    _serialize_datetime(world_time), limit,
+                ),
+            ).fetchall()
+        return tuple(self._row_to_revision(row) for row in rows)
+
     def pin_snapshot(
         self,
         *,
@@ -2493,6 +2530,7 @@ def _build_claim_entry_facts(
                 "workstream_id": entry.workstream_id,
                 "text": entry.text,
                 "entity_refs": list(entry.entity_refs),
+                "evidence_refs": list(entry.evidence_refs or entry.entity_refs),
                 "claim_date": _serialize_date(entry.claim_date),
                 "owner_alias": entry.owner_alias,
                 "due_date": _serialize_date(entry.due_date),
@@ -2552,6 +2590,7 @@ def _build_decision_ask_facts(
                 "issue_number": entry.issue_number,
                 "text": entry.text,
                 "entity_refs": list(entry.entity_refs),
+                "evidence_refs": list(entry.evidence_refs or entry.entity_refs),
                 "ask_date": _serialize_date(entry.ask_date),
                 "owner_alias": entry.owner_alias,
                 "status": entry.status,
@@ -2993,6 +3032,7 @@ def _action_item_from_fact(fact: ProgramFactRevision) -> ActionItem:
 
 def _claim_entry_from_fact(fact: ProgramFactRevision) -> ClaimEntry:
     payload = fact.payload
+    entity_refs = tuple(str(value) for value in payload.get("entity_refs") or ())
     return ClaimEntry(
         id=str(payload["id"]),
         program_id=str(payload["program_id"]),
@@ -3000,7 +3040,7 @@ def _claim_entry_from_fact(fact: ProgramFactRevision) -> ClaimEntry:
         issue_number=int(payload["issue_number"]),
         workstream_id=_deserialize_optional_string(payload.get("workstream_id")),
         text=str(payload["text"]),
-        entity_refs=tuple(str(value) for value in payload.get("entity_refs") or ()),
+        entity_refs=entity_refs,
         claim_date=_deserialize_required_date(payload.get("claim_date"), field_name="claim_date"),
         owner_alias=_deserialize_optional_string(payload.get("owner_alias")),
         due_date=_deserialize_date(payload.get("due_date")),
@@ -3008,6 +3048,7 @@ def _claim_entry_from_fact(fact: ProgramFactRevision) -> ClaimEntry:
         contradiction_status=str(payload.get("contradiction_status") or "ok"),  # type: ignore[arg-type]
         source_confidence_tier=str(payload.get("source_confidence_tier") or "low"),  # type: ignore[arg-type]
         last_validated_date=_deserialize_date(payload.get("last_validated_date")),
+        evidence_refs=tuple(str(value) for value in payload.get("evidence_refs") or entity_refs),
     )
 
 
@@ -3052,13 +3093,14 @@ def _decision_ask_from_fact(fact: ProgramFactRevision) -> DecisionAsk:
     status = str(payload.get("status") or "open")
     if status not in {"open", "resolved", "deferred"}:
         status = "open"
+    entity_refs = tuple(str(value) for value in payload.get("entity_refs") or ())
     return DecisionAsk(
         id=str(payload["id"]),
         program_id=str(payload["program_id"]),
         edition_id=str(payload["edition_id"]),
         issue_number=int(payload["issue_number"]),
         text=str(payload["text"]),
-        entity_refs=tuple(str(value) for value in payload.get("entity_refs") or ()),
+        entity_refs=entity_refs,
         ask_date=_deserialize_required_date(payload.get("ask_date"), field_name="ask_date"),
         owner_alias=_deserialize_optional_string(payload.get("owner_alias")),
         status=status,  # type: ignore[arg-type]
@@ -3067,6 +3109,7 @@ def _decision_ask_from_fact(fact: ProgramFactRevision) -> DecisionAsk:
         resurfacing_policy=_deserialize_resurfacing_policy(payload.get("resurfacing_policy")),
         affected_milestone_ids=tuple(str(value) for value in payload.get("affected_milestone_ids") or ()),
         last_touched_at=_deserialize_datetime(_deserialize_optional_string(payload.get("last_touched_at"))),
+        evidence_refs=tuple(str(value) for value in payload.get("evidence_refs") or entity_refs),
     )
 
 

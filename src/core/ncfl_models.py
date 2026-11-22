@@ -233,6 +233,8 @@ class ContextUpdateProposal:
     dismissed_by: str | None = None
     source_sha256: str | None = None
     prior_state: str | None = None    # RELO-W4.11: "absent_verified" | "sha256:<hex>" of target at extraction
+    solicitation_id: str | None = None
+    gap_fingerprint: str | None = None
     # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------
@@ -320,6 +322,10 @@ class ContextUpdateProposal:
             payload["source_sha256"] = self.source_sha256
         if self.prior_state is not None:
             payload["prior_state"] = self.prior_state
+        if self.solicitation_id is not None:
+            payload["solicitation_id"] = self.solicitation_id
+        if self.gap_fingerprint is not None:
+            payload["gap_fingerprint"] = self.gap_fingerprint
         return payload
 
     @staticmethod
@@ -347,6 +353,8 @@ class ContextUpdateProposal:
             current_value=d.get("current_value"),
             current_value_hash=d.get("current_value_hash"),
             prior_state=d.get("prior_state"),
+            solicitation_id=d.get("solicitation_id"),
+            gap_fingerprint=d.get("gap_fingerprint"),
             confidence=str(d.get("confidence", "medium")),
             batch_eligible=bool(d.get("batch_eligible", False)),
             extraction_method_rationale=str(d.get("extraction_method_rationale", "")),

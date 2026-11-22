@@ -580,7 +580,10 @@ def run_rev_cycle(
             _finalize_source_file(deps, candidate, success=True)
             counts["processed_successfully"] += 1
         else:
-            counts["terminal_failures"] += 1
+            if iso_failures:
+                counts["quarantined"] += 1
+            else:
+                counts["terminal_failures"] += 1
             _finalize_source_file(deps, candidate, success=False, reason="candidate_shape_failed")
 
         gov = governor.check_wall_clock()
@@ -706,6 +709,7 @@ def _stage_candidates(
             artifact_id=hydrated.identity.resource_id,
             artifact_kind=identity_kind,
             retrieved_at=set_at,
+            source_time=occurred_at,
             vault_hash=vault_hash,
         )
         doc_key = f"workiq:{identity_kind}:{hydrated.identity.resource_id}"
@@ -723,7 +727,11 @@ def _stage_candidates(
         source_ref = SharePointDocRef(
             site=site,
             doc_path=doc_path,
-            version=str(hydrated.route_metadata.get("etag") or "") or None,
+            version=(
+                str(hydrated.route_metadata.get("version") or "")
+                or str(hydrated.route_metadata.get("etag") or "")
+                or None
+            ),
             modified_at=occurred_at,
             vault_hash=vault_hash,
         )

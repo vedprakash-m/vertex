@@ -18,7 +18,10 @@ from src.commands.report_email import (
 from src.core.archive_store import write_confirmed_issue
 from src.core.communication_budget import (
     DEFAULT_MAX_ASKS,
+    CommunicationAudienceManifest,
     CommunicationBudgetFinding,
+    assert_communication_budget,
+    build_communication_audience_manifest,
     evaluate_communication_budget,
 )
 from src.core.exceptions import StateError
@@ -80,6 +83,37 @@ def test_custom_max_asks():
         cooldown_days=14, now=NOW, max_asks=2,
     )
     assert _codes(findings) == ["over_ask_budget"]
+
+
+def test_audience_manifest_normalizes_recipients_and_material_changes() -> None:
+    jordan_email = "jordan@" + "example.com"
+    lead_email = "lead@" + "example.com"
+    jordan_variant = " Jordan@" + "Example.com "
+    manifest = build_communication_audience_manifest(
+        audience=(jordan_variant, jordan_email, lead_email),
+        asks=("  Ask one  ", "Ask one", "", "Change two"),
+    )
+
+    assert manifest == CommunicationAudienceManifest(
+        audience_id=f"{jordan_email}, {lead_email}",
+        recipients=(jordan_email, lead_email),
+        material_asks=("Ask one", "Change two"),
+    )
+
+
+def test_budget_assertion_fails_before_send_with_audience_manifest() -> None:
+    manifest = build_communication_audience_manifest(
+        audience=("jordan@example.com",),
+        asks=tuple(f"Ask {index}" for index in range(6)),
+    )
+
+    with pytest.raises(StateError, match="jordan@example.com.*6.*5"):
+        assert_communication_budget(
+            manifest=manifest,
+            prior_sends=(),
+            cooldown_days=14,
+            now=NOW,
+        )
 
 
 def test_recent_prior_send_is_within_cooldown_using_latest_send():
@@ -351,7 +385,7 @@ def test_report_email_observe_communication_budget_records_manifest_without_bloc
     )
     assert _codes(over_findings) == ["over_ask_budget", "within_cooldown"]
 
-    # report --send-draft echoes observe findings cleanly and dispatches without blocking
+    # report --send-draft refuses a blocked communication artifact before dispatch.
     sent_messages = []
     monkeypatch.setattr("src.commands.report.REPORTS_ROOT", reports_root)
     monkeypatch.setattr("src.commands.report.ARCHIVE_ROOT", archive_root)
@@ -363,6 +397,7 @@ def test_report_email_observe_communication_budget_records_manifest_without_bloc
         app,
         ["report", "--edition", EDITION_NAME, "--issue", "78", "--as-of", "2026-11-15T12:00:00", "--send-draft"],
     )
-    assert send_res.exit_code in {0, 3}, send_res.output
-    assert len(sent_messages) == 1, send_res.output
-    assert "[observe] Communication budget (within_cooldown)" in send_res.output
+    assert send_res.exit_code == 3, send_res.output
+    assert sent_messages == [], send_res.output
+    assert "Communication budget blocks report draft send" in send_res.output
+    assert "within_cooldown" in send_res.output

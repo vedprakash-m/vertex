@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.core.config_loader import PROGRAMS_ROOT
+from src.core.exceptions import AuthError, QueryError
 from src.core.integration_types import (
     ChannelConfig,
     ChannelRegistration,
@@ -35,10 +36,18 @@ class _QueryExecution:
     error: str | None
     timed_out: bool = False
     cancelled: bool = False
+    cancellation_incomplete: bool = False
     schema: KustoResultSchema | None = None
+    retryable: bool = True
 
 
 class KustoCancellationToken:
+    """Local cooperative cancellation only.
+
+    A token can stop an executor that explicitly checks it. It does not cancel
+    an already-issued Azure SDK/server transport request.
+    """
+
     def __init__(self) -> None:
         self._event = threading.Event()
 
@@ -180,7 +189,7 @@ class KustoHydrationProvider:
                     IntegrationError(
                         source="kusto",
                         stage="hydration",
-                        retryable=True,
+                        retryable=execution.retryable,
                         message=execution.error,
                         ref_id=registration.ref_id,
                         ref_kind=registration.ref_kind,
@@ -251,11 +260,64 @@ class KustoHydrationProvider:
         program_id: str,
         config: KustoHydrationConfig,
     ) -> dict[str, _QueryExecution]:
-        """Unchanged pre-ADF-W1.6 behavior: one query at a time, in order."""
+        """Run one query at a time while enforcing an isolated local budget."""
         executions: dict[str, _QueryExecution] = {}
-        for registration, query in runnable:
-            executions[registration.ref_id] = self._run_one(registration, query, program_id, config)
+        for index, (registration, query) in enumerate(runnable):
+            execution = self._run_one_with_timeout(
+                registration,
+                query,
+                program_id,
+                config,
+            )
+            executions[registration.ref_id] = execution
+            if execution.timed_out and execution.cancellation_incomplete:
+                for blocked_registration, _blocked_query in runnable[index + 1:]:
+                    executions[blocked_registration.ref_id] = _QueryExecution(
+                        rows=None,
+                        error=(
+                            f"Kusto query '{blocked_registration.ref_id}' was not started "
+                            "after an incomplete cancellation in this sequential channel cycle."
+                        ),
+                        cancelled=True,
+                        cancellation_incomplete=True,
+                        retryable=False,
+                    )
+                break
         return executions
+
+    def _run_one_with_timeout(
+        self,
+        registration: ChannelRegistration,
+        query: KustoQuery,
+        program_id: str,
+        config: KustoHydrationConfig,
+    ) -> _QueryExecution:
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="kusto-query",
+        )
+        token = KustoCancellationToken()
+        future = executor.submit(
+            self._run_one,
+            registration,
+            query,
+            program_id,
+            config,
+            token,
+        )
+        try:
+            return future.result(timeout=config.per_query_timeout_seconds)
+        except concurrent.futures.TimeoutError:
+            token.cancel()
+            cancellation_completed = future.cancel()
+            return self._timeout_execution(
+                registration.ref_id,
+                config,
+                token,
+                cancellation_incomplete=not cancellation_completed,
+            )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _execute_parallel(
         self,
@@ -304,22 +366,43 @@ class KustoHydrationProvider:
                 except concurrent.futures.TimeoutError:
                     token = future_to_token[future]
                     token.cancel()
-                    future.cancel()
-                    executions[ref_id] = _QueryExecution(
-                        rows=None,
-                        error=(
-                            f"Kusto query '{ref_id}' exceeded its "
-                            f"{config.per_query_timeout_seconds}s per-query budget; "
-                            "adapter execution was cancelled."
-                        ),
-                        timed_out=True,
-                        cancelled=token.cancelled,
+                    cancellation_completed = future.cancel()
+                    executions[ref_id] = self._timeout_execution(
+                        ref_id,
+                        config,
+                        token,
+                        cancellation_incomplete=not cancellation_completed,
                     )
-                except Exception as error:  # pragma: no cover - _run_one already catches provider errors
-                    executions[ref_id] = _QueryExecution(rows=None, error=str(error))
         finally:
-            executor.shutdown(wait=False)
+            executor.shutdown(wait=False, cancel_futures=True)
         return executions
+
+    @staticmethod
+    def _timeout_execution(
+        ref_id: str,
+        config: KustoHydrationConfig,
+        token: KustoCancellationToken,
+        cancellation_incomplete: bool,
+    ) -> _QueryExecution:
+        cancellation_status = (
+            "cancellation incomplete; subsequent sequential queries will not be started."
+            if cancellation_incomplete
+            else "local future cancellation completed."
+        )
+        return _QueryExecution(
+            rows=None,
+            error=(
+                f"Kusto query '{ref_id}' exceeded its "
+                f"{config.per_query_timeout_seconds}s local per-query budget; "
+                "local cancellation was requested; provider/server transport "
+                f"cancellation is unclaimed; {cancellation_status} "
+                "The result was withheld."
+            ),
+            timed_out=True,
+            cancelled=token.cancelled,
+            cancellation_incomplete=cancellation_incomplete,
+            retryable=not cancellation_incomplete,
+        )
 
     def _run_one(
         self,
@@ -338,19 +421,27 @@ class KustoHydrationProvider:
             ),
         )
         try:
+            if cancellation is not None and cancellation.cancelled:
+                raise TimeoutError("Kusto query was locally cancelled before execution.")
             execution = (
                 self._cancellable_executor(rendered_query, cancellation or KustoCancellationToken())
                 if self._cancellable_executor is not None
                 else self._executor(rendered_query)
             )
+            if cancellation is not None and cancellation.cancelled:
+                raise TimeoutError("Kusto query was locally cancelled; result was withheld.")
             rows, schema = admit_kusto_execution(
                 execution,
                 query_id=rendered_query.id,
                 expected_cardinality=rendered_query.expected_cardinality,
                 result_limits=rendered_query.result_limits,
             )
-        except Exception as error:
-            return _QueryExecution(rows=None, error=str(error))
+        except (QueryError, RuntimeError, ValueError, AuthError) as error:
+            return _QueryExecution(
+                rows=None,
+                error=str(error),
+                retryable=not isinstance(error, QueryError),
+            )
         return _QueryExecution(rows=rows, error=None, schema=schema)
 
 

@@ -12,9 +12,11 @@ import cli
 from cli import app
 from src.commands.readiness import evaluate_launch_study_readiness
 from src.core.study_evaluator import (
+    DualLabelPair,
     MatchedWeeklyCycle,
     StratumSample,
     evaluate_matched_cycles,
+    evaluate_dual_label_holdout,
     evaluate_stratum_agreement,
 )
 
@@ -104,6 +106,36 @@ def test_stratum_agreement_decision_m_contracts() -> None:
                 StratumSample(stratum_id="duplicate", sample_count=60, divergence_count=0),
             )
         )
+
+
+def test_dual_label_holdout_calculates_kappa_and_requires_divergence_adjudication() -> None:
+    pairs = tuple(
+        DualLabelPair(
+            item_id=f"item-{index}",
+            human_label="risk" if index < 10 else "none",
+            model_label="risk" if index < 11 else "none",
+            adjudicated_label="risk",
+        )
+        for index in range(20)
+    )
+
+    result = evaluate_dual_label_holdout(pairs, kappa_floor=0.70)
+
+    assert result.sample_count == 20
+    assert result.divergence_count == 1
+    assert result.human_model_kappa > 0.70
+    with pytest.raises(ValueError, match="unique"):
+        evaluate_dual_label_holdout((pairs[0], pairs[0]))
+    with pytest.raises(ValueError, match="adjudication"):
+        evaluate_dual_label_holdout(
+            (DualLabelPair("bad", "risk", "none", "different"),),
+            kappa_floor=0.0,
+        )
+
+
+def test_dual_label_holdout_perfect_single_label_is_well_defined() -> None:
+    pairs = tuple(DualLabelPair(str(index), "none", "none", "none") for index in range(2))
+    assert evaluate_dual_label_holdout(pairs).human_model_kappa == 1.0
 
 
 def test_matched_cycles_evaluation_lcb_and_calendar_gates() -> None:

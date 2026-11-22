@@ -473,6 +473,9 @@ class RunEvidenceSnapshot:
     config_hash: str
     sha256: str
     effective_family_modes: tuple[tuple[str, str], ...] = ()
+    source_scope_sha256: str = ""
+    binding_set_sha256: str = ""
+    selector_sha256: str = ""
     schema_version: str = "run-evidence-capture.v2"
     capture_state: str = "unqualified_capture"
     limitations: tuple[str, ...] = (
