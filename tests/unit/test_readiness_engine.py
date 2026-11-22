@@ -745,7 +745,7 @@ def test_offline_readiness_parser_rejects_missing_exact_identity(
     encoding="utf-8",
   )
 
-  with pytest.raises(ConfigError, match="missing"):
+  with pytest.raises(readiness_engine.ConfigError, match="missing"):
     load_readiness_config("sample", programs_root=tmp_path)
 
 
@@ -758,7 +758,7 @@ def test_offline_readiness_rejects_unsupported_kind_and_missing_artifact_root(
   config = load_readiness_config("sample", programs_root=tmp_path)
   dimension = config.dimensions[0]
 
-  with pytest.raises(ConfigError, match="unsupported offline-readiness"):
+  with pytest.raises(readiness_engine.ConfigError, match="unsupported offline-readiness"):
     readiness_engine._evaluate_offline_readiness_dimension(
       replace(
         dimension,
@@ -767,7 +767,7 @@ def test_offline_readiness_rejects_unsupported_kind_and_missing_artifact_root(
         ),
       )
     )
-  with pytest.raises(ConfigError, match="no artifact root"):
+  with pytest.raises(readiness_engine.ConfigError, match="no artifact root"):
     readiness_engine._evaluate_offline_readiness_dimension(
       replace(dimension, source=replace(dimension.source, artifact_root=None))
     )
