@@ -152,6 +152,19 @@ def test_builder_refuses_rendered_items_outside_captured_source_scopes():
         _capture(ids=(2, 3), queries=(query,), facts=(_fact(),))
 
 
+@pytest.mark.parametrize("membership_id", ("", "not-a-number", "0", "-1"))
+def test_builder_refuses_invalid_source_scope_membership(membership_id):
+    query = SimpleNamespace(
+        query_id="q",
+        scope_id="scope",
+        wiql_hash="query",
+        membership_ids=(membership_id,),
+    )
+
+    with pytest.raises(ConfigError, match="source scope membership is invalid"):
+        _capture(queries=(query,))
+
+
 def test_builder_refuses_binding_outside_rendered_source_scope_membership():
     query = QueryResultEntry(
         query_id="q", scope_id="scope", wiql_hash="query",
