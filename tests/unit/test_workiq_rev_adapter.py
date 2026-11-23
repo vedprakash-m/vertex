@@ -20,6 +20,8 @@ from src.m365.rev.workiq_enumerator import (
     WorkIQEnumerator,
     WorkIQHydrator,
     WorkIQPage,
+    WorkIQQueryPage,
+    WorkIQQueryPage,
 )
 
 CTX = WorkIQContext(tenant_id="tenant-1", principal_mailbox="pm@contoso.com")
@@ -134,6 +136,144 @@ def test_enumerate_empty_noncheckpoint_page_is_not_verified() -> None:
 
     assert isinstance(result, Incomplete)
     assert result.reason == "coverage_unverified:empty"
+
+
+@pytest.mark.parametrize(
+    ("page", "reason"),
+    [
+        (WorkIQPage((), None, response_usable=False), "provider_error:structured_response_unusable"),
+        (
+            WorkIQPage(
+                ({"id": "m1", "receivedDateTime": "invalid"},),
+                None,
+                rejected_source_time_count=1,
+                rejected_invalid_record_count=1,
+            ),
+            "admission_rejected:unqualified_source_time=2,invalid_records=1",
+        ),
+        (WorkIQPage((), None, rejected_invalid_record_count=1), "invalid_records:1"),
+    ],
+)
+def test_checkpoint_page_preserves_rejected_admission_reasons(page, reason: str) -> None:
+    result = WorkIQEnumerator(lambda _intent: page, CTX).enumerate(
+        _intent(), correlation_id="cid"
+    )
+    assert isinstance(result, Incomplete)
+    assert result.reason == reason
+
+
+def test_query_page_preserves_typed_response_counts() -> None:
+    page = WorkIQQueryPage(
+        records=({"id": "m1", "receivedDateTime": "2026-11-01T00:00:00Z"},),
+        response_usable=True,
+    )
+    result = WorkIQEnumerator(lambda _intent: page, CTX).enumerate(
+        _intent(), correlation_id="cid"
+    )
+    assert isinstance(result, Success)
+    assert _ids(result) == ["m1"]
+
+
+def test_query_without_signature_preserves_direct_callable_result(monkeypatch) -> None:
+    import src.m365.rev.workiq_enumerator as adapter
+
+    monkeypatch.setattr(
+        adapter.inspect,
+        "signature",
+        lambda _query: (_ for _ in ()).throw(ValueError("no signature")),
+    )
+    enumerator = WorkIQEnumerator(lambda _intent: 3, CTX)
+    assert enumerator._query_with_budget(_intent()) == 3
+
+
+def test_run_budget_exhaustion_is_visible() -> None:
+    calls = 0
+
+    def query(_intent):
+        nonlocal calls
+        calls += 1
+        return ()
+
+    budget = WorkIQRunBudget(max_calls=1, max_wall_clock_seconds=30)
+    enumerator = WorkIQEnumerator(query, CTX, run_budget=budget)
+    assert isinstance(
+        enumerator.enumerate(_intent(), correlation_id="first"),
+        Incomplete,
+    )
+    exhausted = enumerator.enumerate(_intent(), correlation_id="second")
+    assert isinstance(exhausted, Incomplete)
+    assert exhausted.reason == "budget_stop:workiq_calls"
+
+
+@pytest.mark.parametrize(
+    ("page", "reason"),
+    [
+        (WorkIQPage((), None, response_usable=False), "provider_error:structured_response_unusable"),
+        (
+            WorkIQPage(
+                ({"id": "m1", "receivedDateTime": "invalid"},),
+                None,
+                rejected_source_time_count=1,
+                rejected_invalid_record_count=1,
+            ),
+            "admission_rejected:unqualified_source_time=2,invalid_records=1",
+        ),
+        (
+            WorkIQPage((), None, rejected_invalid_record_count=1),
+            "invalid_records:1",
+        ),
+    ],
+)
+def test_checkpoint_page_preserves_rejected_admission_reasons(page, reason: str) -> None:
+    result = WorkIQEnumerator(lambda _intent: page, CTX).enumerate(
+        _intent(), correlation_id="cid"
+    )
+
+    assert isinstance(result, Incomplete)
+    assert result.reason == reason
+
+
+def test_query_page_preserves_typed_response_counts() -> None:
+    page = WorkIQQueryPage(
+        records=({"id": "m1", "receivedDateTime": "2026-11-01T00:00:00Z"},),
+        rejected_identity_count=0,
+        rejected_source_time_count=0,
+        rejected_invalid_record_count=0,
+        rejected_outside_window_count=0,
+        response_usable=True,
+    )
+    result = WorkIQEnumerator(lambda _intent: page, CTX).enumerate(
+        _intent(), correlation_id="cid"
+    )
+
+    assert isinstance(result, Success)
+    assert _ids(result) == ["m1"]
+
+
+def test_query_without_signature_preserves_direct_callable_result(monkeypatch) -> None:
+    import src.m365.rev.workiq_enumerator as adapter
+
+    monkeypatch.setattr(adapter.inspect, "signature", lambda _query: (_ for _ in ()).throw(ValueError("no signature")))
+    enumerator = WorkIQEnumerator(lambda _intent: 3, CTX)
+    result = enumerator._query_with_budget(_intent())
+    assert result == 3
+
+
+def test_run_budget_exhaustion_and_checkpoint_cursor_refusal(tmp_path) -> None:
+    calls = 0
+
+    def query(_intent, *, cursor=None, timeout_seconds=None):
+        nonlocal calls
+        calls += 1
+        return WorkIQPage((), cursor)
+
+    budget = WorkIQRunBudget(max_calls=1, max_wall_clock_seconds=30)
+    enumerator = WorkIQEnumerator(query, CTX, run_budget=budget)
+    first = enumerator.enumerate(_intent(), correlation_id="first")
+    assert isinstance(first, Incomplete)
+    second = enumerator.enumerate(_intent(), correlation_id="second")
+    assert isinstance(second, Incomplete)
+    assert second.reason == "budget_stop:workiq_calls"
 
 
 def test_checkpoint_page_preserves_latest_edit_and_suppresses_tombstone() -> None:

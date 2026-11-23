@@ -336,6 +336,103 @@ def test_d7_frequency_weights_are_used_in_shared_cycle_bootstrap() -> None:
     assert result["measurements"]["frequency_weighted_savings"] == pytest.approx(0.6)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"cycles": ()}, "non-empty"),
+        ({"cycles": ((WeightedSavingsObservation(100.0, 10.0, 1.0),),), "resamples": 0}, "resamples"),
+        ({"cycles": ((WeightedSavingsObservation(100.0, 10.0, 1.0),),), "seed": -1}, "seed"),
+        ({"cycles": ((WeightedSavingsObservation(100.0, 10.0, 1.0),),), "confidence_level": 1.0}, "confidence_level"),
+    ],
+)
+def test_shared_cycle_bootstrap_rejects_invalid_configuration(kwargs, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        calculate_matched_cycle_savings(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("observation", "message"),
+    [
+        (WeightedSavingsObservation(0.0, 1.0, 1.0), "baseline_minutes"),
+        (WeightedSavingsObservation(100.0, float("nan"), 1.0), "saved_minutes"),
+        (WeightedSavingsObservation(100.0, 10.0, 0.0), "frequency_weight"),
+    ],
+)
+def test_shared_cycle_bootstrap_rejects_invalid_observations(
+    observation: WeightedSavingsObservation, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        calculate_matched_cycle_savings(((observation,),), resamples=1000)
+
+
+def test_readiness_rejects_insufficient_bootstrap_samples() -> None:
+    cycles = tuple(
+        MatchedWeeklyCycle(
+            cycle_id=f"cycle-{index}",
+            week_start=datetime(2026, 1, 1, tzinfo=timezone.utc).date()
+            + timedelta(days=index * 7),
+            baseline_minutes=100.0,
+            assisted_minutes=10.0,
+            quality_passed=True,
+        )
+        for index in range(8)
+    )
+    with pytest.raises(ValueError, match="1000 bootstrap"):
+        evaluate_matched_cycles(
+            cycles,
+            strata=(StratumSample("exec", 60, 0),),
+            bootstrap_resamples=999,
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"cycles": ()}, "non-empty matched cycle"),
+        ({"cycles": ((WeightedSavingsObservation(100.0, 10.0, 1.0),),), "resamples": 0}, "resamples"),
+        ({"cycles": ((WeightedSavingsObservation(100.0, 10.0, 1.0),),), "seed": -1}, "seed"),
+        ({"cycles": ((WeightedSavingsObservation(100.0, 10.0, 1.0),),), "confidence_level": 1.0}, "confidence_level"),
+    ],
+)
+def test_shared_cycle_bootstrap_rejects_invalid_configuration(kwargs, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        calculate_matched_cycle_savings(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("observation", "message"),
+    [
+        (WeightedSavingsObservation(0.0, 1.0, 1.0), "baseline_minutes"),
+        (WeightedSavingsObservation(100.0, float("nan"), 1.0), "saved_minutes"),
+        (WeightedSavingsObservation(100.0, 10.0, 0.0), "frequency_weight"),
+    ],
+)
+def test_shared_cycle_bootstrap_rejects_invalid_observations(
+    observation: WeightedSavingsObservation, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        calculate_matched_cycle_savings(((observation,),), resamples=1000)
+
+
+def test_readiness_rejects_insufficient_bootstrap_samples() -> None:
+    with pytest.raises(ValueError, match="1000 bootstrap"):
+        evaluate_matched_cycles(
+            tuple(
+                MatchedWeeklyCycle(
+                    cycle_id=f"cycle-{index}",
+                    week_start=datetime(2026, 1, 1, tzinfo=timezone.utc).date()
+                    + timedelta(days=index * 7),
+                    baseline_minutes=100.0,
+                    assisted_minutes=10.0,
+                    quality_passed=True,
+                )
+                for index in range(8)
+            ),
+            strata=(StratumSample("exec", 60, 0),),
+            bootstrap_resamples=999,
+        )
+
+
 def test_d7_requires_five_distinct_baselines_and_at_least_1000_resamples() -> None:
     duplicate = _d7_packet()
     duplicate["protocol"]["historical_baselines"] = [

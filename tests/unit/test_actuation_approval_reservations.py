@@ -979,6 +979,36 @@ def test_revocation_refuses_missing_or_stale_current_approval(tmp_path: Path) ->
         )
 
 
+@pytest.mark.parametrize(
+    ("remote_id", "remote_rev"),
+    [(0, 2), (42, 0)],
+)
+def test_provider_success_requires_valid_remote_identity(
+    tmp_path: Path, remote_id: int, remote_rev: int
+) -> None:
+    root = tmp_path / "programs"
+    request = _request(operation="create_task.v1")
+    entry, _ = _enqueue(root, request)
+
+    outcome = dispatch_approved_actuation_intent(
+        program_id=_PROGRAM,
+        outbox_id=entry.outbox_id,
+        owner="worker",
+        programs_root=root,
+        preflight_fn=lambda retained: _preflight(request=request),
+        dispatch_fn=lambda retained: _success(
+            retained, remote_id=remote_id, remote_rev=remote_rev
+        ),
+        approval_policy_version=request.approval_policy_version,
+        scope_enabled=True,
+        rule_enabled=True,
+        now=_NOW,
+    )
+
+    assert outcome.status == "uncertain_remote_state"
+    assert "valid remote" in str(outcome.entry.failure_reason).lower()
+
+
 def test_revocation_of_completed_effect_does_not_fabricate_reconciliation(tmp_path: Path) -> None:
     root = tmp_path / "programs"
     request = _request(operation="create_task.v1")

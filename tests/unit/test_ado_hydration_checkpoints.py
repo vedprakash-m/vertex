@@ -22,6 +22,8 @@ from src.core.ado_hydration_checkpoints import (
     read_hydration_evidence,
     CHECKPOINT_SCHEMA_VERSION,
 )
+from src.core import ado_hydration_checkpoints as checkpoint_module
+from src.core import ado_hydration_checkpoints as checkpoint_module
 from src.core.channel_registry_store import ChannelRegistryStore
 from src.core.exceptions import AuthError, ConfigError, QueryError
 from src.core.integration_types import ChannelConfig, HydrationMode
@@ -93,6 +95,108 @@ def test_unknown_subresource_is_rejected_by_schema() -> None:
             "INSERT INTO ado_hydration_checkpoints"
             "(provider_instance_id, work_item_id, subresource, schema_version, cursor, updated_at)"
             " VALUES ('default', 1, 'attachment_content', 2, 'x', 'now')"
+        )
+
+
+class _BrokenDatetime(datetime):
+    def astimezone(self, tz=None):
+        raise ValueError("broken conversion")
+
+
+def test_checkpoint_time_conversion_failure_is_explicit() -> None:
+    with pytest.raises(ValueError, match="invalid"):
+        checkpoint_module._validated_checkpoint_time(
+            _BrokenDatetime(2026, 5, 25, tzinfo=timezone.utc)
+        )
+
+
+def test_invalid_checkpoint_evidence_is_disclosed_and_cannot_be_read() -> None:
+    conn = _conn()
+    conn.execute("BEGIN")
+    advance_checkpoint(
+        conn,
+        CheckpointAdvance(
+            42,
+            HydrationSubresource.COMMENTS,
+            "1",
+            evidence_json=json.dumps(
+                {
+                    "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "subresource": "comments",
+                    "cursor": "1",
+                    "records": [],
+                    "pagination": {
+                        "total_fetched": 0,
+                        "page_count": 0,
+                        "is_truncated": False,
+                    },
+                }
+            ),
+        ),
+        provider_instance_id="default",
+        at=_AT,
+    )
+    conn.execute("UPDATE ado_hydration_evidence SET payload_json = 'not-json'")
+    conn.commit()
+
+    assert read_checkpoints(conn, "default", (42,))[
+        (42, HydrationSubresource.COMMENTS)
+    ].state == "unknown"
+    with pytest.raises(ValueError, match="integrity mismatch"):
+        read_hydration_evidence(
+            conn, "default", 42, HydrationSubresource.COMMENTS
+        )
+
+
+class _BrokenDatetime(datetime):
+    def astimezone(self, tz=None):
+        raise ValueError("broken conversion")
+
+
+def test_checkpoint_time_conversion_failure_is_explicit() -> None:
+    with pytest.raises(ValueError, match="invalid"):
+        checkpoint_module._validated_checkpoint_time(
+            _BrokenDatetime(2026, 5, 25, tzinfo=timezone.utc)
+        )
+
+
+def test_invalid_checkpoint_evidence_is_disclosed_and_cannot_be_read() -> None:
+    conn = _conn()
+    conn.execute("BEGIN")
+    advance_checkpoint(
+        conn,
+        CheckpointAdvance(
+            42,
+            HydrationSubresource.COMMENTS,
+            "1",
+            evidence_json=json.dumps(
+                {
+                    "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "subresource": "comments",
+                    "cursor": "1",
+                    "records": [],
+                    "pagination": {
+                        "total_fetched": 0,
+                        "page_count": 0,
+                        "is_truncated": False,
+                    },
+                }
+            ),
+        ),
+        provider_instance_id="default",
+        at=_AT,
+    )
+    conn.execute(
+        "UPDATE ado_hydration_evidence SET payload_json = 'not-json'"
+    )
+    conn.commit()
+
+    assert read_checkpoints(conn, "default", (42,))[
+        (42, HydrationSubresource.COMMENTS)
+    ].state == "unknown"
+    with pytest.raises(ValueError, match="integrity mismatch"):
+        read_hydration_evidence(
+            conn, "default", 42, HydrationSubresource.COMMENTS
         )
 
 
@@ -177,6 +281,40 @@ def test_store_mark_verified_commits_checkpoints_atomically(tmp_path: Path) -> N
     checkpoints = store.read_hydration_checkpoints("default", (42,))
     assert checkpoints[(42, HydrationSubresource.REVISIONS)].cursor == "2"
     assert checkpoints[(42, HydrationSubresource.COMMENTS)].state == "unknown"
+
+
+def test_commit_advances_opens_implicit_transaction_when_needed(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+    with store._connect() as conn:
+        commit_checkpoint_advances(
+            conn,
+            program_id="demo",
+            provider_instance_id="default",
+            advances=(
+                CheckpointAdvance(42, HydrationSubresource.REVISIONS, "3"),
+            ),
+            at=_AT,
+        )
+
+    checkpoints = store.read_hydration_checkpoints("default", (42,))
+    assert checkpoints[(42, HydrationSubresource.REVISIONS)].cursor == "3"
+
+
+def test_commit_advances_opens_implicit_transaction_when_needed(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+    with store._connect() as conn:
+        commit_checkpoint_advances(
+            conn,
+            program_id="demo",
+            provider_instance_id="default",
+            advances=(
+                CheckpointAdvance(42, HydrationSubresource.REVISIONS, "3"),
+            ),
+            at=_AT,
+        )
+
+    checkpoints = store.read_hydration_checkpoints("default", (42,))
+    assert checkpoints[(42, HydrationSubresource.REVISIONS)].cursor == "3"
 
 
 def test_store_failed_evidence_commit_leaves_checkpoint_unknown(tmp_path: Path) -> None:
