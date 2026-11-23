@@ -666,6 +666,8 @@ def _validate_w63(payload: dict[str, Any], missing: list[str], invalid: list[str
 
     tier_total = values["eligible_tier_decisions"]
     tasks_total = values["eligible_routine_tasks"]
+    if values["telemetry_records"] > tier_total:
+        invalid.append("telemetry_records")
     if tier_total != (
         values["deterministic_local_tasks"]
         + values["cache_reuse_tasks"]
@@ -731,7 +733,11 @@ def _validate_w64(payload: dict[str, Any], missing: list[str], invalid: list[str
             invalid.append(f"{prefix}.item_id")
         else:
             item_ids.add(str(item_id))
-        if row.get("critical_error") is True:
+        if "critical_error" not in row:
+            missing.append(f"{prefix}.critical_error")
+        elif not isinstance(row["critical_error"], bool):
+            invalid.append(f"{prefix}.critical_error")
+        elif row["critical_error"] is True:
             material_regressions += 1
         scores = row.get("rubric_scores")
         if not isinstance(scores, dict) or set(scores) != set(REQUIRED_QUALITY_DIMENSIONS):
@@ -1058,21 +1064,40 @@ def _validate_w610(payload: dict[str, Any], missing: list[str], invalid: list[st
         numeric_budget = _finite_number(budget)
         if numeric_value is None or numeric_budget is None:
             invalid.append(metric)
+        elif numeric_value < 0:
+            invalid.append(f"measurements.{metric}")
+        elif numeric_budget < 0:
+            invalid.append(f"ratified_budgets.{metric}")
         elif numeric_value > numeric_budget:
             failed.append(f"{metric}:budget")
     restore = sections["restore"]
     if restore.get("isolated_drill") is not True:
         failed.append("isolated_restore_drill")
     for field in ("measured_rpo_s", "measured_rto_s", "rpo_budget_s", "rto_budget_s"):
-        if _finite_number(restore.get(field)) is None:
+        value = _finite_number(restore.get(field))
+        if value is None:
             missing.append(f"restore.{field}")
+        elif value < 0:
+            invalid.append(f"restore.{field}")
     measured_rpo = _finite_number(restore.get("measured_rpo_s"))
     rpo_budget = _finite_number(restore.get("rpo_budget_s"))
-    if measured_rpo is not None and rpo_budget is not None and measured_rpo > rpo_budget:
+    if (
+        measured_rpo is not None
+        and rpo_budget is not None
+        and measured_rpo >= 0
+        and rpo_budget >= 0
+        and measured_rpo > rpo_budget
+    ):
         failed.append("restore:rpo")
     measured_rto = _finite_number(restore.get("measured_rto_s"))
     rto_budget = _finite_number(restore.get("rto_budget_s"))
-    if measured_rto is not None and rto_budget is not None and measured_rto > rto_budget:
+    if (
+        measured_rto is not None
+        and rto_budget is not None
+        and measured_rto >= 0
+        and rto_budget >= 0
+        and measured_rto > rto_budget
+    ):
         failed.append("restore:rto")
     onboarding = sections["onboarding"]
     if onboarding.get("operator_proficiency_passed") is not True:

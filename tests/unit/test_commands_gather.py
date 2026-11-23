@@ -13553,7 +13553,7 @@ def test_gather_program_appends_kusto_signals_and_auto_reviews_validated_queries
         golden_queries=(
             KustoQuery(
                 id="velocity-p50",
-                cluster="https://example.kusto.windows.net",
+                cluster="https://healthy.kusto.windows.net",
                 database="ExampleDb",
                 kql="Metrics | take 1",
                 section="Deployment Velocity",
@@ -13579,6 +13579,20 @@ def test_gather_program_appends_kusto_signals_and_auto_reviews_validated_queries
     monkeypatch.setattr(gather, "_load_program_context", lambda program_id, programs_root: (program, workstreams))
     monkeypatch.setattr(gather, "_load_freshness_thresholds", lambda program_id, programs_root: (14, 30))
     monkeypatch.setattr(gather, "load_program_knowledge", lambda program_id, programs_root: knowledge)
+    typed_executor_requests: list[bool] = []
+
+    def _build_typed_executor(*, typed: bool = False):
+        typed_executor_requests.append(typed)
+        return _fake_kusto_query_executor
+
+    monkeypatch.setattr(
+        gather,
+        "build_live_kusto_query_probe",
+        lambda: lambda queries: frozenset(
+            {("https://example.kusto.windows.net", "ExampleDb")}
+        ),
+    )
+    monkeypatch.setattr(gather, "build_live_kusto_query_executor", _build_typed_executor)
 
     artifacts = gather.gather_program(
         "acme",
@@ -13587,21 +13601,22 @@ def test_gather_program_appends_kusto_signals_and_auto_reviews_validated_queries
         loader=lambda program, workstreams, as_of, **_: ((), 0),
         freshness_loader=lambda program, workstreams, as_of, **_: ((), 0),
         include_kusto=True,
-        kusto_query_executor=_fake_kusto_query_executor,
     )
 
     signals = read_signals("acme", programs_root=programs_root)
     reviews = read_review_log("acme", programs_root=programs_root)
     signals_by_query = {signal.metadata["query_id"]: signal for signal in signals if signal.metadata is not None}
 
-    assert artifacts.discovered_signals == 2
-    assert artifacts.new_signals == 2
+    assert artifacts.discovered_signals == 1
+    assert artifacts.new_signals == 1
     assert artifacts.pending_review == 0
-    assert artifacts.auto_reviews_written == 2
-    assert len(reviews) == 2
+    assert artifacts.auto_reviews_written == 1
+    assert len(reviews) == 1
     assert {review.signal_id for review in reviews} == {signal.id for signal in signals_by_query.values()}
+    assert set(signals_by_query) == {"velocity-p50"}
     assert signals_by_query["velocity-p50"].metadata["validated"] is True
-    assert signals_by_query["fleet-health"].metadata["validated"] is True
+    assert typed_executor_requests
+    assert all(typed_executor_requests)
 def test_gather_program_appends_program_activated_golden_query_even_when_program_ids_do_not_match(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
 

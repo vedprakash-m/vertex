@@ -676,6 +676,63 @@ def test_unexpected_payload_types_are_not_coerced() -> None:
     assert any("review_burden_reduction" in field for field in result.invalid_fields)
 
 
+def test_routing_telemetry_cannot_exceed_eligible_population() -> None:
+    packet = _passing_packets()["RELO-W6.3"]
+    packet["telemetry_records"] = 101
+
+    result = verify_w6_packet(packet)
+
+    assert result.classification == "not_qualified"
+    assert "telemetry_records" in result.invalid_fields
+
+
+@pytest.mark.parametrize("value", [None, "false", 0, 1])
+def test_blind_comparison_requires_explicit_critical_error_boolean(value) -> None:
+    packet = _passing_packets()["RELO-W6.4"]
+    if value is None:
+        packet["comparisons"][0].pop("critical_error")
+    else:
+        packet["comparisons"][0]["critical_error"] = value
+
+    result = verify_w6_packet(packet)
+
+    assert result.classification == "not_qualified"
+    assert "comparisons[0].critical_error" in (
+        *result.missing_fields,
+        *result.invalid_fields,
+    )
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "measurement", "budget"),
+    [
+        ("measurements", "required_path_p50_s", -1.0, 0.0),
+        ("ratified_budgets", "required_path_p50_s", 0.0, -1.0),
+        ("restore", "measured_rpo_s", -1.0, 0.0),
+        ("restore", "rpo_budget_s", -2.0, -1.0),
+    ],
+)
+def test_scale_and_restore_measurements_are_nonnegative(
+    section: str,
+    field: str,
+    measurement: float,
+    budget: float,
+) -> None:
+    packet = _passing_packets()["RELO-W6.10"]
+    if section == "restore":
+        budget_field = "rpo_budget_s"
+        packet["restore"]["measured_rpo_s"] = measurement
+        packet["restore"][budget_field] = budget
+    else:
+        packet["measurements"]["required_path_p50_s"] = measurement
+        packet["ratified_budgets"]["required_path_p50_s"] = budget
+
+    result = verify_w6_packet(packet)
+
+    assert result.classification == "not_qualified"
+    assert any(field in item for item in (*result.missing_fields, *result.invalid_fields))
+
+
 @pytest.mark.parametrize(
     "mutator",
     [

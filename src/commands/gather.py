@@ -1409,7 +1409,9 @@ def _gather_program_impl(
         kusto_started_at = perf_counter()
         kusto_error_start = len(integration_error_details)
         try:
-            query_executor_for_signals = kusto_query_executor
+            query_executor_for_signals = (
+                kusto_query_executor or build_live_kusto_query_executor(typed=True)
+            )
             kusto_uil_binding = _resolve_uil_channel_binding_for_gather(
                 program,
                 workstreams,
@@ -1478,7 +1480,7 @@ def _gather_program_impl(
                             )
                             # Wrap executor to silently skip queries on failed clusters.
                             query_executor_for_signals = _make_cluster_filtered_executor(
-                                kusto_query_executor or build_live_kusto_query_executor(),
+                                query_executor_for_signals,
                                 failed_targets,
                             )
                 kusto_signals = _build_kusto_signals(
@@ -1487,7 +1489,7 @@ def _gather_program_impl(
                     programs_root=resolved_programs_root,
                     as_of=current_time,
                     workstreams=workstreams,
-                    executor=query_executor_for_signals or build_live_kusto_query_executor(),
+                    executor=query_executor_for_signals,
                     filter_for_gather=True,
                     include_unvalidated=probe_kusto,
                     query_state_sink=query_states,
@@ -1499,7 +1501,7 @@ def _gather_program_impl(
                 programs_root=resolved_programs_root,
                 as_of=current_time,
                 workstreams=workstreams,
-                executor=query_executor_for_signals or kusto_query_executor or build_live_kusto_query_executor(),
+                executor=query_executor_for_signals,
                 include_unvalidated=probe_kusto,
                 query_state_sink=query_states,
                 previous_query_states=previous_query_states,

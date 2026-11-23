@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,7 @@ from src.core.exceptions import AuthError, QueryError
 from src.core.gather_run_manifest import resolve_latest_committed_manifest
 from src.core.gather_state_store import load_gather_state
 from src.core.kusto_client import KustoClient, build_live_kusto_query_probe
+from src.core.integration_types import KustoResultSet
 from src.core.models_v2 import KustoQuery
 from tests.unit.test_kusto_error_privacy import _NOW, _PROGRAM, scenario
 
@@ -43,7 +45,16 @@ def _patch_client(monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]) 
             raise error_type(_PRIVATE)
         return [] if kql == ".show version" else [{"Value": 1}]
 
+    def execute_typed(_self, query, **_kwargs):
+        rows = execute(_self, query.cluster, query.database, query.kql, **_kwargs)
+        return KustoResultSet(
+            query_id=query.id,
+            rows=tuple(rows),
+            observed_at=datetime.now(timezone.utc),
+        )
+
     monkeypatch.setattr(KustoClient, "execute", execute)
+    monkeypatch.setattr(KustoClient, "execute_typed", execute_typed)
     return calls
 
 
@@ -102,7 +113,13 @@ def _prepare_gather(monkeypatch: pytest.MonkeyPatch) -> tuple[list, list]:
     monkeypatch.setattr(gather, "_load_refresh_kpi_queries", lambda *_args, **_kwargs: ())
 
     def build_signals(*, executor, **_kwargs):
-        results.append((executor(bad), executor(good)))
+        observed = (executor(bad), executor(good))
+        results.append(tuple(
+            [dict(row) for row in result.rows]
+            if isinstance(result, KustoResultSet)
+            else result
+            for result in observed
+        ))
         return ()
 
     monkeypatch.setattr(gather, "_build_kusto_signals", build_signals)
