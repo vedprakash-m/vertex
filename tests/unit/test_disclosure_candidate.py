@@ -448,6 +448,39 @@ def test_push_refs_rejects_nonblank_malformed_input(
     assert payload["findings"][0]["code"] == "SELECTION_INVALID"
 
 
+def test_new_branch_metadata_ignores_commits_already_on_origin_main(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    module = _load_module()
+    _configure_git_repo(tmp_path)
+    _git(tmp_path, "config", "user.email", "legacy@example.invalid")
+    (tmp_path / "base.txt").write_text("published baseline\n", encoding="utf-8")
+    _git(tmp_path, "add", "base.txt")
+    _git(tmp_path, "commit", "-m", "published baseline")
+    base = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+    _git(tmp_path, "update-ref", "refs/remotes/origin/main", base)
+
+    _git(tmp_path, "config", "user.email", "new@users.noreply.github.com")
+    (tmp_path / "safe.txt").write_text("new safe content\n", encoding="utf-8")
+    _git(tmp_path, "add", "safe.txt")
+    _git(tmp_path, "commit", "-m", "outgoing safe commit")
+    head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(f"refs/heads/new {head} refs/heads/new {'0' * 40}\n"),
+    )
+
+    code, payload = _run(module, capsys, tmp_path, "--push-refs")
+
+    assert code == 0
+    assert payload["findings"] == []
+
+
 def test_identity_accepts_only_github_noreply_email(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

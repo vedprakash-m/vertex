@@ -187,8 +187,11 @@ def _git_paths(raw_paths: bytes) -> tuple[str, ...]:
     return paths
 
 
-def _load_push_ref_commits(root: Path, raw_input: str) -> tuple[str, ...]:
+def _load_push_ref_commits(
+    root: Path, raw_input: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     commits: list[str] = []
+    metadata_commits: list[str] = []
     for raw_line in raw_input.splitlines():
         parts = raw_line.strip().split()
         if not parts:
@@ -203,13 +206,61 @@ def _load_push_ref_commits(root: Path, raw_input: str) -> tuple[str, ...]:
             continue
         # A new ref has no advertised base. Local tracking refs cannot prove
         # which commits the destination already has.
-        cmd = ["git", "--no-replace-objects", "rev-list",
-               local_oid if remote_oid == zero_oid else f"{remote_oid}..{local_oid}"]
+        cmd = [
+            "git",
+            "--no-replace-objects",
+            "rev-list",
+            local_oid if remote_oid == zero_oid else f"{remote_oid}..{local_oid}",
+        ]
         rev = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
         if rev.returncode != 0:
             raise _SelectionError("INPUT_UNAVAILABLE")
-        commits.extend(line.strip() for line in rev.stdout.splitlines() if line.strip())
-    return tuple(dict.fromkeys(commits))
+        outgoing = tuple(line.strip() for line in rev.stdout.splitlines() if line.strip())
+        commits.extend(outgoing)
+        if remote_oid != zero_oid:
+            metadata_commits.extend(outgoing)
+            continue
+        metadata_base = _remote_main_oid(root)
+        if metadata_base is None:
+            metadata_commits.extend(outgoing)
+            continue
+        metadata_rev = subprocess.run(
+            [
+                "git",
+                "--no-replace-objects",
+                "rev-list",
+                f"{metadata_base}..{local_oid}",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if metadata_rev.returncode != 0:
+            raise _SelectionError("INPUT_UNAVAILABLE")
+        metadata_commits.extend(
+            line.strip() for line in metadata_rev.stdout.splitlines() if line.strip()
+        )
+    return tuple(dict.fromkeys(commits)), tuple(dict.fromkeys(metadata_commits))
+
+
+def _remote_main_oid(root: Path) -> str | None:
+    for ref in (
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+        "refs/remotes/origin/master",
+    ):
+        result = subprocess.run(
+            ["git", "--no-replace-objects", "rev-parse", "--verify", ref],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        oid = result.stdout.strip()
+        if result.returncode == 0 and _GIT_OID.fullmatch(oid):
+            return oid
+    return None
 
 
 def _load_push_ref_candidates(root: Path, commits: Sequence[str]) -> tuple[Candidate, ...]:
@@ -310,8 +361,8 @@ def _load_selection(
     if args.staged:
         return None, _load_staged_candidates(root), [], ()
     if args.push_refs:
-        commits = _load_push_ref_commits(root, sys.stdin.read())
-        return None, _load_push_ref_candidates(root, commits), [], commits
+        commits, metadata_commits = _load_push_ref_commits(root, sys.stdin.read())
+        return None, _load_push_ref_candidates(root, commits), [], metadata_commits
     if args.commit_range:
         return None, (), [], _load_commit_range(root, args.commit_range)
     if args.manifest is not None:
