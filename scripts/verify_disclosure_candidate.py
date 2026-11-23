@@ -22,12 +22,19 @@ from scripts.check_publication_content import BINARY_SUFFIXES, SKIP_PATHS, scan_
 SCHEMA_VERSION = 1
 _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
 _GIT_OID = re.compile(r"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+_GITHUB_NOREPLY_EMAIL = re.compile(
+    r"\A(?:noreply@github\.com|[A-Za-z0-9_.+\[\]-]+@users\.noreply\.github\.com)\Z",
+    re.IGNORECASE,
+)
 _UNAVAILABLE = {"IGNORE_STATUS_UNAVAILABLE", "INPUT_UNAVAILABLE"}
 _MESSAGES = {
     "CANDIDATE_DUPLICATE": "Candidate path was selected more than once.",
     "CANDIDATE_INVALID": "Candidate must select a file.",
     "CANDIDATE_OUTSIDE_ROOT": "Candidate path must resolve inside the repository root.",
+    "COMMIT_AUTHOR_UNAPPROVED": "Commit author email is not a GitHub noreply identity.",
+    "COMMIT_COMMITTER_UNAPPROVED": "Commit committer email is not a GitHub noreply identity.",
     "DISCLOSURE_FINDING": "Existing publication content scan reported a disclosure finding.",
+    "GIT_IDENTITY_UNAPPROVED": "Effective Git user.email is not a GitHub noreply identity.",
     "IGNORED_INPUT": "Selected input is ignored by Git.",
     "IGNORE_STATUS_UNAVAILABLE": "Git ignore status could not be determined for the selected input.",
     "INPUT_UNAVAILABLE": "Selected input is unavailable, unreadable, or not a regular file.",
@@ -95,6 +102,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     selection.add_argument("--manifest")
     selection.add_argument("--staged", action="store_true")
     selection.add_argument("--push-refs", action="store_true")
+    selection.add_argument("--commit-range")
+    selection.add_argument("--identity", action="store_true")
     parser.add_argument("--binary-allowlist")
     return parser.parse_args(argv)
 
@@ -178,9 +187,9 @@ def _git_paths(raw_paths: bytes) -> tuple[str, ...]:
     return paths
 
 
-def _load_push_ref_candidates(root: Path) -> tuple[Candidate, ...]:
+def _load_push_ref_commits(root: Path, raw_input: str) -> tuple[str, ...]:
     commits: list[str] = []
-    for raw_line in sys.stdin.read().splitlines():
+    for raw_line in raw_input.splitlines():
         parts = raw_line.strip().split()
         if not parts:
             continue
@@ -200,9 +209,12 @@ def _load_push_ref_candidates(root: Path) -> tuple[Candidate, ...]:
         if rev.returncode != 0:
             raise _SelectionError("INPUT_UNAVAILABLE")
         commits.extend(line.strip() for line in rev.stdout.splitlines() if line.strip())
+    return tuple(dict.fromkeys(commits))
 
+
+def _load_push_ref_candidates(root: Path, commits: Sequence[str]) -> tuple[Candidate, ...]:
     candidates: list[Candidate] = []
-    for oid in dict.fromkeys(commits):
+    for oid in commits:
         diff = subprocess.run(
             ["git", "--no-replace-objects", "diff-tree", "--root", "--diff-merges=first-parent", "--no-commit-id", "--name-only",
              "--diff-filter=ACMRT", "--ignore-submodules=none", "-r", "-z", oid],
@@ -217,6 +229,69 @@ def _load_push_ref_candidates(root: Path) -> tuple[Candidate, ...]:
     return tuple(candidates)
 
 
+def _load_commit_range(root: Path, selected_range: str) -> tuple[str, ...]:
+    result = subprocess.run(
+        ["git", "--no-replace-objects", "rev-list", selected_range],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise _SelectionError("INPUT_UNAVAILABLE")
+    return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+def _inspect_git_identity(root: Path) -> list[Finding]:
+    result = subprocess.run(
+        ["git", "config", "--get", "user.email"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    email = result.stdout.strip()
+    if result.returncode != 0 or not _is_approved_git_email(email):
+        return [_finding("GIT_IDENTITY_UNAPPROVED")]
+    return []
+
+
+def _inspect_commit_metadata(root: Path, commits: Sequence[str]) -> list[Finding]:
+    findings: list[Finding] = []
+    for oid in dict.fromkeys(commits):
+        result = subprocess.run(
+            [
+                "git",
+                "--no-replace-objects",
+                "show",
+                "-s",
+                "--format=%ae%x00%ce",
+                oid,
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            findings.append(_finding("INPUT_UNAVAILABLE", oid))
+            continue
+        values = result.stdout.rstrip("\n").split("\0", maxsplit=1)
+        if len(values) != 2:
+            findings.append(_finding("INPUT_UNAVAILABLE", oid))
+            continue
+        author_email, committer_email = (value.strip() for value in values)
+        if not _is_approved_git_email(author_email):
+            findings.append(_finding("COMMIT_AUTHOR_UNAPPROVED", oid))
+        if not _is_approved_git_email(committer_email):
+            findings.append(_finding("COMMIT_COMMITTER_UNAPPROVED", oid))
+    return findings
+
+
+def _is_approved_git_email(email: str) -> bool:
+    return _GITHUB_NOREPLY_EMAIL.fullmatch(email) is not None
+
+
 def _load_binary_allowlist(raw_path: str | None, root: Path) -> dict[str, str]:
     default_path = root / "governance" / "disclosure-binary-allowlist.json"
     selected = raw_path or ("governance/disclosure-binary-allowlist.json" if default_path.is_file() else None)
@@ -229,19 +304,25 @@ def _load_binary_allowlist(raw_path: str | None, root: Path) -> dict[str, str]:
 def _load_selection(
     args: argparse.Namespace,
     root: Path,
-) -> tuple[str | None, tuple[Candidate, ...], list[str]]:
+) -> tuple[str | None, tuple[Candidate, ...], list[str], tuple[str, ...]]:
+    if args.identity:
+        return None, (), [], ()
     if args.staged:
-        return None, _load_staged_candidates(root), []
+        return None, _load_staged_candidates(root), [], ()
     if args.push_refs:
-        return None, _load_push_ref_candidates(root), []
+        commits = _load_push_ref_commits(root, sys.stdin.read())
+        return None, _load_push_ref_candidates(root, commits), [], commits
+    if args.commit_range:
+        return None, (), [], _load_commit_range(root, args.commit_range)
     if args.manifest is not None:
-        return _load_manifest(args.manifest, root)
+        manifest, candidates, lines = _load_manifest(args.manifest, root)
+        return manifest, candidates, lines, ()
     if not args.candidates:
         raise _SelectionError("SELECTION_REQUIRED")
     candidates = tuple(_resolve(path, root) for path in args.candidates)
     if len({candidate.relative_path for candidate in candidates}) != len(candidates):
         raise _SelectionError("CANDIDATE_DUPLICATE")
-    return None, candidates, []
+    return None, candidates, [], ()
 
 
 def _is_ignored(relative_path: str, root: Path) -> bool | None:
@@ -356,7 +437,7 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path = REPO_ROOT) -> i
     root = repo_root.resolve()
     try:
         args = _parse_args(argv)
-        manifest, candidates, manifest_lines = _load_selection(args, root)
+        manifest, candidates, manifest_lines, commits = _load_selection(args, root)
         allow_git_mode = bool(args.staged or args.push_refs)
         binary_allowlist = (
             _load_binary_allowlist(args.binary_allowlist, root)
@@ -373,6 +454,10 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path = REPO_ROOT) -> i
         return 2
 
     findings: list[Finding] = []
+    if args.identity:
+        findings.extend(_inspect_git_identity(root))
+    if commits:
+        findings.extend(_inspect_commit_metadata(root, commits))
     if manifest is not None:
         ignored = _is_ignored(manifest, root)
         if ignored is None:

@@ -201,6 +201,32 @@ def test_candidates_hydrate_through_existing_sharepoint_hydrator() -> None:
     assert "Launch is on track." in hydrated.value.canonical_text
 
 
+def test_hydrated_fixture_preserves_acl_without_claiming_authorization() -> None:
+    acl = ({"kind": "group", "id": "launch-readers", "roles": ("read",)},)
+    item = GraphDriveItem(
+        item_id="i-a",
+        drive_id="drv",
+        name="notes.txt",
+        mime_type="text/plain",
+        file_content=b"Launch is on track.",
+        acl=acl,
+    )
+    enumerated = _enumerator(
+        [_page("a")], _resolver({"a": Success(item)}),
+    ).enumerate(_INTENT, correlation_id="c")
+    assert isinstance(enumerated, Success)
+    hydrator = SharePointHydrator(
+        FakeRevSharePointClient((item,)),
+        SharePointContext(tenant_id="t", principal_mailbox="p"),
+    )
+
+    hydrated = hydrator.hydrate(enumerated.value[0], correlation_id="c")
+
+    assert isinstance(hydrated, Success)
+    assert hydrated.value.route_metadata["acl"] == acl
+    assert hydrated.value.route_metadata["acl_authorization_claimed"] is False
+
+
 def test_invalid_limits_rejected() -> None:
     with pytest.raises(ValueError):
         _enumerator([_page("a")], _resolver({}), max_pages=0)

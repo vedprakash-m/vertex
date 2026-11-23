@@ -47,9 +47,13 @@ from src.core.actuation_approval_store import (
 from src.core.actuation_reconciliation import (
     AuthorizedEffect,
     EffectReconciliation,
+    ReconciliationDisposition,
+    ReconciliationObservation,
     audience_manifest_hash,
     desired_effect_hash,
     reconcile_effect,
+    reconcile_uncertain_effect,
+    require_offline_compensation_operation,
 )
 from src.core.exceptions import CredentialExpired
 from src.core.journal import PROGRAMS_ROOT
@@ -61,6 +65,7 @@ from src.core.ledger.durable_outbox_store import (
     classify_expired_dispatched,
     enqueue,
     enqueue_with_effect,
+    has_effect_binding,
     lease_next,
     load_effect_outbox_id,
     load_entry,
@@ -70,15 +75,11 @@ from src.core.ledger.durable_outbox_store import (
     mark_compensation_required,
     mark_dispatched_with_workspace_lease,
     mark_failed_terminal,
-    mark_reconciled_absent,
-    mark_reconciled_confirmed,
     mark_succeeded,
     mark_uncertain_remote_state,
 )
 from src.core.operation_capabilities import (
     OPERATION_CAPABILITIES,
-    OperationCapability,
-    lookup_capability,
     provider_request_key,
 )
 from src.core.operator_identity import OperatorIdentity
@@ -229,12 +230,50 @@ def _retained_payload(entry: OutboxEntry) -> dict[str, object]:
     return payload
 
 
-def _require_retained_dispatchable_operation(entry: OutboxEntry) -> dict[str, object]:
+def _require_retained_dispatchable_operation(
+    entry: OutboxEntry,
+    *,
+    db_path: Path,
+    program_id: str,
+    require_effect_binding: bool = True,
+) -> dict[str, object]:
     payload = _retained_payload(entry)
     operation = payload.get("operation", "create_task.v1")
     if not isinstance(operation, str) or not operation:
         raise OutboxError("Operation is draft/manual only; it must have a versioned capability")
     require_dispatchable_operation(operation)
+    semantic_effect_id = (
+        _semantic_effect_id(
+            program_id=program_id,
+            operation=operation,
+            target_identity=str(payload.get("target_identity") or "new"),
+            fallback_causal_occurrence_id=str(payload["operation_intent_id"]),
+            payload_json=entry.payload_json,
+        )
+        if isinstance(payload.get("operation_intent_id"), str)
+        and payload["operation_intent_id"]
+        else None
+    )
+    semantic_owner = (
+        load_effect_outbox_id(db_path, semantic_effect_id)
+        if semantic_effect_id is not None
+        else None
+    )
+    if (
+        require_effect_binding
+        and semantic_effect_id is not None
+        and (
+            (
+                semantic_owner is None
+                and not has_effect_binding(db_path, entry.outbox_id)
+            )
+            or semantic_owner not in {None, entry.outbox_id}
+        )
+    ):
+        raise OutboxError(
+            "Semantic effect is not bound to this retained outbox row "
+            "(first binding won or the row is unbound)"
+        )
     return payload
 
 
@@ -510,7 +549,12 @@ def dispatch_leased_create_task(
         raise OutboxError("Requested outbox row does not exist")
     if observed.domain != ACTUATION_DISPATCH_DOMAIN or observed.correlation_id != idempotency_key:
         raise OutboxError("Existing outbox key has different domain or correlation")
-    _require_retained_dispatchable_operation(observed)
+    _require_retained_dispatchable_operation(
+        observed,
+        db_path=db_path,
+        program_id=program_id,
+        require_effect_binding=observed.status != "dispatched",
+    )
     if observed.status == "uncertain_remote_state":
         return ActuationDispatchOutcome(entry=observed, remote_id=None, status="uncertain_remote_state")
     if observed.status == "completed":
@@ -569,6 +613,8 @@ def dispatch_leased_create_task(
                 observed,
                 receipt=resume_receipt,
                 receipt_json=resume_receipt_json,
+                workspace_lease=lease_handle,
+                programs_root=programs_root,
             )
         if observed.status == "dispatched":
             classified = classify_expired_dispatched(
@@ -605,6 +651,8 @@ def dispatch_leased_create_task(
                     owner=owner,
                     fencing_token=leased.lease_fencing_token,
                     reason=str(error)[:500],
+                    workspace_lease=lease_handle,
+                    programs_root=programs_root,
                 )
                 continue
             if leased.outbox_id == idempotency_key:
@@ -692,6 +740,8 @@ def _drive_one(
             owner=owner,
             fencing_token=fencing,
             reason="Outbox payload is not a JSON object; provider dispatch refused.",
+            workspace_lease=workspace_lease,
+            programs_root=programs_root,
         )
         return ActuationDispatchOutcome(
             entry=entry, remote_id=None, status="failed_terminal"
@@ -710,6 +760,8 @@ def _drive_one(
             owner=owner,
             fencing_token=fencing,
             reason=str(error),
+            workspace_lease=workspace_lease,
+            programs_root=programs_root,
         )
         _emit_receipt_recorded_best_effort(
             program_id=program_id,
@@ -735,7 +787,11 @@ def _drive_one(
     try:
         result = dispatch_fn(dispatched)
     except CredentialExpired as error:
-        entry = mark_failed_terminal(db_path, leased.outbox_id, owner=owner, fencing_token=fencing, reason=f"credential expired: {error}"[:500])
+        entry = mark_failed_terminal(
+            db_path, leased.outbox_id, owner=owner, fencing_token=fencing,
+            reason=f"credential expired: {error}"[:500],
+            workspace_lease=workspace_lease, programs_root=programs_root,
+        )
         _emit_receipt_recorded_best_effort(
             program_id=program_id, operation_intent_id=operation_intent_id, receipt_state="failed_terminal",
             remote_id=None, org=org, project=project, provider_summary={"reason": "credential_expired"},
@@ -746,6 +802,7 @@ def _drive_one(
         reason = f"ambiguous dispatch failure ({type(error).__name__}): {error}"[:500]
         entry = mark_uncertain_remote_state(
             db_path, leased.outbox_id, owner=owner, fencing_token=fencing, reason=reason,
+            workspace_lease=workspace_lease, programs_root=programs_root,
         )
         _emit_receipt_recorded_best_effort(
             program_id=program_id, operation_intent_id=operation_intent_id, receipt_state="uncertain_remote_state",
@@ -771,23 +828,31 @@ def _drive_one(
             failure_reason="Provider success contains an invalid remote revision; manual reconciliation required.",
         )
     if result.compensation_required:
-        capability = lookup_capability(str(payload_fields.get("operation") or "create_task.v1"))
-        if (
-            not result.succeeded
-            or result.uncertain
-            or not isinstance(capability, OperationCapability)
-            or not capability.compensable
-        ):
+        try:
+            compensation_operation = require_offline_compensation_operation(
+                str(payload_fields.get("operation") or "create_task.v1")
+            )
+        except OutboxError as error:
+            result = replace(
+                result, succeeded=False, uncertain=True, compensation_required=False,
+                failure_reason=result.failure_reason or str(error),
+            )
+            compensation_operation = None
+        if not result.succeeded or result.uncertain:
             result = replace(
                 result, succeeded=False, uncertain=True, compensation_required=False,
                 failure_reason=result.failure_reason
                 or "Provider effect requires resolution; operation is not compensable.",
             )
+            compensation_operation = None
+    else:
+        compensation_operation = None
 
     if result.uncertain:
         reason = result.failure_reason or "dispatch outcome uncertain"
         entry = mark_uncertain_remote_state(
             db_path, leased.outbox_id, owner=owner, fencing_token=fencing, reason=reason,
+            workspace_lease=workspace_lease, programs_root=programs_root,
         )
         _emit_receipt_recorded_best_effort(
             program_id=program_id, operation_intent_id=operation_intent_id, receipt_state="uncertain_remote_state",
@@ -804,6 +869,7 @@ def _drive_one(
         entry = mark_failed_terminal(
             db_path, leased.outbox_id, owner=owner, fencing_token=fencing,
             reason=result.failure_reason or "dispatch failed",
+            workspace_lease=workspace_lease, programs_root=programs_root,
         )
         _emit_receipt_recorded_best_effort(
             program_id=program_id, operation_intent_id=operation_intent_id, receipt_state="failed_terminal",
@@ -840,6 +906,8 @@ def _drive_one(
                 if result.reconciliation is not None
                 else json.dumps({"status": "uncertain_remote_state", "receipts": [], "mismatches": ["provider evidence missing"]})
             ),
+            workspace_lease=workspace_lease,
+            programs_root=programs_root,
         )
         _emit_receipt_recorded_best_effort(
             program_id=program_id, operation_intent_id=operation_intent_id,
@@ -883,6 +951,7 @@ def _drive_one(
     mark_succeeded(
         db_path, leased.outbox_id, owner=owner, fencing_token=fencing,
         remote_response_hash=result.remote_response_hash, success_receipt_json=receipt_json,
+        workspace_lease=workspace_lease, programs_root=programs_root,
     )
     # The acknowledgement receipt and success are atomic; the secondary
     # ledger projection remains best effort.
@@ -896,12 +965,12 @@ def _drive_one(
     if retained_receipt != receipt_json:
         raise OutboxError("Create success receipt is missing or changed; manual reconciliation required")
     if result.compensation_required:
-        if not isinstance(capability, OperationCapability):
-            raise OutboxError("Compensation operation capability is unavailable")
+        assert compensation_operation is not None
         compensated_entry = mark_compensation_required(
             db_path, leased.outbox_id, owner=owner, fencing_token=fencing,
             reason=result.failure_reason or "provider effect requires compensation",
-            compensation_operation=capability.compensation_operation,
+            compensation_operation=compensation_operation,
+            workspace_lease=workspace_lease, programs_root=programs_root,
         )
         receipt = json.loads(retained_receipt)
         return ActuationDispatchOutcome(
@@ -909,8 +978,14 @@ def _drive_one(
             remote_rev=receipt["remote_rev"],
             reconciliation=result.reconciliation,
         )
-    mark_audited(db_path, leased.outbox_id, owner=owner, fencing_token=fencing)
-    completed_entry = mark_completed(db_path, leased.outbox_id, owner=owner, fencing_token=fencing)
+    mark_audited(
+        db_path, leased.outbox_id, owner=owner, fencing_token=fencing,
+        workspace_lease=workspace_lease, programs_root=programs_root,
+    )
+    completed_entry = mark_completed(
+        db_path, leased.outbox_id, owner=owner, fencing_token=fencing,
+        workspace_lease=workspace_lease, programs_root=programs_root,
+    )
     receipt = json.loads(retained_receipt)
     return ActuationDispatchOutcome(
         entry=completed_entry, remote_id=receipt["remote_id"], status="completed",
@@ -925,6 +1000,8 @@ def _resume_success(
     *,
     receipt: dict[str, object],
     receipt_json: str,
+    workspace_lease: LeaseHandle | None = None,
+    programs_root: Path | None = None,
 ) -> ActuationDispatchOutcome:
     remote_id = receipt["remote_id"]
     remote_rev = receipt["remote_rev"]
@@ -945,25 +1022,28 @@ def _resume_success(
             observed.outbox_id,
             owner=owner,
             fencing_token=observed.lease_fencing_token,
+            workspace_lease=workspace_lease,
+            programs_root=programs_root,
         )
     if receipt.get("compensation_required") is True:
         payload_fields = json.loads(observed.payload_json)
-        capability = lookup_capability(str(payload_fields.get("operation") or ""))
-        if (
-            not isinstance(capability, OperationCapability)
-            or not capability.compensable
-            or not capability.compensation_operation
-        ):
+        try:
+            compensation_operation = require_offline_compensation_operation(
+                str(payload_fields.get("operation") or "")
+            )
+        except OutboxError as error:
             raise OutboxError(
                 "Retained compensation request has no approved compensation operation"
-            )
+            ) from error
         retained = mark_compensation_required(
             db_path,
             retained.outbox_id,
             owner=owner,
             fencing_token=retained.lease_fencing_token,
             reason="Retained provider effect requires compensation",
-            compensation_operation=capability.compensation_operation,
+            compensation_operation=compensation_operation,
+            workspace_lease=workspace_lease,
+            programs_root=programs_root,
         )
         return ActuationDispatchOutcome(
             entry=retained,
@@ -976,6 +1056,8 @@ def _resume_success(
         retained.outbox_id,
         owner=owner,
         fencing_token=retained.lease_fencing_token,
+        workspace_lease=workspace_lease,
+        programs_root=programs_root,
     )
     return ActuationDispatchOutcome(
         entry=completed,
@@ -1212,118 +1294,63 @@ def reconcile_uncertain_create_task(
     reconciliation: EffectReconciliation | None = None,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> ActuationDispatchOutcome:
-    """Reconcile an uncertain create-task only with exact authorized evidence."""
+    """Production create-task adapter for the capability-bound reconciler."""
     db_path = outbox_db_path(program_id, programs_root=programs_root)
     entry = load_entry(db_path, idempotency_key)
     if entry is None or entry.status != "uncertain_remote_state":
         raise OutboxError(
             "Marker reconciliation applies only to an uncertain_remote_state row"
         )
-    try:
-        found = marker_lookup(entry)
-    except Exception:
-        return ActuationDispatchOutcome(
-            entry=entry, remote_id=None, status="uncertain_remote_state"
+
+    def observe(current: OutboxEntry) -> ReconciliationObservation:
+        found = marker_lookup(current)
+        if found is None:
+            return ReconciliationObservation(
+                ReconciliationDisposition.ABSENT,
+                "marker verified absent",
+            )
+        return ReconciliationObservation(
+            ReconciliationDisposition.CONFIRMED,
+            "provider marker lookup returned a candidate",
+            remote_id=found if type(found) is int else 0,
+            effect_reconciliation=reconciliation,
         )
-    if found is None:
-        absent = mark_reconciled_absent(
-            db_path,
-            entry.outbox_id,
-            reconciled_by=reconciled_by,
-            reason="marker verified absent",
-        )
-        return ActuationDispatchOutcome(
-            entry=absent, remote_id=None, status="pending"
-        )
-    if type(found) is not int or found <= 0:
-        return ActuationDispatchOutcome(
-            entry=entry, remote_id=None, status="uncertain_remote_state"
-        )
-    try:
-        payload_fields = json.loads(entry.payload_json)
-        if not isinstance(payload_fields, dict):
-            raise OutboxError("outbox payload is not an object")
-        authorized_effect = _load_authorized_effect(
-            payload_fields, program_id=program_id
-        )
-    except (OutboxError, TypeError, ValueError):
-        return ActuationDispatchOutcome(
-            entry=entry,
-            remote_id=None,
-            status="uncertain_remote_state",
-            reconciliation=reconciliation,
-        )
-    resulting_revision = (
-        reconciliation.receipts[0].resulting_revision
-        if reconciliation is not None and reconciliation.receipts
-        else None
-    )
-    if (
-        reconciliation is None
-        or not _reconciliation_binds_effect(
-            authorized_effect,
-            reconciliation,
-            remote_id=found,
-            remote_rev=resulting_revision,
-        )
-    ):
-        return ActuationDispatchOutcome(
-            entry=entry,
-            remote_id=None,
-            status="uncertain_remote_state",
-            reconciliation=reconciliation,
-        )
-    receipt_json = json.dumps(
-        {
-            "schema_version": "1",
-            "program_id": program_id,
-            "outbox_id": entry.outbox_id,
-            "operation": payload_fields.get("operation", "create_task.v1"),
-            "operation_intent_id": payload_fields.get("operation_intent_id"),
-            "proposal_id": payload_fields.get("proposal_id"),
-            "org": payload_fields.get("org"),
-            "project": payload_fields.get("project"),
-            "payload_sha256": hashlib.sha256(
-                entry.payload_json.encode("utf-8")
-            ).hexdigest(),
-            "remote_id": found,
-            "remote_rev": resulting_revision,
-            "remote_response_hash": None,
-            "compensation_required": False,
-            "acknowledged_at": datetime.now(timezone.utc).isoformat(),
-            "attempt_count": entry.attempt_count,
-            "fencing_token": entry.lease_fencing_token,
-            "reconciled_by_marker": True,
-            "reconciled_by": reconciled_by,
-            "reconciliation": reconciliation.to_dict(),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    confirmed = mark_reconciled_confirmed(
+
+    outcome = reconcile_uncertain_effect(
         db_path,
-        entry.outbox_id,
+        idempotency_key,
         reconciled_by=reconciled_by,
-        receipt_json=receipt_json,
+        provider_lookup=observe,
     )
-    _emit_receipt_recorded_best_effort(
-        program_id=program_id,
-        operation_intent_id=str(payload_fields.get("operation_intent_id") or ""),
-        receipt_state="succeeded",
-        remote_id=found,
-        org=str(payload_fields.get("org") or ""),
-        project=str(payload_fields.get("project") or ""),
-        provider_summary={
-            "remote_id": str(found),
-            "reconciled_by_marker": "true",
-        },
-        programs_root=programs_root,
-    )
+    if outcome.status == "completed":
+        payload_fields = json.loads(entry.payload_json)
+        assert isinstance(payload_fields, dict)
+        _emit_receipt_recorded_best_effort(
+            program_id=program_id,
+            operation_intent_id=str(
+                payload_fields.get("operation_intent_id") or ""
+            ),
+            receipt_state="succeeded",
+            remote_id=outcome.remote_id,
+            org=str(payload_fields.get("org") or ""),
+            project=str(payload_fields.get("project") or ""),
+            provider_summary={
+                "remote_id": str(outcome.remote_id),
+                "reconciled_by_marker": "true",
+            },
+            programs_root=programs_root,
+        )
     return ActuationDispatchOutcome(
-        entry=confirmed,
-        remote_id=found,
-        status="completed",
-        remote_rev=resulting_revision,
+        entry=outcome.entry,
+        remote_id=outcome.remote_id,
+        status=outcome.status,
+        remote_rev=(
+            reconciliation.receipts[0].resulting_revision
+            if outcome.status == "completed"
+            and reconciliation is not None
+            and reconciliation.receipts
+            else None
+        ),
         reconciliation=reconciliation,
     )
 

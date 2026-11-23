@@ -161,6 +161,60 @@ def test_reconcile_uncertain_effect_blocks_incomplete_or_conflicting_lookup(
     assert receipt["disposition"] == disposition.value
 
 
+def test_stale_reconciliation_cannot_resolve_a_later_attempt(
+    tmp_path: Path,
+) -> None:
+    key, db_path = _uncertain_create(tmp_path)
+    first = load_entry(db_path, key)
+    assert first is not None
+    callbacks: list[str] = []
+
+    def stale_lookup(_entry):
+        absent = reconcile_uncertain_effect(
+            db_path,
+            key,
+            reconciled_by="winner",
+            provider_lookup=lambda _current: ReconciliationObservation(
+                ReconciliationDisposition.ABSENT,
+                "complete lookup found no effect",
+            ),
+        )
+        assert absent.status == "pending"
+        second = dispatch_leased_create_task(
+            program_id="fixture",
+            idempotency_key=key,
+            owner="replacement-worker",
+            dispatch_fn=lambda current: (
+                callbacks.append(current.outbox_id)
+                or DispatchResult(
+                    succeeded=False,
+                    uncertain=True,
+                    failure_reason="second response loss",
+                )
+            ),
+            programs_root=tmp_path,
+        )
+        assert second.status == "uncertain_remote_state"
+        return ReconciliationObservation(
+            ReconciliationDisposition.ABSENT,
+            "stale first lookup",
+        )
+
+    with pytest.raises(OutboxError, match="changed during reconciliation"):
+        reconcile_uncertain_effect(
+            db_path,
+            key,
+            reconciled_by="stale-worker",
+            provider_lookup=stale_lookup,
+        )
+
+    retained = load_entry(db_path, key)
+    assert retained is not None
+    assert retained.status == "uncertain_remote_state"
+    assert retained.attempt_count == 2
+    assert callbacks == [key]
+
+
 def test_reconcile_uncertain_effect_contains_lookup_exception_type_only(
     tmp_path: Path,
 ) -> None:

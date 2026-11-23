@@ -28,7 +28,7 @@ from src.core.exceptions import AuthError, QueryError
 from src.core.integration_types import IntegrationError
 from src.core.knowledge_store import load_program_knowledge
 from src.core.kusto_query_loader import load_kpi_queries
-from src.core.kusto_result_limits import admit_kusto_rows
+from src.core.kusto_result_contract import admit_kusto_execution
 from src.core.metric_binding_validator import kusto_scalar_cardinality_error
 from src.core.models_v2 import KustoQuery
 
@@ -247,7 +247,12 @@ def _gather_single_chart(
     # Execute live query
     rows: list[dict[str, Any]]
     try:
-        rows = admit_kusto_rows(executor(query), query.result_limits)
+        rows, _result_schema = admit_kusto_execution(
+            executor(query),
+            query_id=query.id,
+            expected_cardinality=query.expected_cardinality,
+            result_limits=query.result_limits,
+        )
         cardinality_error = kusto_scalar_cardinality_error(query.id, query.expected_cardinality, len(rows))
         if cardinality_error is not None:
             raise QueryError(cardinality_error)

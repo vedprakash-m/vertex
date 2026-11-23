@@ -58,6 +58,7 @@ from src.m365.rev.workiq_enumerator import (
     WorkIQHydrator,
     WorkIQQueryPage,
 )
+from src.m365.workiq_retriever import WorkIQRunBudget
 from src.m365.workiq_ask_support import (
     DiscoveryRequest,
     build_structured_discovery_question,
@@ -421,14 +422,26 @@ def rev_run(
         wall_clock = retrieval.max_wall_clock_seconds if retrieval is not None else 600
         per_call_timeout = min(WorkIQAgencyBridge.WORKIQ_TIMEOUT, wall_clock)
 
+        run_budget = WorkIQRunBudget(
+            max_calls=(
+                getattr(retrieval, "max_calls_per_cycle", 40)
+                if retrieval is not None
+                else 40
+            ),
+            max_wall_clock_seconds=wall_clock,
+        )
+
         def query_workiq(
-            retrieval_intent: RetrievalIntent, *, cursor: str | None,
+            retrieval_intent: RetrievalIntent,
+            *,
+            cursor: str | None,
+            timeout_seconds: int,
         ) -> WorkIQPage:
             page = workiq_client.search_emails(
                 query=workiq_query,
                 limit=retrieval_intent.limit,
                 cursor=cursor,
-                timeout_seconds=per_call_timeout,
+                timeout_seconds=min(per_call_timeout, timeout_seconds),
             )
             return WorkIQPage(
                 records=tuple(
@@ -462,6 +475,7 @@ def rev_run(
             program_id=program,
             programs_root=programs_root,
             checkpoint_namespace=workiq_query,
+            run_budget=run_budget,
         )
         _hydrator = WorkIQHydrator()
         deps = RevPipelineDeps(
@@ -484,8 +498,27 @@ def rev_run(
                 "WorkIQ is not available through the configured Agency connector."
             )
         terms = tuple(dict.fromkeys((*subject, *body)))
+        selected_program = load_program(program, programs_root=programs_root)
+        retrieval = (
+            selected_program.m365.retrieval
+            if selected_program is not None
+            and selected_program.m365 is not None
+            else None
+        )
+        run_budget = WorkIQRunBudget(
+            max_calls=(
+                getattr(retrieval, "max_calls_per_cycle", 40)
+                if retrieval is not None
+                else 40
+            ),
+            max_wall_clock_seconds=(
+                retrieval.max_wall_clock_seconds if retrieval is not None else 600
+            ),
+        )
 
-        def query(window: RetrievalIntent) -> WorkIQQueryPage:
+        def query(
+            window: RetrievalIntent, *, timeout_seconds: int,
+        ) -> WorkIQQueryPage:
             assert window.from_date is not None and window.to_date is not None
             request = DiscoveryRequest(
                 lane_name=program,
@@ -498,6 +531,7 @@ def rev_run(
             payload = bridge.ask_workiq(
                 build_structured_discovery_question(request),
                 use_cache=False,
+                timeout_seconds=timeout_seconds,
             )
             validated = validate_structured_discovery_payload_with_diagnostics(
                 payload,
@@ -524,6 +558,7 @@ def rev_run(
             ),
             window_days=workiq_window_days,
             max_windows=workiq_max_windows,
+            run_budget=run_budget,
         )
         _hydrator = WorkIQHydrator()
         deps = RevPipelineDeps(

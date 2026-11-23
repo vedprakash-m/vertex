@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.core.kusto_result_limits import KustoResultLimits
+from src.core.integration_types import KustoResultColumn, KustoResultKind, KustoResultSchema, KustoResultSet
 from src.core.models_v2 import KustoQuery
 from src.core.exceptions import AuthError, QueryError
 from src.commands.chart_gather import (
@@ -100,6 +101,47 @@ def test_chart_gather_refuses_before_sanitization_or_cache_write(failure: str, t
     assert error_sink == list(errors)
     assert len(errors) == 1
     assert existing.read_bytes() == before
+
+
+def test_chart_gather_admits_typed_kusto_result(tmp_path, monkeypatch):
+    import src.commands.chart_gather as cg
+
+    query = KustoQuery(
+        id="typed", cluster="synthetic", database="synthetic", kql="Metrics | take 1",
+        section="Synthetic", render_as="chart_image", confidence="high",
+        chart_config={"type": "line"}, result_column="Value",
+    )
+    schema = KustoResultSchema(
+        kind=KustoResultKind.TABLE,
+        columns=(
+            KustoResultColumn("Timestamp", "datetime"),
+            KustoResultColumn("Value", "real"),
+        ),
+        row_count=1,
+    )
+    typed = KustoResultSet(
+        query_id=query.id,
+        rows=({"Timestamp": "2026-05-28T12:00:00Z", "Value": 7.0},),
+        observed_at=_NOW,
+        row_count=1,
+        schema=schema,
+    )
+    monkeypatch.setattr(cg, "_VERTEX_CHARTS_ENABLED", True)
+    monkeypatch.setattr(cg, "_load_chart_queries", lambda *_args, **_kwargs: (query,))
+    monkeypatch.setattr(cg, "_evict_chart_caches", lambda *_args: 0)
+
+    results, errors = gather_chart_data(
+        "synthetic",
+        programs_root=tmp_path,
+        program=None,
+        workstreams=(),
+        executor=lambda _query: typed,
+        current_time=_NOW,
+    )
+
+    assert errors == ()
+    assert results[0].rows_written == 1
+    assert results[0].error is None
 
 
 @pytest.mark.parametrize("declared", [False, True])

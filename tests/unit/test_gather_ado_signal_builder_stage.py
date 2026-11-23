@@ -187,3 +187,64 @@ def test_build_sprint_signals_records_previous_and_historical_metrics() -> None:
     assert signals[0].metadata["three_iteration_completion_per_business_day_history"] == (0.5, 1.0, 1.5)
     assert signals[0].metadata["historical_iteration_window_count"] == 4
     assert signals[0].metadata["historical_open_history_series"] == ((3, 2, 1), (3, 2, 2), (3, 1, 1), (3, 1, 0))
+
+
+def test_build_sprint_signals_scopes_plan_history_to_workstream() -> None:
+    workstreams = (
+        Workstream(
+            id="scope",
+            name="Scoped Workstream",
+            area_paths=("One\\Adventure\\Acme",),
+            dri_email="maintainer@example.com",
+        ),
+    )
+    signals = ado_signal_builder_stage.build_sprint_signals(
+        iterations_by_team={
+            None: (
+                {
+                    "id": "iteration-5",
+                    "name": "Sprint 5",
+                    "path": "One\\Sprint 5",
+                    "attributes": {
+                        "startDate": "2026-05-25T00:00:00Z",
+                        "finishDate": "2026-05-29T00:00:00Z",
+                        "timeFrame": "current",
+                    },
+                },
+            )
+        },
+        capacities_by_team_iteration={
+            (None, "iteration-5"): (
+                {"activities": [{"capacityPerDay": 8}]},
+            )
+        },
+        sprint_snapshot_rows=[
+            {
+                "DateSK": 20260515,
+                "WorkItemId": 1,
+                "State": "Closed",
+                "AreaPath": "One\\Adventure\\Acme",
+                "IterationPath": "One\\Sprint 4",
+                "StoryPoints": 5,
+            },
+            {
+                "DateSK": 20260515,
+                "WorkItemId": 99,
+                "State": "Closed",
+                "AreaPath": "One\\Adventure\\Other",
+                "IterationPath": "One\\Sprint 4",
+                "StoryPoints": 100,
+            },
+        ],
+        items=(_work_item(item_id=5, state="Active", iteration_path="One\\Sprint 5"),),
+        program_id="acme",
+        workstreams=workstreams,
+        as_of=datetime(2026, 5, 25, 8, 0, tzinfo=timezone.utc),
+        normalize_ado_team_name_fn=lambda value: value,
+    )
+
+    plan = signals[0].metadata["sprint_plan"]
+    assert plan["point_capacity"] == "5"
+    assert plan["completed_sprint_refs"] == [
+        "ADO:sprint-points:project:One\\Sprint 4"
+    ]

@@ -125,18 +125,63 @@ def test_capture_reference_and_alias_mismatch_fails(location, field, value):
 
 
 def test_declarations_are_not_observed_membership_or_evaluated_bindings():
-    query = SimpleNamespace(query_id="q", scope_id="s", wiql_hash="query", membership_ids=("999",))
+    query = SimpleNamespace(query_id="q", scope_id="s", wiql_hash="query", membership_ids=("1", "2"))
     fact = _fact()
     first = _capture(queries=(query,), facts=(fact,))
-    second = _capture(ids=(3,), queries=(SimpleNamespace(
-        query_id="q", scope_id="s", wiql_hash="query", membership_ids=(),
+    second = _capture(ids=(2, 1), queries=(SimpleNamespace(
+        query_id="q", scope_id="s", wiql_hash="query", membership_ids=("2", "1"),
     ),), facts=(fact,))
     assert first.source_scopes == second.source_scopes == (SourceScopeContract("q", "s", "query"),)
-    assert first.sha256 != second.sha256
+    assert first.sha256 == second.sha256
     assert first.binding_declarations == (EvidenceBinding("revision", ("PROGRAM:fixture",)),)
     assert "binding_unevaluated" in first.limitations
     assert not hasattr(first.binding_declarations[0], "accepted")
     assert _capture(facts=(_fact("empty", ()),)).binding_declarations[0].entity_refs == ()
+
+
+def test_builder_refuses_rendered_items_outside_captured_source_scopes():
+    query = QueryResultEntry(
+        query_id="q", scope_id="scope", wiql_hash="query",
+        captured_at=datetime(2026, 5, 5, tzinfo=timezone.utc),
+        raw_count=2, membership_ids=("1", "2"), membership_hash="membership",
+        cap_reached=False, completeness_state="FULL",
+    )
+    assert _capture(ids=(2, 1), queries=(query,), facts=(_fact(),))
+
+    with pytest.raises(ConfigError, match="source scope membership"):
+        _capture(ids=(2, 3), queries=(query,), facts=(_fact(),))
+
+
+def test_builder_refuses_binding_outside_rendered_source_scope_membership():
+    query = QueryResultEntry(
+        query_id="q", scope_id="scope", wiql_hash="query",
+        captured_at=datetime(2026, 5, 5, tzinfo=timezone.utc),
+        raw_count=1, membership_ids=("1",), membership_hash="membership",
+        cap_reached=False, completeness_state="FULL",
+    )
+
+    with pytest.raises(ConfigError, match="source scope binding"):
+        _capture(
+            ids=(1,),
+            queries=(query,),
+            facts=(_fact("wrong", ("WI:2",)),),
+        )
+
+
+def test_reader_refuses_binding_outside_captured_fetched_items():
+    payload, draft = _wire(_capture(facts=(_fact("declared", ("WI:1",)),)))
+    raw = payload["metadata"]["run_evidence_snapshot"]
+    raw["binding_declarations"][0]["entity_refs"] = ["WI:3"]
+    raw.pop("sha256")
+    raw["binding_set_sha256"] = hash_jsonable({
+        "kind": "evidence-binding-set.v1",
+        "value": raw["binding_declarations"],
+    })
+    raw["sha256"] = hash_jsonable(raw)
+    draft["run_evidence_snapshot_sha256"] = raw["sha256"]
+
+    with pytest.raises(ConfigError, match="capture is invalid"):
+        load_run_evidence_snapshot(payload, draft)
 
 
 @pytest.mark.parametrize("field,value", [
@@ -174,7 +219,7 @@ def test_builder_retains_existing_hash_present_query_behavior(state):
         membership_ids=(), membership_hash="empty-membership", cap_reached=False,
         completeness_state=state, failure_category="query_error" if state == "ERROR" else None,
     )
-    capture = _capture(queries=(row,))
+    capture = _capture(ids=(), queries=(row,))
     assert capture.source_scopes == (SourceScopeContract("query", "scope", "known-query-hash"),)
     assert capture.capture_state == "unqualified_capture"
 
@@ -255,7 +300,10 @@ def test_v2_capture_without_observed_selectors_remains_readable_unbound():
 )
 def test_v3_selector_identity_refuses_rebound_substitution(field):
     payload, draft = _wire(_capture(queries=(
-        SimpleNamespace(query_id="q", scope_id="s", wiql_hash="query", membership_ids=("1",)),
+        SimpleNamespace(
+            query_id="q", scope_id="s", wiql_hash="query",
+            membership_ids=("1", "2"),
+        ),
     ), facts=(_fact(),)))
     raw = payload["metadata"]["run_evidence_snapshot"]
     raw[field] = "sha256:" + "0" * 64

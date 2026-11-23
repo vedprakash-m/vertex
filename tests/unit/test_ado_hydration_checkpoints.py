@@ -195,6 +195,92 @@ def test_store_failed_evidence_commit_leaves_checkpoint_unknown(tmp_path: Path) 
     assert store.pullable_registrations("ado")[0].last_verified_at is None
 
 
+def test_store_deduplicates_identical_checkpoint_replay(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+    advance = CheckpointAdvance(42, HydrationSubresource.REVISIONS, "2")
+
+    store.mark_verified(
+        "ado",
+        (("42", "work_item"),),
+        _AT,
+        checkpoint_advances=(advance, advance),
+    )
+
+    assert store.read_hydration_checkpoints("default", (42,))[
+        (42, HydrationSubresource.REVISIONS)
+    ].cursor == "2"
+    with sqlite3.connect(tmp_path / "registry.sqlite3") as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM ado_hydration_evidence"
+        ).fetchone()[0] == 1
+
+
+def test_store_refuses_conflicting_duplicate_checkpoint_replay(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+
+    with pytest.raises(ValueError, match="conflicting checkpoint advances"):
+        store.mark_verified(
+            "ado",
+            (("42", "work_item"),),
+            _AT,
+            checkpoint_advances=(
+                CheckpointAdvance(42, HydrationSubresource.REVISIONS, "2"),
+                CheckpointAdvance(42, HydrationSubresource.REVISIONS, "3"),
+            ),
+        )
+
+    assert store.read_hydration_checkpoints("default", (42,))[
+        (42, HydrationSubresource.REVISIONS)
+    ].state == "unknown"
+    assert store.pullable_registrations("ado")[0].last_verified_at is None
+
+
+def test_store_refuses_checkpoint_evidence_with_different_cursor(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+    evidence = json.dumps(
+        {
+            "schema_version": 2,
+            "subresource": "revisions",
+            "cursor": "3",
+            "records": [],
+            "pagination": None,
+        }
+    )
+
+    with pytest.raises(ValueError, match="checkpoint evidence"):
+        store.mark_verified(
+            "ado",
+            (("42", "work_item"),),
+            _AT,
+            checkpoint_advances=(
+                CheckpointAdvance(
+                    42,
+                    HydrationSubresource.REVISIONS,
+                    "2",
+                    evidence_json=evidence,
+                ),
+            ),
+        )
+
+    assert store.pullable_registrations("ado")[0].last_verified_at is None
+
+
+def test_store_refuses_naive_checkpoint_commit_time(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        store.mark_verified(
+            "ado",
+            (("42", "work_item"),),
+            datetime(2026, 5, 25),
+            checkpoint_advances=(
+                CheckpointAdvance(42, HydrationSubresource.REVISIONS, "2"),
+            ),
+        )
+
+    assert store.pullable_registrations("ado")[0].last_verified_at is None
+
+
 def test_store_rejects_checkpoint_provider_mismatch_before_mutation(tmp_path: Path) -> None:
     store = _seeded_store(tmp_path)
     advance = CheckpointAdvance(

@@ -8,6 +8,7 @@ from io import StringIO
 import json
 from pathlib import Path
 import re
+import sqlite3
 
 import typer
 
@@ -28,6 +29,7 @@ from src.core.models import Confidence, WorkItem
 from src.core.models_v2 import ActionStatus, MilestoneStatus
 from src.core.risk_dedupe import active_risk_entries
 from src.core.program_fact_store import load_program_facts, project_action_items, project_risk_entries
+from src.core.rev.health import build_program_effective_completeness
 from src.core.risk_register_engine import assess_risk_staleness
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.signal_ranking import signal_source_family
@@ -56,6 +58,9 @@ class StatusReport:
     last_gathered_at: datetime | None
     gather_integration_summary: str | None
     gather_integration_details: tuple[dict[str, object], ...]
+    source_completeness_base: float | None
+    source_completeness_value: float | None
+    source_completeness_reasons: tuple[str, ...]
     last_confirmed_at: datetime | None
     cadence: str
     cadence_status: str
@@ -198,6 +203,27 @@ def build_status_report(
         }
         for detail in (gather_state.integration_error_details if gather_state is not None else ())
     )
+    source_completeness_reasons: tuple[str, ...]
+    try:
+        effective_completeness = build_program_effective_completeness(
+            resolved.program.id, programs_root=resolved_programs_root
+        )
+    except (
+        ConfigError,
+        KeyError,
+        OSError,
+        StateError,
+        TypeError,
+        ValueError,
+        sqlite3.DatabaseError,
+    ):
+        source_completeness_base = None
+        source_completeness_value = None
+        source_completeness_reasons = ("completeness_projection_unavailable",)
+    else:
+        source_completeness_base = effective_completeness.base
+        source_completeness_value = effective_completeness.value
+        source_completeness_reasons = effective_completeness.reasons
     last_confirmed_at = latest_confirmed.generated_at if latest_confirmed is not None else None
     cadence = resolved.edition.cadence
     cadence_status = _describe_cadence(cadence, last_confirmed_at, now)
@@ -231,6 +257,9 @@ def build_status_report(
         last_gathered_at=last_gathered_at,
         gather_integration_summary=gather_integration_summary,
         gather_integration_details=gather_integration_details,
+        source_completeness_base=source_completeness_base,
+        source_completeness_value=source_completeness_value,
+        source_completeness_reasons=source_completeness_reasons,
         last_confirmed_at=last_confirmed_at,
         cadence=cadence,
         cadence_status=cadence_status,
@@ -294,6 +323,17 @@ def render_status_report(report: StatusReport) -> str:
         if report.telemetry_confidence:
             telemetry_line += f" ({report.telemetry_confidence} confidence)"
         lines.append(telemetry_line)
+    if report.source_completeness_value is None:
+        completeness = (
+            "unavailable"
+            if report.source_completeness_base is None
+            else "unknown"
+        )
+    else:
+        completeness = f"{report.source_completeness_value:.0%}"
+    if report.source_completeness_reasons:
+        completeness += f" ({', '.join(report.source_completeness_reasons)})"
+    lines.append(f"  Completeness: {completeness}")
     if report.gather_integration_summary:
         lines.append(f"  Gather:       {report.gather_integration_summary}")
     if report.scope_statement:
@@ -320,6 +360,9 @@ def render_status_csv(report: StatusReport) -> str:
             "last_gathered_at",
             "gather_integration_summary",
             "gather_integration_details_json",
+            "source_completeness_base",
+            "source_completeness_value",
+            "source_completeness_reasons_json",
             "last_confirmed_at",
             "cadence",
             "cadence_status",
@@ -352,6 +395,9 @@ def render_status_csv(report: StatusReport) -> str:
             report.last_gathered_at.isoformat() if report.last_gathered_at is not None else "",
             report.gather_integration_summary or "",
             json.dumps(list(report.gather_integration_details), sort_keys=True),
+            report.source_completeness_base if report.source_completeness_base is not None else "",
+            report.source_completeness_value if report.source_completeness_value is not None else "",
+            json.dumps(list(report.source_completeness_reasons)),
             report.last_confirmed_at.isoformat() if report.last_confirmed_at is not None else "",
             report.cadence,
             report.cadence_status,

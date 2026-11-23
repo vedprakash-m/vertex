@@ -137,6 +137,11 @@ def build_sprint_signals(
                 pace_summary=pace_summary,
                 completion_pct=completion_pct,
             )
+            planning_snapshot_rows = [
+                row
+                for row in sprint_snapshot_rows
+                if _resolve_workstream_id(str(row.get("AreaPath") or ""), (workstream,)) == workstream.id
+            ]
             sprint_plan = build_ado_sprint_plan(
                 iteration_path=iteration_path,
                 items=tuple(iteration_workstream_items),
@@ -153,7 +158,7 @@ def build_sprint_signals(
                 capacity_source_ref=(
                     f"ADO:capacity:{team_name or 'project'}:{iteration_id or iteration_path}"
                 ),
-                sprint_snapshot_rows=sprint_snapshot_rows,
+                sprint_snapshot_rows=planning_snapshot_rows,
                 team_name=team_name,
                 iteration_id=iteration_id,
             )

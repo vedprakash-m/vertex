@@ -1296,50 +1296,79 @@ class ProgramReality:
         store = ProgramFactStore(
             self._program_id, db_root=_resolve_fact_db_root(self.__programs_root)
         )
-        revisions = store.list_accepted_revisions_for_types(
-            ("milestone.entry", "risk.entry", "decision.entry", "dependency.link"),
-            as_of=selected_at,
-            valid_at=selected_at,
-            limit=max(40, max_items * 8),
-        )
-        outcomes: list[LongHorizonOutcome] = []
-        seen: set[tuple[str, str]] = set()
-        terminal = {
+        fact_terminal_statuses = {
             "milestone.entry": {"completed", "deferred"},
             "risk.entry": {"closed", "mitigated", "accepted"},
             "decision.entry": {"decided", "superseded", "reverted", "withdrawn"},
             "dependency.link": {"resolved", "broken"},
+            "action.item": {"done", "cancelled"},
+            "claim.entry": {"resolved", "met", "deferred"},
         }
+        lifecycle_fact_types = {
+            "risk.lifecycle",
+            "dependency.lifecycle",
+            "decision.lifecycle",
+            "action.lifecycle",
+            "claim.lifecycle",
+            "intervention.lifecycle",
+        }
+        revisions = store.list_accepted_revisions_for_types(
+            tuple((*fact_terminal_statuses, *lifecycle_fact_types)),
+            as_of=selected_at,
+            valid_at=selected_at,
+            limit=max(40, max_items * 8),
+            require_history=bool(requested),
+            entity_refs=tuple(requested),
+        )
+        candidates: dict[tuple[str, str], tuple[ProgramFactRevision, LongHorizonOutcome]] = {}
         for revision in revisions:
             payload = revision.payload
-            status = str(payload.get("status") or "").strip().lower()
-            if status not in terminal[revision.fact_type]:
-                continue
+            if revision.fact_type in lifecycle_fact_types:
+                if str(payload.get("event_kind") or "").strip().lower() != "closure":
+                    continue
+                status = "closed"
+            else:
+                status = str(payload.get("status") or "").strip().lower()
+                if status not in fact_terminal_statuses[revision.fact_type]:
+                    continue
             refs = tuple(revision.entity_refs)
             if requested and not requested.intersection(refs):
                 continue
-            object_id = str(payload.get("id") or revision.fact_id)
-            key = (revision.fact_type, object_id)
-            if key in seen:
-                continue
-            seen.add(key)
+            object_id = str(payload.get("id") or payload.get("object_id") or revision.fact_id)
+            family = revision.fact_type.split(".", 1)[0]
+            key = (family, object_id)
             summary = (
                 str(payload.get("outcome") or "").strip()
+                or str(payload.get("note") or "").strip()
                 or str(payload.get("decision") or "").strip()
                 or str(payload.get("resolution_path") or "").strip()
                 or str(payload.get("title") or payload.get("name") or object_id).strip()
             )
-            outcomes.append(LongHorizonOutcome(
-                family=revision.fact_type.split(".", 1)[0],
+            outcome = LongHorizonOutcome(
+                family=family,
                 object_id=object_id,
                 entity_refs=refs,
                 summary=summary,
                 status=status,
                 recorded_at=revision.recorded_at,
-            ))
-            if len(outcomes) >= max_items:
-                break
-        return tuple(outcomes)
+            )
+            current = candidates.get(key)
+            if (
+                current is None
+                or (
+                    revision.fact_type in lifecycle_fact_types
+                    and current[0].fact_type not in lifecycle_fact_types
+                )
+            ):
+                candidates[key] = (revision, outcome)
+        return tuple(
+            item[1]
+            for item in sorted(
+                candidates.values(),
+                key=lambda value: (value[0].recorded_at, value[0].revision_id),
+                reverse=True,
+            )[:max_items]
+        )
 
     def metric_observations(self) -> tuple[FactAssessment, ...]:
         """Phase-3 placeholder: metric observations from reality_store arrive in WI-3.x."""

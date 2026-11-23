@@ -9,11 +9,15 @@ from src.commands.gather_pipeline.ado_pipeline_stage import _parse_datetime, _pa
 from src.commands.gather_pipeline.ado_wiql_stage import TeamNameNormalizer, record_ado_wiql_query_state, resolve_wiql_query_text
 from src.core.ado_client import ADO_WIQL_DEFAULT_TOP, ADOClient
 from src.core.exceptions import QueryError
+from src.core.integration_types import KustoResultSet
+from src.core.kusto_result_contract import admit_kusto_execution
 from src.core.m365_payload_support import optional_string as _optional_string
 from src.core.metric_binding_validator import kusto_metric_result_error
 from src.core.models_v2 import KustoQuery, Program, Signal, Workstream
 
-KustoQueryExecutor = Callable[[KustoQuery], list[dict[str, Any]]]
+KustoQueryExecutor = Callable[
+    [KustoQuery], list[dict[str, Any]] | tuple[dict[str, Any], ...] | KustoResultSet
+]
 KustoQueryStateRecorder = Callable[..., None]
 KpiSignalBuilder = Callable[..., Signal | None]
 PullRequestSummarizer = Callable[..., dict[str, Any] | None]
@@ -62,6 +66,7 @@ def build_kusto_kpi_signals(
     previous_states = previous_query_states or {}
     for query in queries:
         started_at = perf_counter()
+        result_schema = None
         try:
             if query.engine == "wiql":
                 if wiql_client is None:
@@ -101,7 +106,15 @@ def build_kusto_kpi_signals(
                     pull_request_entity_refs_fn=pull_request_entity_refs_fn,
                 )
             else:
-                rows = executor(query)
+                execution = executor(query)
+                rows, admitted_schema = admit_kusto_execution(
+                    execution,
+                    query_id=query.id,
+                    expected_cardinality=query.expected_cardinality,
+                    result_limits=query.result_limits,
+                )
+                if isinstance(execution, KustoResultSet):
+                    result_schema = admitted_schema
         except Exception as exc:
             duration_ms = int(round((perf_counter() - started_at) * 1000))
             log.warning("KPI query failed; skipping.")
@@ -170,6 +183,7 @@ def build_kusto_kpi_signals(
                 duration_ms=duration_ms,
                 error=cardinality_error,
                 previous_state=previous_states.get(query.id),
+                **({"result_schema": result_schema} if result_schema is not None else {}),
             )
             if cardinality_error is not None:
                 continue
@@ -180,6 +194,7 @@ def build_kusto_kpi_signals(
             program_id=program_id,
             as_of=as_of,
             entity_refs=entity_refs,
+            **({"result_schema": result_schema} if result_schema is not None else {}),
         )
         if signal is not None:
             signals.append(signal)

@@ -76,6 +76,62 @@ def build_run_manifest(
     )
 
 
+def _validate_source_scope_binding(
+    gather: GatherRunManifest | None,
+    snapshot: ProgramFactSnapshot,
+    report_snapshot: Snapshot,
+) -> None:
+    fetched_item_ids = {item.id for item in report_snapshot.items}
+    if gather is not None and gather.query_results:
+        scope_item_ids: set[int] = set()
+        for row in gather.query_results:
+            for value in row.membership_ids:
+                text = str(value)
+                if not text.isdigit() or int(text) <= 0:
+                    raise ConfigError(
+                        "Run evidence source scope membership is invalid."
+                    )
+                scope_item_ids.add(int(text))
+        raw_counts = [getattr(row, "raw_count", None) for row in gather.query_results]
+        declared_item_count = None
+        if all(raw_count is not None for raw_count in raw_counts):
+            declared_item_count = sum(
+                max(0, int(raw_count))
+                for raw_count in raw_counts
+                if raw_count is not None
+            )
+        if (
+            declared_item_count is not None
+            and declared_item_count == len(fetched_item_ids)
+            and scope_item_ids != fetched_item_ids
+        ):
+            raise ConfigError(
+                "Run evidence rendered items do not match source scope membership."
+            )
+    for fact in snapshot.facts:
+        if any(
+            work_item_id not in fetched_item_ids
+            for work_item_id in _work_item_entity_ids(fact.entity_refs)
+        ):
+            raise ConfigError(
+                "Run evidence source scope binding does not match its retained facts."
+            )
+
+
+def _work_item_entity_ids(entity_refs: tuple[str, ...]) -> tuple[int, ...]:
+    result: list[int] = []
+    for ref in entity_refs:
+        prefix, separator, raw_id = ref.upper().partition(":")
+        if (
+            separator
+            and prefix == "WI"
+            and raw_id.isdigit()
+            and int(raw_id) > 0
+        ):
+            result.append(int(raw_id))
+    return tuple(result)
+
+
 def write_run_manifest(
     edition: str,
     issue_number: int,
@@ -153,6 +209,7 @@ def build_run_evidence_snapshot(
             "Run evidence saved-query identity is unavailable. Inspect failed gather diagnostics "
             "and gather again before regenerating the draft."
         )
+    _validate_source_scope_binding(gather, snapshot, report_snapshot)
     source_scopes = tuple(sorted((
         SourceScopeContract(row.query_id, row.scope_id, row.wiql_hash)
         for row in (gather.query_results if gather else ())
@@ -361,6 +418,16 @@ def decode_run_evidence_snapshot(value: object) -> RunEvidenceSnapshot:
             }
         ):
             raise ValueError("Invalid capture content")
+        if capture.schema_version == "run-evidence-capture.v3":
+            captured_ids = set(capture.fetched_item_ids)
+            if any(
+                work_item_id not in captured_ids
+                for binding in capture.binding_declarations
+                for work_item_id in _work_item_entity_ids(binding.entity_refs)
+            ):
+                raise ValueError(
+                    "Run evidence source scope binding does not match the captured snapshot."
+                )
         return capture
     except (TypeError, ValueError, KeyError) as error:
         raise ConfigError("Declared run evidence capture is invalid. Regenerate and review the draft.") from error

@@ -202,7 +202,11 @@ def test_run_channel_with_extraction_surfaces_extractor_errors(tmp_path: Path) -
             del registrations, since, program_id, config, mode, run_ctx
             return HydrationResult(
                 channel="ado",
-                resources=ADOHydrationOutput(work_items=(item,), freshness_items=(item,)),
+                resources=ADOHydrationOutput(
+                    work_items=(item,),
+                    freshness_items=(item,),
+                    checkpoint_reseed_reasons=((101, "anti_entropy_expired"),),
+                ),
                 api_call_count=1,
                 errors=(),
                 hydrated_ref_ids=(("101", "work_item"),),
@@ -274,6 +278,9 @@ def test_run_channel_with_extraction_surfaces_extractor_errors(tmp_path: Path) -
     assert channel_outcomes[0].channel == "ado"
     assert channel_outcomes[0].degraded is False
     assert channel_outcomes[0].ado_call_count == 1
+    assert channel_outcomes[0].checkpoint_reseed_reasons == (
+        (101, "anti_entropy_expired"),
+    )
     assert read_alerts("demo", programs_root=tmp_path) == ()
 
 

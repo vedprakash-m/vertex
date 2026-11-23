@@ -333,7 +333,10 @@ def _project_events_incremental_to_sqlite_locked(
     if not projection_path.exists():
         return rebuild()
 
-    existing_dump = canonical_projection_dump(projection_path, reject_stale=False)
+    try:
+        existing_dump = canonical_projection_dump(projection_path)
+    except (ConfigError, sqlite3.DatabaseError):
+        return rebuild()
     existing_meta = existing_dump["projection_meta"]
     if not existing_meta:
         return rebuild()
@@ -614,6 +617,7 @@ def canonical_projection_dump(
     guards on ``projection_path.exists()`` first.
     """
     with open_program_db(projection_path, read_only=True) as connection:
+        connection.execute("BEGIN")
         projection = {
             "proj_program": _dump_table(connection, "SELECT * FROM proj_program ORDER BY program_id"),
             "proj_phase": _dump_table(connection, "SELECT * FROM proj_phase ORDER BY phase_id"),

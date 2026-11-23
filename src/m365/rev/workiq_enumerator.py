@@ -19,6 +19,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ from src.core.rev.result import (
     Unsupported,
 )
 from src.core.rev.sync_state import SyncState, SyncStateStore
+from src.m365.workiq_retriever import WorkIQRunBudget
 from src.m365.rev.hydrator import RUNG_METADATA_ONLY
 
 ENUMERATOR_LABEL = "workiq"
@@ -62,6 +64,11 @@ class WorkIQContext:
 class WorkIQPage:
     records: tuple[Mapping[str, Any], ...]
     next_cursor: str | None
+    rejected_source_time_count: int = 0
+    rejected_identity_count: int = 0
+    rejected_invalid_record_count: int = 0
+    rejected_outside_window_count: int = 0
+    response_usable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +82,12 @@ class WorkIQQueryPage:
 
 
 WorkIQQuery = Callable[..., Sequence[Mapping[str, Any]] | WorkIQQueryPage | WorkIQPage]
+
+
+class _WorkIQBudgetExhausted(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _text(record: Mapping[str, Any], *keys: str) -> str:
@@ -166,6 +179,7 @@ class WorkIQEnumerator:
         program_id: str | None = None,
         programs_root: Path = PROGRAMS_ROOT,
         checkpoint_namespace: str = "",
+        run_budget: WorkIQRunBudget | None = None,
     ) -> None:
         if (
             not isinstance(window_days, int)
@@ -184,6 +198,7 @@ class WorkIQEnumerator:
         self._program_id = program_id
         self._programs_root = programs_root
         self._checkpoint_namespace = checkpoint_namespace
+        self._run_budget = run_budget
         self._checkpoint_store: SyncStateStore | None = None
         self._checkpoint_state: SyncState | None = None
         self._pending_cursor: str | None = None
@@ -212,13 +227,17 @@ class WorkIQEnumerator:
         rejected_source_time = 0
         rejected_invalid_record = 0
         rejected_outside_window = 0
+        budget_stop_reason = "budget_stop:max_windows" if budget_stopped else ""
         for window in windowed:
             try:
-                page_result = self._query(window)
+                page_result = self._query_with_budget(window)
+            except _WorkIQBudgetExhausted as exc:
+                budget_stop_reason = exc.reason
+                break
             except Exception as exc:  # noqa: BLE001 - exceptions must not cross the port
                 failures.append(type(exc).__name__)
                 continue
-            if isinstance(page_result, WorkIQQueryPage):
+            if isinstance(page_result, (WorkIQPage, WorkIQQueryPage)):
                 rejected_identity += page_result.rejected_identity_count
                 rejected_source_time += page_result.rejected_source_time_count
                 rejected_invalid_record += page_result.rejected_invalid_record_count
@@ -226,8 +245,6 @@ class WorkIQEnumerator:
                 if not page_result.response_usable:
                     failures.append("structured_response_unusable")
                     continue
-                page_records = list(page_result.records)
-            elif isinstance(page_result, WorkIQPage):
                 page_records = list(page_result.records)
             else:
                 page_records = list(page_result)
@@ -280,8 +297,8 @@ class WorkIQEnumerator:
             return Incomplete(value=page, reason="page_cut")
         if failures:
             return Incomplete(value=page, reason=f"provider_error:{failures[0]}")
-        if budget_stopped:
-            return Incomplete(value=page, reason="budget_stop:max_windows")
+        if budget_stop_reason:
+            return Incomplete(value=page, reason=budget_stop_reason)
         if window_cut and intent.from_date is not None and intent.to_date is not None:
             return Incomplete(value=page, reason="page_cut:window")
         admission_errors = tuple(
@@ -321,13 +338,20 @@ class WorkIQEnumerator:
             return Success(())
         try:
             result = self._query_page(intent)
+        except _WorkIQBudgetExhausted as exc:
+            return Incomplete(value=(), reason=exc.reason)
         except Exception as exc:  # noqa: BLE001
             return Incomplete(value=(), reason=f"provider_error:{type(exc).__name__}")
         by_id: dict[str, EnumeratedCandidate] = {}
         unidentified = 0
-        rejected = 0
-        outside_window = 0
+        rejected = result.rejected_source_time_count
+        rejected_identity = result.rejected_identity_count
+        invalid_records = result.rejected_invalid_record_count
+        outside_window = result.rejected_outside_window_count
         mismatched_identity = 0
+        if not result.response_usable:
+            self._discard_staged_checkpoint()
+            return Incomplete(value=(), reason="provider_error:structured_response_unusable")
         for record in result.records:
             if isinstance(record, Mapping) and _is_tombstone(record):
                 tombstone_id = _first_native_id(record, _ID_KEYS)
@@ -378,6 +402,19 @@ class WorkIQEnumerator:
             return Incomplete(value=page, reason=f"outside_window:{outside_window}")
         if mismatched_identity:
             return Incomplete(value=page, reason=f"mismatched_identity:{mismatched_identity}")
+        unidentified += rejected_identity
+        if unidentified and rejected:
+            return Incomplete(
+                value=page,
+                reason=f"admission_rejected:unidentified_records={unidentified},unqualified_source_time={rejected}",
+            )
+        if rejected and invalid_records:
+            return Incomplete(
+                value=page,
+                reason=f"admission_rejected:unqualified_source_time={rejected},invalid_records={invalid_records}",
+            )
+        if invalid_records:
+            return Incomplete(value=page, reason=f"invalid_records:{invalid_records}")
         if unidentified:
             return Incomplete(value=page, reason=f"unidentified_records:{unidentified}")
         if initial_empty_page:
@@ -413,36 +450,64 @@ class WorkIQEnumerator:
 
     def _query_page(self, intent: RetrievalIntent) -> WorkIQPage:
         cursor = self._checkpoint_cursor()
+        outcome = self._query_with_budget(intent, cursor=cursor)
+        if isinstance(outcome, WorkIQPage):
+            page = outcome
+        else:
+            if isinstance(outcome, WorkIQQueryPage):
+                page = WorkIQPage(
+                    records=outcome.records,
+                    next_cursor=None,
+                    rejected_source_time_count=outcome.rejected_source_time_count,
+                    rejected_identity_count=outcome.rejected_identity_count,
+                    rejected_invalid_record_count=outcome.rejected_invalid_record_count,
+                    rejected_outside_window_count=outcome.rejected_outside_window_count,
+                    response_usable=outcome.response_usable,
+                )
+            else:
+                page = WorkIQPage(records=tuple(outcome), next_cursor=None)
+        next_cursor = page.next_cursor
+        cursor_value = _validated_cursor(next_cursor)
+        if cursor_value is not None and cursor_value == cursor:
+            raise ValueError("WorkIQ continuation cursor did not advance")
+        return replace(page, records=tuple(page.records), next_cursor=cursor_value)
+
+    def _query_with_budget(
+        self,
+        intent: RetrievalIntent,
+        *,
+        cursor: str | None = None,
+    ) -> Sequence[Mapping[str, Any]] | WorkIQQueryPage | WorkIQPage:
+        timeout_seconds: int | None = None
+        if self._run_budget is not None:
+            remaining = self._run_budget.reserve_call()
+            if remaining is None:
+                reason = (
+                    "budget_stop:workiq_calls"
+                    if self._run_budget.calls_made >= self._run_budget.max_calls
+                    else "budget_stop:workiq_wall_clock"
+                )
+                raise _WorkIQBudgetExhausted(reason)
+            timeout_seconds = max(1, int(ceil(remaining)))
         try:
             signature = inspect.signature(self._query)
         except (TypeError, ValueError):
             signature = None
-        accepts_cursor = signature is not None and (
-            "cursor" in signature.parameters
-            or any(
-                parameter.kind is parameter.VAR_KEYWORD
-                for parameter in signature.parameters.values()
-            )
+        parameters = signature.parameters if signature is not None else {}
+        accepts_kwargs = signature is not None and any(
+            parameter.kind is parameter.VAR_KEYWORD
+            for parameter in parameters.values()
         )
-        if accepts_cursor:
-            outcome = self._query(intent, cursor=cursor)
-        elif cursor is None:
-            outcome = self._query(intent)
-        else:
+        kwargs: dict[str, Any] = {}
+        if cursor is not None or "cursor" in parameters or accepts_kwargs:
+            kwargs["cursor"] = cursor
+        if timeout_seconds is not None and (
+            "timeout_seconds" in parameters or accepts_kwargs
+        ):
+            kwargs["timeout_seconds"] = timeout_seconds
+        if self._program_id is not None and cursor is not None and "cursor" not in parameters and not accepts_kwargs:
             raise ValueError("WorkIQ checkpoint requires a cursor-aware query")
-        if isinstance(outcome, WorkIQPage):
-            next_cursor = outcome.next_cursor
-            records = outcome.records
-        else:
-            if isinstance(outcome, WorkIQQueryPage):
-                records = outcome.records
-            else:
-                records = tuple(outcome)
-            next_cursor = None
-        cursor_value = _validated_cursor(next_cursor)
-        if cursor_value is not None and cursor_value == cursor:
-            raise ValueError("WorkIQ continuation cursor did not advance")
-        return WorkIQPage(records=tuple(records), next_cursor=cursor_value)
+        return self._query(intent, **kwargs)
 
     def _prepare_checkpoint(self, intent: RetrievalIntent) -> None:
         if self._program_id is None:
@@ -578,6 +643,7 @@ class WorkIQHydrator:
     def hydrate(self, candidate: EnumeratedCandidate, *, correlation_id: str) -> PortResult[HydratedContent]:
         locator = candidate.locator
         meta = candidate.partial_metadata
+        source_time_qualified = meta.get("source_time_qualified") is True
         subject = str(meta.get("subject") or "")
         preview = str(meta.get("preview") or "")
         text = "\n\n".join(part for part in (subject, preview) if part)
@@ -609,7 +675,7 @@ class WorkIQHydrator:
                     "series_master_id": meta.get("series_master_id"),
                     "occurrence_id": meta.get("occurrence_id"),
                     "identity_kind": meta.get("identity_kind"),
-                    "received_at": meta.get("received_at"),
+                    "received_at": meta.get("received_at") if source_time_qualified else None,
                     "subject": subject,
                     "sender": str(meta.get("sender") or ""),
                     "web_link": meta.get("web_link"),
@@ -619,7 +685,7 @@ class WorkIQHydrator:
                 },
                 hydration_rung=RUNG_WORKIQ_PREVIEW if preview else RUNG_METADATA_ONLY,
                 metadata_only=not preview,
-                retrieved_at=candidate.received_at,
+                retrieved_at=candidate.received_at if source_time_qualified else None,
                 correlation_id=correlation_id,
             )
         )

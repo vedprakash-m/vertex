@@ -212,6 +212,7 @@ def run_channel(
         exact_target_status: str = "unknown",
         quarantine_status: str = "none",
         checkpoint_status: str = "unknown",
+        checkpoint_reseed_reasons: tuple[tuple[int, str], ...] = (),
     ) -> None:
         if channel_outcome_sink is None:
             return
@@ -226,6 +227,7 @@ def run_channel(
                 exact_target_status=exact_target_status,
                 quarantine_status=quarantine_status,
                 checkpoint_status=checkpoint_status,
+                checkpoint_reseed_reasons=checkpoint_reseed_reasons,
             )
         )
     # ADF-W1.4 (Section 8.3.1): bounded, non-blocking channel execution. An
@@ -463,6 +465,9 @@ def run_channel(
     checkpoint_advances = getattr(
         hydration_result.resources, "checkpoint_advances", ()
     )
+    checkpoint_reseed_reasons = getattr(
+        hydration_result.resources, "checkpoint_reseed_reasons", ()
+    )
     if not run_ctx.dry_run and (
         hydration_result.hydrated_ref_ids or checkpoint_advances
     ):
@@ -569,6 +574,7 @@ def run_channel(
             if checkpoint_advances
             else "unchanged"
         ),
+        checkpoint_reseed_reasons=checkpoint_reseed_reasons,
     )
     return hydration_result, delta
 

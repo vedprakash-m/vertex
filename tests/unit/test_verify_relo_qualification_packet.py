@@ -13,6 +13,15 @@ from typing import Any
 
 import pytest
 
+from src.core.relo_w6 import verify_w6_packet
+from src.core.study_evaluator import (
+    MatchedWeeklyCycle,
+    StratumSample,
+    WeightedSavingsObservation,
+    calculate_matched_cycle_savings,
+    evaluate_matched_cycles,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "verify_relo_qualification_packet.py"
 _SPEC = importlib.util.spec_from_file_location("verify_relo_qualification_packet", SCRIPT_PATH)
@@ -195,6 +204,136 @@ def test_d7_complete_positive_packet_is_owner_review_only() -> None:
     assert result["measurements"]["bootstrap_seed"] == 7307
     assert "owner approval" in " ".join(result["limitations"]).lower()
     assert "certification" in " ".join(result["limitations"]).lower()
+
+
+def test_w62_readiness_and_d7_share_one_weighted_savings_calculation() -> None:
+    d7_payload = _d7_packet()
+    for cycle_index in range(8):
+        manual = 10.0 if cycle_index < 7 else 1000.0
+        vertex = 0.0 if cycle_index < 7 else 400.0
+        d7_payload["cycles"][cycle_index * 2][
+            "quality_adjusted_active_seconds"
+        ] = manual
+        d7_payload["cycles"][cycle_index * 2 + 1][
+            "quality_adjusted_active_seconds"
+        ] = vertex
+
+    d7_result = verifier.verify_packet(d7_payload)
+    w62_payload = {
+        "schema_version": "1",
+        "card_id": "RELO-W6.2",
+        "packet_id": "packet-w62",
+        "captured_at": "2026-02-20T00:00:00+00:00",
+        "owner_disposition": {
+            "status": "pending",
+            "approved_by": None,
+            "approved_at": None,
+            "approval_ref": None,
+        },
+        "artifacts": [],
+        "protocol": {
+            "frozen": True,
+            "assignment": "alternating",
+            "bootstrap_seed": 7307,
+            "bootstrap_resamples": 2000,
+            "applicable_workflow_classes": ["weekly_portfolio_review"],
+        },
+        "cycles": [
+            {
+                "cycle_id": f"cycle-{index + 1}",
+                "observed_at": (
+                    datetime(2026, 1, 1, tzinfo=timezone.utc)
+                    + timedelta(days=index * 7)
+                ).isoformat(),
+                "manual_minutes": manual,
+                "assisted_minutes": vertex,
+                "quality_passed": True,
+                "completion_rate": 1.0,
+                "displacement_rate": 0.0,
+                "correction_count": 0,
+                "exception_count": 0,
+                "downstream_error_count": 0,
+                "workflow_classes": ["weekly_portfolio_review"],
+            }
+            for index, (manual, vertex) in enumerate(
+                (
+                    (
+                        d7_payload["cycles"][index * 2][
+                            "quality_adjusted_active_seconds"
+                        ],
+                        d7_payload["cycles"][index * 2 + 1][
+                            "quality_adjusted_active_seconds"
+                        ],
+                    )
+                    for index in range(8)
+                )
+            )
+        ],
+    }
+    w62_result = verify_w6_packet(w62_payload)
+    readiness_result = evaluate_matched_cycles(
+        tuple(
+            MatchedWeeklyCycle(
+                cycle_id=row["cycle_id"],
+                week_start=datetime.fromisoformat(row["observed_at"]).date(),
+                baseline_minutes=row["manual_minutes"],
+                assisted_minutes=row["assisted_minutes"],
+                quality_passed=True,
+            )
+            for row in w62_payload["cycles"]
+        ),
+        strata=(StratumSample("exec", 60, 0),),
+        bootstrap_resamples=2000,
+        bootstrap_seed=7307,
+    )
+
+    expected_savings = d7_result["measurements"]["frequency_weighted_savings"]
+    assert w62_result.measurements[
+        "quality_adjusted_saved_fraction"
+    ] == pytest.approx(expected_savings)
+    assert readiness_result.mean_saved_fraction == pytest.approx(expected_savings)
+    assert w62_result.measurements["bootstrap_95_lower_bound"] == pytest.approx(
+        d7_result["measurements"]["bootstrap_95_lower_bound"]
+    )
+    assert readiness_result.lcb_95_saved_fraction == pytest.approx(
+        d7_result["measurements"]["bootstrap_95_lower_bound"]
+    )
+    assert d7_result["classification"] == "not_qualified"
+    assert w62_result.classification == "not_qualified"
+    assert w62_result.failed_gates
+    assert readiness_result.accepted is False
+
+
+def test_d7_frequency_weights_are_used_in_shared_cycle_bootstrap() -> None:
+    payload = _d7_packet(vertex_seconds=40.0)
+    weights = (1.0, 2.0, 3.0, 4.0)
+    for cycle_index in range(8):
+        for row in payload["cycles"][cycle_index * 2 : cycle_index * 2 + 2]:
+            row["frequency_weight"] = weights[cycle_index % len(weights)]
+
+    result = verifier.verify_packet(payload)
+    shared = calculate_matched_cycle_savings(
+        tuple(
+            (
+                WeightedSavingsObservation(
+                    baseline_minutes=100.0,
+                    saved_minutes=60.0,
+                    frequency_weight=weights[index % len(weights)],
+                ),
+            )
+            for index in range(8)
+        ),
+        resamples=2000,
+        seed=7307,
+    )
+
+    assert result["measurements"]["frequency_weighted_savings"] == pytest.approx(
+        shared.saved_fraction
+    )
+    assert result["measurements"]["bootstrap_95_lower_bound"] == pytest.approx(
+        shared.lcb_95_saved_fraction
+    )
+    assert result["measurements"]["frequency_weighted_savings"] == pytest.approx(0.6)
 
 
 def test_d7_requires_five_distinct_baselines_and_at_least_1000_resamples() -> None:

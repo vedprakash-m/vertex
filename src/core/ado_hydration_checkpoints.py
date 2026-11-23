@@ -114,6 +114,15 @@ def _parse_checkpoint_time(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _validated_checkpoint_time(value: datetime) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ValueError("ADO checkpoint time must be timezone-aware.")
+    try:
+        return value.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        raise ValueError("ADO checkpoint time is invalid.") from None
+
+
 def read_checkpoints(
     conn: sqlite3.Connection,
     provider_instance_id: str,
@@ -121,7 +130,7 @@ def read_checkpoints(
     *,
     at: datetime | None = None,
 ) -> dict[tuple[int, HydrationSubresource], HydrationCheckpoint]:
-    at = at or datetime.now(timezone.utc)
+    at = _validated_checkpoint_time(at or datetime.now(timezone.utc))
     provider_instance_id = _validated_provider_instance_id(provider_instance_id)
     ids = tuple(dict.fromkeys(int(work_item_id) for work_item_id in work_item_ids))
     result = {
@@ -162,8 +171,16 @@ def read_checkpoints(
                 != evidence_hash
             ):
                 continue
+            try:
+                _canonical_evidence_json(
+                    payload_json,
+                    subresource=HydrationSubresource(sub),
+                    cursor=str(cursor),
+                )
+            except ValueError:
+                continue
             parsed_at = _parse_checkpoint_time(updated_at)
-            if parsed_at is None or parsed_at > at.astimezone(timezone.utc):
+            if parsed_at is None or parsed_at > at:
                 continue
             result[key] = HydrationCheckpoint(
                 work_item_id=key[0],
@@ -187,7 +204,7 @@ def plan_checkpoint_reseeds(
 ) -> tuple[tuple[int, str], ...]:
     unknown: set[int] = set()
     expired: dict[int, datetime] = {}
-    observed_at = at.astimezone(timezone.utc)
+    observed_at = _validated_checkpoint_time(at)
     maximum_age = timedelta(seconds=max(max_age_seconds, 0))
     for (work_item_id, _subresource), checkpoint in checkpoints.items():
         if checkpoint.state != "current":
@@ -209,13 +226,26 @@ def plan_checkpoint_reseeds(
     return tuple(decisions)
 
 
-def _canonical_evidence_json(value: str | None) -> str | None:
+def _canonical_evidence_json(
+    value: str | None,
+    *,
+    subresource: HydrationSubresource | str,
+    cursor: str,
+) -> str | None:
     if value is None:
         return None
     try:
         decoded = json.loads(value)
     except (TypeError, ValueError):
         raise ValueError("ADO checkpoint evidence must be valid JSON.") from None
+    if (
+        not isinstance(decoded, dict)
+        or decoded.get("schema_version") != CHECKPOINT_SCHEMA_VERSION
+        or decoded.get("subresource") != getattr(subresource, "value", subresource)
+        or decoded.get("cursor") != cursor
+        or not isinstance(decoded.get("records"), list)
+    ):
+        raise ValueError("ADO checkpoint evidence does not match its checkpoint.")
     return json.dumps(decoded, sort_keys=True, separators=(",", ":"))
 
 
@@ -231,6 +261,7 @@ def advance_checkpoint(
             "Checkpoint advance requires the open transaction that commits its evidence."
         )
     provider_instance_id = _validated_provider_instance_id(provider_instance_id)
+    at = _validated_checkpoint_time(at)
     if (
         advance.provider_instance_id != provider_instance_id
         and advance.provider_instance_id != "default"
@@ -269,10 +300,18 @@ def advance_checkpoint(
     evidence_json = _canonical_evidence_json(
         advance.evidence_json
         or json.dumps(
-            {"work_item_id": advance.work_item_id, "cursor": advance.cursor},
+            {
+                "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                "subresource": subresource,
+                "cursor": advance.cursor,
+                "records": [],
+                "pagination": None,
+            },
             sort_keys=True,
             separators=(",", ":"),
-        )
+        ),
+        subresource=advance.subresource,
+        cursor=advance.cursor,
     )
     assert evidence_json is not None
     evidence_hash = hashlib.sha256(evidence_json.encode("utf-8")).hexdigest()
@@ -359,12 +398,20 @@ def commit_checkpoint_advances(
 ) -> None:
     if not advances:
         return
+    at = _validated_checkpoint_time(at)
     if provider_instance_id is None:
         raise ValueError("ADO checkpoint provider identity is required.")
+    unique_advances: dict[tuple[int, HydrationSubresource], CheckpointAdvance] = {}
+    for advance in advances:
+        key = (int(advance.work_item_id), advance.subresource)
+        previous = unique_advances.get(key)
+        if previous is not None and previous != advance:
+            raise ValueError("conflicting checkpoint advances for one subresource.")
+        unique_advances[key] = advance
     if not conn.in_transaction:
-        conn.execute("BEGIN")
+        conn.execute("BEGIN IMMEDIATE")
     for work_item_id in sorted(
-        {advance.work_item_id for advance in advances}
+        {advance.work_item_id for advance in unique_advances.values()}
     ):
         exists = conn.execute(
             "SELECT 1 FROM registrations"
@@ -377,7 +424,7 @@ def commit_checkpoint_advances(
             raise ValueError(
                 "ADO checkpoint evidence requires a matching scoped registration."
             )
-    for advance in advances:
+    for advance in unique_advances.values():
         advance_checkpoint(
             conn,
             advance,
@@ -393,7 +440,8 @@ def read_hydration_evidence(
     subresource: HydrationSubresource,
 ) -> str | None:
     row = conn.execute(
-        "SELECT e.payload_json, c.evidence_hash FROM ado_hydration_evidence AS e"
+        "SELECT e.payload_json, c.evidence_hash, c.cursor"
+        " FROM ado_hydration_evidence AS e"
         " JOIN ado_hydration_checkpoints AS c"
         " ON c.provider_instance_id = e.provider_instance_id"
         " AND c.work_item_id = e.work_item_id"
@@ -413,4 +461,12 @@ def read_hydration_evidence(
     payload = str(row["payload_json"])
     if hashlib.sha256(payload.encode("utf-8")).hexdigest() != row["evidence_hash"]:
         raise ValueError("ADO checkpoint evidence integrity mismatch.")
+    try:
+        _canonical_evidence_json(
+            payload,
+            subresource=subresource,
+            cursor=str(row["cursor"]),
+        )
+    except ValueError:
+        raise ValueError("ADO checkpoint evidence integrity mismatch.") from None
     return payload

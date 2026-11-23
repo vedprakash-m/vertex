@@ -277,7 +277,7 @@ def _git(repo: Path, *args: str, input_text: str | None = None) -> subprocess.Co
 
 def _configure_git_repo(repo: Path) -> None:
     _init_repo(repo)
-    _git(repo, "config", "user.email", "tester@example.com")
+    _git(repo, "config", "user.email", "tester@users.noreply.github.com")
     _git(repo, "config", "user.name", "Vertex Tester")
 
 
@@ -446,6 +446,59 @@ def test_push_refs_rejects_nonblank_malformed_input(
     code, payload = _run(_load_module(), capsys, tmp_path, "--push-refs")
     assert code == 2
     assert payload["findings"][0]["code"] == "SELECTION_INVALID"
+
+
+def test_identity_accepts_only_github_noreply_email(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_module()
+    _configure_git_repo(tmp_path)
+
+    clean_code, clean = _run(module, capsys, tmp_path, "--identity")
+    _git(tmp_path, "config", "user.email", "operator@example.invalid")
+    blocked_code, blocked = _run(module, capsys, tmp_path, "--identity")
+
+    assert clean_code == 0
+    assert clean["findings"] == []
+    assert blocked_code == 1
+    assert blocked["findings"][0]["code"] == "GIT_IDENTITY_UNAPPROVED"
+
+
+def test_commit_range_rejects_non_noreply_author_or_committer(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_module()
+    _configure_git_repo(tmp_path)
+    (tmp_path / "safe.txt").write_text("safe\n", encoding="utf-8")
+    _git(tmp_path, "add", "safe.txt")
+    _git(tmp_path, "commit", "-m", "safe")
+    first = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+    (tmp_path / "next.txt").write_text("next\n", encoding="utf-8")
+    _git(tmp_path, "add", "next.txt")
+    _git(
+        tmp_path,
+        "commit",
+        "-m",
+        "disallowed identity",
+        "--author=Synthetic Person <person@example.invalid>",
+    )
+    second = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+    code, payload = _run(
+        module,
+        capsys,
+        tmp_path,
+        "--commit-range",
+        f"{first}..{second}",
+    )
+
+    assert code == 1
+    assert payload["candidate_count"] == 0
+    assert {finding["code"] for finding in payload["findings"]} == {
+        "COMMIT_AUTHOR_UNAPPROVED"
+    }
 
 
 def test_staged_scans_type_changes_and_uses_index_path(

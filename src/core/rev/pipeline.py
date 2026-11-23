@@ -687,6 +687,11 @@ def _stage_candidates(
     if not claims:
         return [], 0
     route = hydrated.route_metadata.get("route")
+    if (
+        route == "workiq"
+        and hydrated.route_metadata.get("source_time_qualified") is False
+    ):
+        return [], 1
     if hydrated.identity.source_type is EntityType.DRIVE_ITEM:
         occurred_at = _parse_mail_source_time(
             hydrated.route_metadata.get("received_at")

@@ -279,7 +279,7 @@ class DeterministicContextCompiler:
                 match.group(0)
                 for span in (*request.required_evidence, *request.optional_evidence)
                 for match in re.finditer(
-                    r"\b(?:RISK|DECISION|DEPENDENCY|MILESTONE):[A-Za-z0-9_.:-]+\b",
+                    r"\b(?:RISK|DECISION|DEPENDENCY|MILESTONE|ACTION|CLAIM|INTERVENTION):[A-Za-z0-9_.:-]+\b",
                     span.text,
                 )
             )
@@ -455,8 +455,15 @@ class DeterministicContextCompiler:
     def _long_horizon_spans(
         self, request: ContextCompileRequest, entity_refs: tuple[str, ...],
     ) -> tuple[EvidenceSpan, ...]:
+        from src.core.program_fact_store import ProgramFactStore, _resolve_fact_db_root
         from src.core.program_reality import ProgramReality
         try:
+            history_store = ProgramFactStore(
+                request.program_id,
+                db_root=_resolve_fact_db_root(self._programs_root),
+            )
+            if not history_store.db_path.exists():
+                raise ValueError("Long-horizon fact history is unavailable.")
             reality = ProgramReality.load(
                 request.program_id, programs_root=self._programs_root,
                 as_of=request.long_horizon_as_of,

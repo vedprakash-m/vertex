@@ -417,6 +417,28 @@ def record_risk_update(
     path = get_risk_updates_path(program_id, programs_root)
     payload = json.dumps(record, ensure_ascii=False) + "\n"
     append_jsonl_line(path, payload, max_bytes=_RISK_UPDATES_MAX_BYTES)
+    next_status = RiskStatus.from_string(new_status)
+    kind = (
+        LifecycleEventKind.ESCALATION
+        if next_status is RiskStatus.ESCALATED
+        else LifecycleEventKind.CLOSURE
+        if next_status in {RiskStatus.CLOSED, RiskStatus.MITIGATED, RiskStatus.ACCEPTED}
+        else None
+    )
+    if kind is not None:
+        _write_lifecycle_event(
+            program_id,
+            "risk.lifecycle",
+            risk_id,
+            kind,
+            actor=author,
+            note=note,
+            effective=None,
+            next_review_at=None,
+            evidence_refs=(),
+            occurred_at=timestamp,
+            programs_root=programs_root,
+        )
 
 
 def load_risk_history(program_id: str, risk_id: str | None, programs_root: Path = PROGRAMS_ROOT) -> tuple[dict[str, Any], ...]:

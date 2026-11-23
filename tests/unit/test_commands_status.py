@@ -18,6 +18,7 @@ from cli import app
 from src.commands.report import generate_report_draft
 from src.commands.status import build_status_report
 from src.core.exceptions import ConfigError, StateError
+from src.core.effective_completeness import EffectiveCompleteness
 from src.core.gather_state_store import write_gather_state
 from src.core.journal import append_review_decision, append_signal
 from src.core.models import Confidence
@@ -209,6 +210,67 @@ def test_build_status_report_uses_latest_draft_artifacts(monkeypatch, repo_root:
     assert report.next_due_context is not None
     assert "working team and DRIs; via teams; owner maintainer" in report.next_due_context
     assert report.source_manifest_path is not None
+
+
+def test_status_consumes_shared_effective_completeness_in_all_formats(
+    monkeypatch, repo_root: Path, tmp_path: Path,
+) -> None:
+    _seed_status_workspace(monkeypatch, repo_root, tmp_path)
+    monkeypatch.setattr(
+        "src.commands.status.build_program_effective_completeness",
+        lambda *args, **kwargs: EffectiveCompleteness(
+            base=1.0,
+            value=None,
+            downgraded=True,
+            reasons=("query_truncated:scope-a",),
+        ),
+    )
+    monkeypatch.setattr("src.commands.status.PROGRAMS_ROOT", tmp_path / "programs")
+    monkeypatch.setattr("src.commands.status.ARCHIVE_ROOT", tmp_path / "archive")
+
+    report = build_status_report(
+        EDITION_NAME,
+        programs_root=tmp_path / "programs",
+        archive_root=tmp_path / "archive",
+    )
+    human = runner.invoke(app, ["status", "--edition", EDITION_NAME])
+    structured = runner.invoke(app, ["status", "--edition", EDITION_NAME, "--format", "json"])
+    tabular = runner.invoke(app, ["status", "--edition", EDITION_NAME, "--format", "csv"])
+
+    assert report.source_completeness_base == 1.0
+    assert report.source_completeness_value is None
+    assert report.source_completeness_reasons == ("query_truncated:scope-a",)
+    assert "Completeness: unknown (query_truncated:scope-a)" in human.stdout
+    assert json.loads(structured.stdout)["source_completeness_reasons"] == [
+        "query_truncated:scope-a"
+    ]
+    row = list(csv.DictReader(tabular.stdout.splitlines()))[0]
+    assert row["source_completeness_value"] == ""
+    assert json.loads(row["source_completeness_reasons_json"]) == [
+        "query_truncated:scope-a"
+    ]
+
+
+def test_status_discloses_completeness_projection_failure(
+    monkeypatch, repo_root: Path, tmp_path: Path,
+) -> None:
+    _seed_status_workspace(monkeypatch, repo_root, tmp_path)
+    monkeypatch.setattr(
+        "src.commands.status.build_program_effective_completeness",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("private detail")),
+    )
+
+    report = build_status_report(
+        EDITION_NAME,
+        programs_root=tmp_path / "programs",
+        archive_root=tmp_path / "archive",
+    )
+
+    assert report.source_completeness_base is None
+    assert report.source_completeness_value is None
+    assert report.source_completeness_reasons == (
+        "completeness_projection_unavailable",
+    )
 
 
 def test_build_status_report_prefers_gather_state_timestamp_over_draft_snapshot(

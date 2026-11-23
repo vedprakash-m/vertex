@@ -180,6 +180,32 @@ def append_decision_ask(entry: DecisionAsk, programs_root: Path = PROGRAMS_ROOT)
 
 def append_claim_status_update(program_id: str, update: ClaimStatusUpdate, programs_root: Path = PROGRAMS_ROOT) -> Path:
     _sync_claim_status_update_fact(program_id, update, programs_root=programs_root)
+    existing_closure = any(
+        event.kind is LifecycleEventKind.CLOSURE
+        and event.occurred_at == update.updated_at
+        for event in load_claim_lifecycle(
+            program_id,
+            update.claim_id,
+            programs_root=programs_root,
+            as_of=update.updated_at,
+        )
+    )
+    if update.new_status in {"met", "deferred", "resolved"} and not existing_closure:
+        from src.core.risk_register_engine import _write_lifecycle_event
+
+        _write_lifecycle_event(
+            program_id,
+            "claim.lifecycle",
+            update.claim_id,
+            LifecycleEventKind.CLOSURE,
+            actor=update.updated_by,
+            note=update.note,
+            effective=None,
+            next_review_at=None,
+            evidence_refs=(),
+            occurred_at=update.updated_at,
+            programs_root=programs_root,
+        )
     target = get_claims_path(program_id, programs_root)
     _append_jsonl(target, _status_update_to_record(update))
     return target

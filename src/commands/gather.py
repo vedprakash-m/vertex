@@ -266,6 +266,7 @@ from src.core.integration_types import (
     ChannelRegistration,
     DiscoveredRef,
     HydrationMode,
+    KustoResultSchema,
     KustoResultSet,
     RegistrationBinding,
     RegistrationStatus,
@@ -377,7 +378,9 @@ log = logging.getLogger(__name__)
 
 GatherLoader = Callable[[Program, tuple[Workstream, ...], datetime], tuple[tuple[WorkItem, ...], int]]
 BridgeFactory = Callable[[], AgencyBridge]
-KustoQueryExecutor = Callable[[KustoQuery], list[dict[str, Any]]]
+KustoQueryExecutor = Callable[
+    [KustoQuery], list[dict[str, Any]] | tuple[dict[str, Any], ...] | KustoResultSet
+]
 IcmClientFactory = Callable[..., Any]
 AnalyticsSignalLoader = Callable[[Program, tuple[Workstream, ...], datetime], tuple[tuple[Signal, ...], int]]
 SprintSignalLoader = Callable[..., tuple[tuple[Signal, ...], int]]
@@ -1406,6 +1409,7 @@ def _gather_program_impl(
         kusto_started_at = perf_counter()
         kusto_error_start = len(integration_error_details)
         try:
+            query_executor_for_signals = kusto_query_executor
             kusto_uil_binding = _resolve_uil_channel_binding_for_gather(
                 program,
                 workstreams,
@@ -1473,7 +1477,7 @@ def _gather_program_impl(
                                 if (q.cluster.strip(), q.database.strip()) not in failed_targets
                             )
                             # Wrap executor to silently skip queries on failed clusters.
-                            kusto_query_executor = _make_cluster_filtered_executor(
+                            query_executor_for_signals = _make_cluster_filtered_executor(
                                 kusto_query_executor or build_live_kusto_query_executor(),
                                 failed_targets,
                             )
@@ -1483,7 +1487,7 @@ def _gather_program_impl(
                     programs_root=resolved_programs_root,
                     as_of=current_time,
                     workstreams=workstreams,
-                    executor=kusto_query_executor or build_live_kusto_query_executor(),
+                    executor=query_executor_for_signals or build_live_kusto_query_executor(),
                     filter_for_gather=True,
                     include_unvalidated=probe_kusto,
                     query_state_sink=query_states,
@@ -1495,11 +1499,19 @@ def _gather_program_impl(
                 programs_root=resolved_programs_root,
                 as_of=current_time,
                 workstreams=workstreams,
-                executor=kusto_query_executor or build_live_kusto_query_executor(),
+                executor=query_executor_for_signals or kusto_query_executor or build_live_kusto_query_executor(),
                 include_unvalidated=probe_kusto,
                 query_state_sink=query_states,
                 previous_query_states=previous_query_states,
             )
+            current_kusto_errors = [
+                str(state["last_error"])
+                for state in query_states.values()
+                if state.get("last_attempted_at") == current_time
+                and state.get("last_error")
+            ]
+            if current_kusto_errors:
+                raise QueryError(current_kusto_errors[0])
         except (AuthError, QueryError, TimeoutError, typer.BadParameter) as exc:
             if isinstance(exc, CredentialExpired):
                 typer.echo(
@@ -1711,7 +1723,7 @@ def _gather_program_impl(
                     programs_root=resolved_programs_root,
                     as_of=current_time,
                     workstreams=workstreams,
-                    executor=kusto_query_executor or build_live_kusto_query_executor(),
+                    executor=kusto_query_executor or build_live_kusto_query_executor(typed=True),
                     bridge=(bridge_factory or AgencyBridge),
                     icm_client_factory=icm_client_factory,
                 )
@@ -3012,8 +3024,21 @@ def _make_cluster_filtered_executor(
     failed_targets: frozenset[tuple[str, str]],
 ) -> KustoQueryExecutor:
     """Wrap an executor to return empty rows for queries on pre-flight-failed clusters."""
-    def filtered(query: KustoQuery) -> list[dict[str, Any]]:
-        if (query.cluster.strip(), query.database.strip()) in failed_targets:
+    normalized_failed_targets = frozenset(
+        (cluster.strip().rstrip("/").lower(), database.strip().lower())
+        for cluster, database in failed_targets
+    )
+    normalized_failed_clusters = frozenset(
+        cluster for cluster, _database in normalized_failed_targets
+    )
+
+    def filtered(
+        query: KustoQuery,
+    ) -> list[dict[str, Any]] | tuple[dict[str, Any], ...] | KustoResultSet:
+        if (
+            query.cluster.strip().rstrip("/").lower(),
+            query.database.strip().lower(),
+        ) in normalized_failed_targets or query.cluster.strip().rstrip("/").lower() in normalized_failed_clusters:
             return []
         return executor(query)
     return filtered
@@ -3107,6 +3132,7 @@ def _record_kusto_query_state(
     duration_ms: int,
     error: str | None = None,
     previous_state: dict[str, Any] | None = None,
+    result_schema: KustoResultSchema | None = None,
 ) -> None:
     _record_kusto_query_state_impl(
         query_state_sink,
@@ -3116,6 +3142,7 @@ def _record_kusto_query_state(
         duration_ms=duration_ms,
         error=error,
         previous_state=previous_state,
+        result_schema=result_schema,
     )
 
 
@@ -3167,10 +3194,12 @@ def _build_kusto_kpi_signal(
     program_id: str,
     as_of: datetime,
     entity_refs: tuple[str, ...] | None = None,
+    result_schema: KustoResultSchema | None = None,
 ) -> Signal | None:
     return _build_kusto_kpi_signal_impl(
         query=query, rows=rows, program_id=program_id, as_of=as_of,
         entity_refs=entity_refs,
+        result_schema=result_schema,
     )
 
 

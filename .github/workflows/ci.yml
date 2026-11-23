@@ -74,6 +74,17 @@ jobs:
           else
             python scripts/check_publication_content.py --range "$BASE_SHA...$GITHUB_SHA"
           fi
+      - name: Check outgoing commit metadata
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$BASE_SHA" =~ ^0{40}$ ]]; then
+            python scripts/verify_disclosure_candidate.py --commit-range "$HEAD_SHA"
+          else
+            python scripts/verify_disclosure_candidate.py --commit-range "$BASE_SHA...$HEAD_SHA"
+          fi
 
       - uses: ./.github/actions/setup-vertex
       - name: Check generated CLI reference

@@ -542,6 +542,35 @@ class TestStagingCreationAndCommit:
         assert resolved.run_id == committed.run_id
         assert resolved.manifest_hash == committed.manifest_hash
 
+    def test_checkpoint_reseed_reasons_survive_manifest_commit(
+        self, tmp_path: Path
+    ) -> None:
+        manifest = _make_manifest(
+            channel_outcomes=(
+                ChannelOutcomeEntry(
+                    channel="ado",
+                    degraded=False,
+                    degrade_reason=None,
+                    elapsed_seconds=1.0,
+                    checkpoint_reseed_reasons=((42, "anti_entropy_expired"),),
+                ),
+            )
+        )
+        create_staging_manifest(manifest, programs_root=tmp_path)
+        committed = commit_staging_run(
+            manifest, finished_at=_now(), programs_root=tmp_path
+        )
+
+        resolved = resolve_latest_committed_manifest(
+            "demo", programs_root=tmp_path
+        )
+
+        assert resolved is not None
+        assert resolved == committed
+        assert resolved.channel_outcomes[0].checkpoint_reseed_reasons == (
+            (42, "anti_entropy_expired"),
+        )
+
     def test_resolve_latest_committed_manifest_falls_back_when_pointer_corrupt(self, tmp_path: Path) -> None:
         manifest = _make_manifest()
         create_staging_manifest(manifest, programs_root=tmp_path)

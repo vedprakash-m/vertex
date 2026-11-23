@@ -121,6 +121,129 @@ def test_existing_key_rejects_changed_identity(tmp_path: Path, changed: str) -> 
     assert load_entry(db, first.outbox_id) == before
 
 
+def test_dispatch_refuses_unbound_effect_loser_before_provider_callback(
+    tmp_path: Path,
+) -> None:
+    from src.core.ledger.durable_outbox_store import bind_effect, enqueue
+    from src.core.operation_capabilities import (
+        normalize_semantic_payload,
+        semantic_effect_key,
+    )
+
+    root = tmp_path / "programs"
+    payload = _qualified_payload()
+    parsed = json.loads(payload)
+    effect_id = semantic_effect_key(
+        program_id="fixture",
+        provider="ado",
+        tenant="org",
+        project="project",
+        operation="create_task.v1",
+        target_identity="new",
+        causal_occurrence_id="intent",
+        payload=normalize_semantic_payload("create_task.v1", parsed),
+    )
+    db = outbox_db_path("fixture", programs_root=root)
+    winner = enqueue(
+        db,
+        "winner",
+        domain=ACTUATION_DISPATCH_DOMAIN,
+        correlation_id="winner",
+        payload_json=payload,
+    )
+    loser = enqueue(
+        db,
+        "loser",
+        domain=ACTUATION_DISPATCH_DOMAIN,
+        correlation_id="loser",
+        payload_json=payload,
+    )
+    assert bind_effect(db, effect_id, winner.outbox_id) == winner.outbox_id
+    calls: list[str] = []
+
+    with pytest.raises(Exception, match="first binding won or the row is unbound"):
+        dispatch_leased_create_task(
+            program_id="fixture",
+            idempotency_key=loser.outbox_id,
+            owner="worker",
+            dispatch_fn=lambda entry: calls.append(entry.outbox_id) or _success(entry),
+            programs_root=root,
+        )
+
+    assert calls == []
+
+
+def test_succeeded_restart_refuses_workspace_lease_takeover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.core.actuation_outbox as service
+    import src.core.workspace_lease as workspace
+    from src.core._db import open_program_db_with_retry
+    from src.core.ledger.durable_outbox_store import LeaseNoLongerCurrent
+
+    root = tmp_path / "programs"
+    key = "key"
+    enqueue_create_task_intent(
+        program_id="fixture",
+        idempotency_key=key,
+        operation_intent_id="intent",
+        proposal_id="proposal",
+        payload_json=_qualified_payload(),
+        programs_root=root,
+    )
+    original_audited = service.mark_audited
+    monkeypatch.setattr(
+        service,
+        "mark_audited",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop")),
+    )
+    with pytest.raises(RuntimeError, match="stop"):
+        dispatch_leased_create_task(
+            program_id="fixture",
+            idempotency_key=key,
+            owner="worker-a",
+            dispatch_fn=_success,
+            programs_root=root,
+        )
+    monkeypatch.setattr(service, "mark_audited", original_audited)
+    db = outbox_db_path("fixture", programs_root=root)
+    with open_program_db_with_retry(db) as connection:
+        connection.execute(
+            "UPDATE outbox SET lease_expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE outbox_id = ?",
+            (key,),
+        )
+
+    actual_acquire = workspace.acquire_lease
+
+    def takeover_after_acquire(*args, **kwargs):
+        handle = actual_acquire(*args, **kwargs)
+        lease_db = workspace.get_workspace_lease_db_path(
+            "fixture", programs_root=root
+        )
+        with open_program_db_with_retry(lease_db) as connection:
+            connection.execute(
+                "UPDATE workspace_lease SET owner = 'successor' "
+                "WHERE mutation_domain = ?",
+                (ACTUATION_DISPATCH_DOMAIN,),
+            )
+        return handle
+
+    monkeypatch.setattr(service, "acquire_lease", takeover_after_acquire)
+    with pytest.raises(LeaseNoLongerCurrent):
+        dispatch_leased_create_task(
+            program_id="fixture",
+            idempotency_key=key,
+            owner="worker-b",
+            dispatch_fn=lambda entry: pytest.fail("restart must not call provider"),
+            programs_root=root,
+        )
+
+    retained = load_entry(db, key)
+    assert retained is not None and retained.status == "succeeded"
+
+
 @pytest.mark.parametrize(
     ("changed_status", "error"),
     [
@@ -444,7 +567,9 @@ def test_dispatch_samples_expiry_after_transaction_locks(tmp_path, monkeypatch, 
     assert store.load_entry(db, "key") == retained[0]
 
 
-def test_fence_locks_both_stores_until_dispatch_transition_commits(tmp_path, monkeypatch) -> None:
+def test_expired_workspace_takeover_blocks_success_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import contextmanager
     from datetime import timedelta
@@ -505,10 +630,13 @@ def test_fence_locks_both_stores_until_dispatch_transition_commits(tmp_path, mon
             return _success(entry, 42)
 
         monkeypatch.setattr(service, "lease_next", start_competitors_after_lease)
-        outcome = service.dispatch_leased_create_task(
-            program_id="fixture", idempotency_key="key", owner="worker", dispatch_fn=dispatch, programs_root=root,
-        )
-    assert outcome.status == "completed"
+        with pytest.raises(store.LeaseNoLongerCurrent):
+            service.dispatch_leased_create_task(
+                program_id="fixture", idempotency_key="key", owner="worker",
+                dispatch_fn=dispatch, programs_root=root,
+            )
+    retained = store.load_entry(db, "key")
+    assert retained is not None and retained.status == "dispatched"
     assert all(event.is_set() for event in finished)
     assert workspace.read_lease_state(
         "fixture", mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=root,

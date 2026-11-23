@@ -10,6 +10,7 @@ from src.core.brief_intervention_store import (
     load_brief_intervention_resolutions,
 )
 from src.core.claim_tracker import append_claim_entry, load_claim_entries
+from src.core.claim_tracker import append_claim_status_update
 from src.core.decision_register import load_decisions, save_decisions
 from src.core.dependency_graph import load_dependencies, save_dependencies
 from src.core.models_v2 import (
@@ -17,6 +18,7 @@ from src.core.models_v2 import (
     ActionSourceType,
     ActionStatus,
     ClaimEntry,
+    ClaimStatusUpdate,
     DecisionEntry,
     DecisionStatus,
     Dependency,
@@ -39,6 +41,7 @@ from src.core.program_fact_store import (
 from src.core.risk_register_engine import (
     load_risk_lifecycle,
     load_risk_register,
+    record_risk_update,
     record_risk_lifecycle,
     save_risk_register,
 )
@@ -311,3 +314,70 @@ def test_lifecycle_facts_are_bitemporal(tmp_path: Path) -> None:
             as_of=NOW - timedelta(seconds=1), valid_at=NOW - timedelta(seconds=1)
         ).facts
     )
+
+
+def test_terminal_store_updates_emit_canonical_lifecycle_facts(tmp_path: Path) -> None:
+    roots = tmp_path / "programs"
+    save_risk_register("acme", (_risk(),), roots)
+    record_risk_update(
+        "acme", "risk-1", "open", "closed", "owner", "Verified.",
+        programs_root=roots,
+    )
+
+    append_action("acme", _action(), roots)
+    from src.core.action_tracker import update_action_status
+
+    update_action_status(
+        "acme", "action-1", ActionStatus.DONE, "Complete.",
+        updated_by="owner", updated_at=NOW, programs_root=roots,
+    )
+
+    append_claim_entry(_claim(), roots)
+    append_claim_status_update(
+        "acme",
+        ClaimStatusUpdate(
+            claim_id="claim-1",
+            new_status="resolved",
+            updated_at=NOW,
+            updated_by="owner",
+            note="Verified.",
+        ),
+        roots,
+    )
+
+    assert any(
+        event.kind is LifecycleEventKind.CLOSURE
+        for event in load_risk_lifecycle("acme", "risk-1", programs_root=roots)
+    )
+    assert any(
+        event.kind is LifecycleEventKind.CLOSURE
+        for event in load_action_lifecycle("acme", "action-1", programs_root=roots)
+    )
+    assert any(
+        event.kind is LifecycleEventKind.CLOSURE
+        for event in load_claim_lifecycle("acme", "claim-1", programs_root=roots)
+    )
+
+
+def test_explicit_terminal_lifecycle_retains_attribution_when_store_closes(
+    tmp_path: Path,
+) -> None:
+    roots = tmp_path / "programs"
+    append_action("acme", _action(), roots)
+
+    from src.core.action_tracker import record_action_lifecycle
+
+    record_action_lifecycle(
+        "acme",
+        "action-1",
+        LifecycleEventKind.CLOSURE,
+        actor="owner",
+        note="Evidence-backed closure.",
+        evidence_refs=("WI:123",),
+        occurred_at=NOW,
+        programs_root=roots,
+    )
+
+    events = load_action_lifecycle("acme", "action-1", programs_root=roots)
+    assert len(events) == 1
+    assert events[0].evidence_refs == ("WI:123",)

@@ -16,17 +16,20 @@ from src.commands.gather_pipeline.support import (
     roll_query_value_history,
 )
 from src.commands.gather_workiq_helpers import _truncate_signal_text
-from src.core.integration_types import KustoResultSet
+from src.core.exceptions import QueryError
+from src.core.integration_types import KustoResultSchema, KustoResultSet
 from src.core.kusto_hydration import compute_kusto_slo_breach
 from src.core.kusto_ref_utils import extract_kusto_entity_refs as _extract_kusto_entity_refs
 from src.core.kusto_query_loader import query_history_contract_identity
-from src.core.kusto_result_contract import build_kusto_result_schema
+from src.core.kusto_result_contract import admit_kusto_execution, build_kusto_result_schema
 from src.core.kusto_signal_extractor import format_kusto_result_text
 from src.core.metric_binding_validator import coerce_metric_value, kusto_metric_result_error
 from src.core.models_v2 import KustoQuery, Signal
 from src.core.signal_ref_utils import merge_entity_refs
 
-KustoQueryExecutor = Callable[[KustoQuery], list[dict[str, Any]]]
+KustoQueryExecutor = Callable[
+    [KustoQuery], list[dict[str, Any]] | tuple[dict[str, Any], ...] | KustoResultSet
+]
 
 _DEFAULT_KUSTO_EXPECTED_MAX_AGE_HOURS = 24
 
@@ -43,7 +46,47 @@ def build_kusto_signals(
     signals: list[Signal] = []
     for query in queries:
         started_at = perf_counter()
-        rows = executor(query)
+        execution_error: str | None = None
+        result_schema: KustoResultSchema | None = None
+        execution: (
+            list[dict[str, Any]]
+            | tuple[dict[str, Any], ...]
+            | KustoResultSet
+            | None
+        ) = None
+        provider_failed = False
+        rows: list[dict[str, Any]]
+        try:
+            execution = executor(query)
+        except QueryError as exc:
+            provider_failed = True
+            execution_error = str(exc)
+            rows = []
+        if not provider_failed:
+            assert execution is not None
+            try:
+                rows, admitted_schema = admit_kusto_execution(
+                    execution,
+                    query_id=query.id,
+                    expected_cardinality=query.expected_cardinality,
+                    result_limits=query.result_limits,
+                )
+                if isinstance(execution, KustoResultSet):
+                    result_schema = admitted_schema
+            except QueryError as exc:
+                rows = (
+                    [dict(row) for row in execution.rows]
+                    if isinstance(execution, KustoResultSet)
+                    else [
+                        dict(row)
+                        for row in execution
+                        if isinstance(execution, (list, tuple))
+                        and isinstance(row, dict)
+                    ]
+                    if isinstance(execution, (list, tuple))
+                    else []
+                )
+                execution_error = str(exc)
         record_kusto_query_state(
             query_state_sink,
             query,
@@ -51,8 +94,20 @@ def build_kusto_signals(
             as_of=as_of,
             duration_ms=int(round((perf_counter() - started_at) * 1000)),
             previous_state=(previous_query_states or {}).get(query.id),
+            error=execution_error,
+            result_schema=result_schema,
         )
-        signal = build_kusto_signal(query=query, rows=rows, program_id=program_id, as_of=as_of)
+        signal = (
+            None
+            if execution_error is not None
+            else build_kusto_signal(
+                query=query,
+                rows=rows,
+                program_id=program_id,
+                as_of=as_of,
+                result_schema=result_schema,
+            )
+        )
         if signal is not None:
             signals.append(signal)
     return tuple(signals)
@@ -67,6 +122,7 @@ def record_kusto_query_state(
     duration_ms: int,
     error: str | None = None,
     previous_state: dict[str, Any] | None = None,
+    result_schema: KustoResultSchema | None = None,
 ) -> None:
     if query_state_sink is None:
         return
@@ -108,6 +164,12 @@ def record_kusto_query_state(
         # `row_count=0` (which is misleadingly normal-looking).
         "is_degraded": error is not None,
     }
+    if result_schema is not None:
+        state["result_kind"] = result_schema.kind.value
+        state["result_columns"] = [
+            {"name": column.name, "type_name": column.type_name}
+            for column in result_schema.columns
+        ]
     if identity is not None:
         state["history_contract_identity"] = identity
     if break_reason is not None:
@@ -174,6 +236,7 @@ def build_kusto_signal(
     rows: list[dict[str, Any]],
     program_id: str,
     as_of: datetime,
+    result_schema: KustoResultSchema | None = None,
 ) -> Signal | None:
     if not rows or kusto_metric_result_error(
         query.id, query.expected_cardinality, rows,
@@ -199,9 +262,9 @@ def build_kusto_signal(
     )
     event_timestamp = timestamp.isoformat()
     raw_ref = f"kusto:{query.id}:{event_timestamp}"
-    schema = build_kusto_result_schema(
-        rows,
-        expected_cardinality=query.expected_cardinality,
+    supplied_schema = result_schema
+    schema = supplied_schema or build_kusto_result_schema(
+        rows, expected_cardinality=query.expected_cardinality,
     )
     return Signal(
         id=str(uuid5(NAMESPACE_URL, f"{program_id}|{raw_ref}|{query.id}")),
@@ -211,7 +274,9 @@ def build_kusto_signal(
         workstream_id=workstream_id,
         workstream_ids=query.workstream_ids,
         entity_refs=entity_refs,
-        text=summarize_kusto_rows(query, rows, as_of=as_of),
+        text=summarize_kusto_rows(
+            query, rows, as_of=as_of, result_schema=supplied_schema,
+        ),
         raw_ref=raw_ref,
         confidence=confidence_from_string(query.confidence),
         metadata={
@@ -222,6 +287,16 @@ def build_kusto_signal(
             "event_timestamp": event_timestamp,
             "row_count": len(rows),
             "result_kind": schema.kind.value,
+            **(
+                {
+                    "result_columns": [
+                        {"name": column.name, "type_name": column.type_name}
+                        for column in schema.columns
+                    ]
+                }
+                if supplied_schema is not None
+                else {}
+            ),
         },
     )
 
@@ -233,6 +308,7 @@ def build_kusto_kpi_signal(
     program_id: str,
     as_of: datetime,
     entity_refs: tuple[str, ...] | None = None,
+    result_schema: KustoResultSchema | None = None,
 ) -> Signal | None:
     if not rows or kusto_metric_result_error(
         query.id, query.expected_cardinality, rows,
@@ -252,7 +328,8 @@ def build_kusto_kpi_signal(
         else kusto_kpi_value(query, first_row)
     )
     observed_value = coerce_metric_value(result_value) if not unbound else None
-    schema = build_kusto_result_schema(
+    supplied_schema = result_schema
+    schema = supplied_schema or build_kusto_result_schema(
         rows, expected_cardinality=query.expected_cardinality,
     )
     if query.engine == "kusto":
@@ -270,6 +347,7 @@ def build_kusto_kpi_signal(
                 observed_value, query.slo_target, query.comparison,
             ),
             row_count=len(rows),
+            schema=supplied_schema,
         ))
     else:
         label = query.label or query.section or query.id
@@ -303,6 +381,16 @@ def build_kusto_kpi_signal(
             "result_value": result_value,
             "unit": query.unit,
             "result_kind": schema.kind.value,
+            **(
+                {
+                    "result_columns": [
+                        {"name": column.name, "type_name": column.type_name}
+                        for column in schema.columns
+                    ]
+                }
+                if supplied_schema is not None
+                else {}
+            ),
             "result_json": (
                 json.dumps(first_row, default=str, sort_keys=True)
                 if not unbound or len(rows) == 1 else None
@@ -311,7 +399,13 @@ def build_kusto_kpi_signal(
     )
 
 
-def summarize_kusto_rows(query: KustoQuery, rows: list[dict[str, Any]], *, as_of: datetime) -> str:
+def summarize_kusto_rows(
+    query: KustoQuery,
+    rows: list[dict[str, Any]],
+    *,
+    as_of: datetime,
+    result_schema: KustoResultSchema | None = None,
+) -> str:
     observed_value = extract_kusto_query_numeric_value(query, rows)
     return format_kusto_result_text(KustoResultSet(
         query_id=query.id,
@@ -325,4 +419,5 @@ def summarize_kusto_rows(query: KustoQuery, rows: list[dict[str, Any]], *, as_of
         observed_value=observed_value,
         is_breach=compute_kusto_slo_breach(observed_value, query.slo_target, query.comparison),
         row_count=len(rows),
+        schema=result_schema,
     ))

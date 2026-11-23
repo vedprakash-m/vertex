@@ -299,6 +299,9 @@ def test_ordinary_report_persists_the_pre_acquisition_pin(
     assert capture["capture_state"] == "unqualified_capture"
     assert "effective_policy_uncaptured" in capture["limitations"]
     assert capture["gather_run_id"] == (selected.run_id if selected else None)
+    if with_gather:
+        assert capture["limitations"]
+        assert "gather_fetch_join_unknown" in capture["limitations"]
     observation = manifest["metadata"]["program_verdict_observation"]
     assert observation["mode"] == "observe"
     assert observation["inputs"]["capture"] == capture

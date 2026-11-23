@@ -747,7 +747,7 @@ def _outbox_receipt(
         "compensation_required": False,
         "acknowledged_at": recorded_at,
         "recorded_at": recorded_at,
-        "effect_reconciliation": (
+        "reconciliation": (
             effect_reconciliation.to_dict()
             if effect_reconciliation is not None
             else None
@@ -825,6 +825,7 @@ def reconcile_uncertain_effect(
                     confirmed = mark_reconciled_confirmed(
                         db_path,
                         entry.outbox_id,
+                        expected_entry=entry,
                         reconciled_by=reconciled_by,
                         receipt_json=json.dumps(
                             receipt,
@@ -850,6 +851,7 @@ def reconcile_uncertain_effect(
         absent = mark_reconciled_absent(
             db_path,
             entry.outbox_id,
+            expected_entry=entry,
             reconciled_by=reconciled_by,
             reason=observation.reason,
             state_receipt=receipt,
@@ -872,6 +874,7 @@ def reconcile_uncertain_effect(
         entry.outbox_id,
         receipt,
         expected_status="uncertain_remote_state",
+        expected_entry=entry,
     )
     retained = load_entry(db_path, entry.outbox_id)
     if retained is None:
@@ -883,18 +886,7 @@ def reconcile_uncertain_effect(
     )
 
 
-def request_compensation(
-    db_path: Path,
-    outbox_id: str,
-    *,
-    owner: str,
-    fencing_token: int,
-    reason: str,
-) -> OutboxEntry:
-    entry = load_entry(db_path, outbox_id)
-    if entry is None:
-        raise OutboxError(f"unknown outbox row {outbox_id!r}")
-    operation, _ = _retained_operation(entry)
+def require_offline_compensation_operation(operation: str) -> str:
     capability = lookup_capability(operation)
     if not isinstance(capability, OperationCapability):
         raise OutboxError(f"Operation {operation!r} has no registered capability")
@@ -911,13 +903,29 @@ def request_compensation(
         raise OutboxError(
             f"Operation {operation!r} has no registered offline compensation policy"
         )
+    return capability.compensation_operation
+
+
+def request_compensation(
+    db_path: Path,
+    outbox_id: str,
+    *,
+    owner: str,
+    fencing_token: int,
+    reason: str,
+) -> OutboxEntry:
+    entry = load_entry(db_path, outbox_id)
+    if entry is None:
+        raise OutboxError(f"unknown outbox row {outbox_id!r}")
+    operation, _ = _retained_operation(entry)
+    compensation_operation = require_offline_compensation_operation(operation)
     return mark_compensation_required(
         db_path,
         outbox_id,
         owner=owner,
         fencing_token=fencing_token,
         reason=reason,
-        compensation_operation=capability.compensation_operation,
+        compensation_operation=compensation_operation,
     )
 
 
@@ -934,4 +942,5 @@ __all__ = [
     "reconcile_effect",
     "reconcile_uncertain_effect",
     "request_compensation",
+    "require_offline_compensation_operation",
 ]

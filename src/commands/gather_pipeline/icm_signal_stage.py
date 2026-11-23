@@ -9,6 +9,8 @@ from src.commands.gather_pipeline.ado_pipeline_stage import _parse_datetime
 from src.commands.gather_pipeline.support import kusto_event_timestamp, parse_date
 from src.commands.gather_workiq_helpers import _truncate_signal_text
 from src.core.exceptions import AuthError, QueryError
+from src.core.integration_types import KustoResultSchema, KustoResultSet
+from src.core.kusto_result_contract import admit_kusto_execution
 from src.core.m365_payload_support import optional_string as _optional_string
 from src.core.models import Confidence
 from src.core.models_v2 import KustoQuery, Program, Signal, Team, Workstream
@@ -16,7 +18,9 @@ from src.core.signal_ref_utils import merge_entity_refs
 from src.m365.icm_client import IcmClient
 
 IcmClientFactory = Callable[..., Any]
-KustoQueryExecutor = Callable[[KustoQuery], list[dict[str, Any]]]
+KustoQueryExecutor = Callable[
+    [KustoQuery], list[dict[str, Any]] | tuple[dict[str, Any], ...] | KustoResultSet
+]
 class AgencyCapabilitiesProtocol(Protocol):
     available: bool
     has_icm: bool
@@ -95,7 +99,13 @@ def build_icm_signals(
     )
     signals: list[Signal] = []
     for query in queries:
-        rows = executor(query)
+        execution = executor(query)
+        rows, result_schema = admit_kusto_execution(
+            execution,
+            query_id=query.id,
+            expected_cardinality=query.expected_cardinality,
+            result_limits=query.result_limits,
+        )
         signals.extend(
             build_icm_query_signals_fn(
                 query=query,
@@ -105,6 +115,7 @@ def build_icm_signals(
                 teams=teams,
                 workstreams=workstreams,
                 resolve_icm_workstream_id_fn=resolve_icm_workstream_id_fn,
+                **({"result_schema": result_schema} if isinstance(execution, KustoResultSet) else {}),
             )
         )
     return tuple(signals)
@@ -325,6 +336,7 @@ def build_icm_query_signals(
     teams: tuple[Team, ...],
     workstreams: tuple[Workstream, ...],
     resolve_icm_workstream_id_fn: IcmWorkstreamResolver,
+    result_schema: KustoResultSchema | None = None,
 ) -> tuple[Signal, ...]:
     fallback_workstream_id = query.workstream_ids[0] if len(query.workstream_ids) == 1 else None
     signals: list[Signal] = []
@@ -369,6 +381,7 @@ def build_icm_query_signals(
                     "severity": severity,
                     "owning_team": owning_team,
                     "query_id": query.id,
+                    **({"result_kind": result_schema.kind.value} if result_schema is not None else {}),
                 },
             )
         )

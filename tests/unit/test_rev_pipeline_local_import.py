@@ -665,6 +665,64 @@ def test_direct_staging_qualifies_message_and_drive_item_source_time(
         )
 
 
+def test_workiq_staging_refuses_unqualified_source_time_without_fabrication(
+    tmp_path: Path,
+) -> None:
+    from src.ai.rev.extractor import ExtractedClaim
+    from src.core.ledger.rev_evidence import EvidenceRef
+    from src.core.rev import pipeline
+    from src.core.rev.identity import CanonicalItemIdentity
+
+    hydrated = HydratedContent(
+        identity=CanonicalItemIdentity(
+            source_type=EntityType.MESSAGE,
+            tenant_id="t",
+            principal_mailbox="operator@example.com",
+            container="inbox",
+            resource_id="native-id",
+        ),
+        canonical_text="The deployment completed.",
+        normalized_source_hash="sha256:synthetic",
+        chunks=(),
+        route_metadata={
+            "route": "workiq",
+            "subject": "Synthetic deployment",
+            "sender": "owner@example.com",
+            "received_at": "2026-06-24T10:00:00+00:00",
+            "source_time_qualified": False,
+        },
+    )
+    claim = ExtractedClaim(
+        event_type="deployment.completed",
+        payload={"date": "2026-06-24"},
+        evidence_spans=(),
+        extraction_confidence=0.9,
+        extraction_model="synthetic",
+        material=True,
+    )
+    evidence_ref = EvidenceRef(
+        vault_hash="sha256:synthetic-vault",
+        representation_version="1",
+        start_codepoint=0,
+        end_codepoint=10,
+        excerpt_hash="sha256:synthetic-excerpt",
+        normalized_source_hash="sha256:synthetic",
+    )
+
+    staged, failures = pipeline._stage_candidates(
+        program_id="prog-local",
+        hydrated=hydrated,
+        claims=(claim,),
+        evidence_refs=(evidence_ref,),
+        set_at=NOW,
+        programs_root=tmp_path,
+    )
+
+    assert staged == []
+    assert failures == 1
+    assert not (tmp_path / "prog-local" / "ledger").exists()
+
+
 class TestLocalImportFileFinalization:
     def test_successful_cycle_moves_file_to_processed_and_writes_checkpoint(
         self, tmp_path: Path

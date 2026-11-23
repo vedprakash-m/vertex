@@ -810,6 +810,43 @@ def test_old_projector_rebuilds_stale_dependency_links_without_new_events(
     assert canonical_projection_dump(incremental_path)["projection_meta"][0]["projector_version"] == "6"
 
 
+def test_incremental_rebuilds_tampered_projection_before_no_delta_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    event = _dependency_event(
+        "dependency.declared.v1", 1,
+        {
+            "dependency_id": "dependency:d1",
+            "from_entity": "milestone:a",
+            "to_entity": "milestone:b",
+        },
+    )
+    incremental_path = tmp_path / "incremental.sqlite3"
+    full_path = tmp_path / "full.sqlite3"
+    project_events_incremental_to_sqlite(
+        "acme", (event,), projection_path=incremental_path, programs_root=programs_root,
+    )
+    with program_views.connect_projection_db(incremental_path) as connection:
+        connection.execute(
+            "UPDATE proj_dependency SET to_entity = 'milestone:wrong' "
+            "WHERE dependency_id = 'dependency:d1'"
+        )
+    rebuild = Mock(wraps=program_views._project_events_to_sqlite_locked)
+    monkeypatch.setattr(program_views, "_project_events_to_sqlite_locked", rebuild)
+
+    project_events_incremental_to_sqlite(
+        "acme", (event,), projection_path=incremental_path, programs_root=programs_root,
+    )
+    rebuild.assert_called_once()
+    rebuild.reset_mock()
+    project_events_to_sqlite(
+        "acme", (event,), projection_path=full_path, programs_root=programs_root,
+    )
+
+    assert canonical_projection_dump(incremental_path) == canonical_projection_dump(full_path)
+
+
 @pytest.mark.parametrize("via_incremental", [False, True])
 @pytest.mark.parametrize("fail_replace", [False, True])
 def test_full_rebuild_preserves_existing_projection_through_replacement(

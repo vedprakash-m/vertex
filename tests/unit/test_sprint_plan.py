@@ -202,3 +202,85 @@ def test_ado_adapter_uses_only_attributable_item_and_snapshot_story_points() -> 
         "ADO:sprint-points:Team A:Program\\Sprint 1",
         "ADO:sprint-points:Team A:Program\\Sprint 2",
     )
+
+
+def test_ado_adapter_uses_median_of_latest_three_completed_sprints_without_hour_conversion() -> None:
+    rows = [
+        {
+            "DateSK": 20261001,
+            "WorkItemId": 70,
+            "State": "Closed",
+            "IterationPath": "Program\\Sprint 1",
+            "StoryPoints": 100,
+        },
+        {
+            "DateSK": 20261008,
+            "WorkItemId": 71,
+            "State": "Closed",
+            "IterationPath": "Program\\Sprint 2",
+            "StoryPoints": 4,
+        },
+        {
+            "DateSK": 20261015,
+            "WorkItemId": 72,
+            "State": "Closed",
+            "IterationPath": "Program\\Sprint 3",
+            "StoryPoints": 8,
+        },
+        {
+            "DateSK": 20261022,
+            "WorkItemId": 73,
+            "State": "Closed",
+            "IterationPath": "Program\\Sprint 4",
+            "StoryPoints": 6,
+        },
+    ]
+
+    artifact = build_ado_sprint_plan(
+        iteration_path="Program\\Sprint 5",
+        items=(),
+        capacity_per_day=Decimal("8"),
+        total_business_days=10,
+        capacity_source_ref="ADO:capacity:team:iteration",
+        sprint_snapshot_rows=rows,
+        team_name="Team A",
+        iteration_id="iteration-5",
+    )
+
+    assert tuple(sample.story_points for sample in artifact.completed_sprints) == (
+        Decimal("4"),
+        Decimal("8"),
+        Decimal("6"),
+    )
+    assert artifact.point_capacity == Decimal("6")
+
+
+def test_ado_adapter_excludes_item_reopened_after_terminal_snapshot() -> None:
+    artifact = build_ado_sprint_plan(
+        iteration_path="Program\\Sprint 2",
+        items=(),
+        capacity_per_day=Decimal("8"),
+        total_business_days=10,
+        capacity_source_ref="ADO:capacity:team:iteration",
+        sprint_snapshot_rows=[
+            {
+                "DateSK": 20260901,
+                "WorkItemId": 70,
+                "State": "Closed",
+                "IterationPath": "Program\\Sprint 1",
+                "StoryPoints": 8,
+            },
+            {
+                "DateSK": 20260902,
+                "WorkItemId": 70,
+                "State": "Active",
+                "IterationPath": "Program\\Sprint 1",
+                "StoryPoints": 8,
+            },
+        ],
+        team_name="Team A",
+        iteration_id="iteration-2",
+    )
+
+    assert artifact.completed_sprints == ()
+    assert artifact.point_capacity is None

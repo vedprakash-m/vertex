@@ -13,8 +13,12 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from random import Random
 from typing import Any, Callable
+
+from src.core.study_evaluator import (
+    WeightedSavingsObservation,
+    calculate_matched_cycle_savings,
+)
 
 
 SCHEMA_VERSION = "1"
@@ -510,7 +514,7 @@ def _validate_w62(payload: dict[str, Any], missing: list[str], invalid: list[str
     if not isinstance(cycles_value, list):
         invalid.append("cycles")
         return {}, failed
-    valid_cycles: list[tuple[datetime, float]] = []
+    valid_cycles: list[tuple[datetime, WeightedSavingsObservation]] = []
     seen_ids: set[str] = set()
     for index, row in enumerate(cycles_value):
         prefix = f"cycles[{index}]"
@@ -568,7 +572,9 @@ def _validate_w62(payload: dict[str, Any], missing: list[str], invalid: list[str
             invalid.append(f"{prefix}.workflow_classes")
         elif set(row_classes) != required_classes:
             failed.append(f"{cycle_id}:workflow_class_coverage")
-        valid_cycles.append((observed_at, saved / manual))
+        valid_cycles.append(
+            (observed_at, WeightedSavingsObservation(manual, saved))
+        )
 
     ordered = sorted(valid_cycles)
     if len({int(item[0].timestamp()) for item in ordered}) != len(ordered):
@@ -580,24 +586,42 @@ def _validate_w62(payload: dict[str, Any], missing: list[str], invalid: list[str
         failed.append("at_least_8_cycles")
     if elapsed < 49:
         failed.append("at_least_49_days")
-    lower_bound: float | None = None
-    if len(ordered) >= 2 and _positive_int(resamples) and _nonnegative_int(seed):
+    bootstrap_valid = (
+        _positive_int(resamples)
+        and isinstance(resamples, int)
+        and not isinstance(resamples, bool)
+        and resamples >= 1000
+        and _nonnegative_int(seed)
+        and isinstance(seed, int)
+        and not isinstance(seed, bool)
+    )
+    shared_resamples = 1
+    shared_seed = 0
+    if bootstrap_valid:
         assert isinstance(resamples, int) and not isinstance(resamples, bool)
         assert isinstance(seed, int) and not isinstance(seed, bool)
-        lower_bound = _bootstrap_lower_bound(
-            [ratio for _, ratio in ordered],
-            resamples=resamples,
-            seed=seed,
+        shared_resamples = resamples
+        shared_seed = seed
+    shared_savings = (
+        calculate_matched_cycle_savings(
+            tuple((observation,) for _, observation in ordered),
+            resamples=shared_resamples,
+            seed=shared_seed,
         )
+        if ordered
+        else None
+    )
+    lower_bound: float | None = None
+    if len(ordered) >= 2 and bootstrap_valid and shared_savings is not None:
+        lower_bound = shared_savings.lcb_95_saved_fraction
+        assert lower_bound is not None
         if lower_bound <= 0.80:
             failed.append("lcb_must_exceed_0.80")
     return {
         "cycle_count": len(ordered),
         "elapsed_days": elapsed,
         "quality_adjusted_saved_fraction": (
-            math.fsum(ratio for _, ratio in ordered) / len(ordered)
-            if ordered
-            else None
+            shared_savings.saved_fraction if shared_savings is not None else None
         ),
         "bootstrap_95_lower_bound": lower_bound,
     }, failed
@@ -1361,16 +1385,6 @@ def _validate_owner(value: object, missing: list[str], invalid: list[str]) -> st
         if _aware_datetime(value.get("approved_at")) is None:
             invalid.append("owner_disposition.approved_at")
     return str(status)
-
-
-def _bootstrap_lower_bound(ratios: list[float], *, resamples: int, seed: int) -> float:
-    rng = Random(seed)
-    count = len(ratios)
-    means = sorted(
-        math.fsum(rng.choices(ratios, k=count)) / count
-        for _ in range(resamples)
-    )
-    return means[math.floor(resamples * 0.05) - 1]
 
 
 def _result(

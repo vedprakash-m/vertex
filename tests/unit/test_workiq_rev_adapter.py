@@ -14,6 +14,7 @@ from src.core.rev.privacy import LocalCheckResult
 from src.core.rev.query_planner import RetrievalIntent
 from src.core.rev.result import Forbidden, Incomplete, Success, Unsupported
 from src.m365.rev.hydrator import RUNG_METADATA_ONLY
+from src.m365.workiq_retriever import WorkIQRunBudget
 from src.m365.rev.workiq_enumerator import (
     WorkIQContext,
     WorkIQEnumerator,
@@ -482,6 +483,36 @@ def test_enumerate_discloses_window_budget_stop() -> None:
     assert len(result.value) == 2
 
 
+def test_enumerate_preserves_governed_call_budget_across_windows() -> None:
+    calls: list[RetrievalIntent] = []
+
+    def query(intent: RetrievalIntent, *, timeout_seconds: int) -> list[dict[str, Any]]:
+        calls.append(intent)
+        assert timeout_seconds > 0
+        return [{"id": f"m-{intent.to_date}", "receivedDateTime": f"{intent.to_date}T12:00:00Z"}]
+
+    enumerator = WorkIQEnumerator(
+        query,
+        CTX,
+        window_days=7,
+        max_windows=4,
+        run_budget=WorkIQRunBudget(max_calls=2, max_wall_clock_seconds=30),
+    )
+    intent = RetrievalIntent(
+        entity_type=EntityType.MESSAGE,
+        from_date=date(2026, 10, 1),
+        to_date=date(2026, 10, 31),
+        limit=25,
+    )
+
+    result = enumerator.enumerate(intent, correlation_id="windowed-budget")
+
+    assert isinstance(result, Incomplete)
+    assert result.reason == "budget_stop:workiq_calls"
+    assert len(calls) == 2
+    assert len(result.value) == 2
+
+
 @pytest.mark.parametrize("window_days,max_windows", [(0, 1), (1, 0), (True, 1), (1, False)])
 def test_enumerate_rejects_invalid_window_bounds(window_days: int, max_windows: int) -> None:
     with pytest.raises(ValueError, match="positive integers"):
@@ -572,6 +603,31 @@ def test_hydrate_without_preview_is_metadata_only() -> None:
     assert result.value.metadata_only is True
     assert result.value.hydration_rung == RUNG_METADATA_ONLY
     assert result.value.canonical_text == "Atlas status"
+
+
+def test_hydrate_does_not_restore_unqualified_source_time() -> None:
+    candidate = replace(
+        _candidate(
+            subject="Atlas status",
+            preview="Atlas ships Friday.",
+            receivedDateTime="2026-11-01T00:00:00Z",
+        ),
+        partial_metadata={
+            **_candidate(
+                subject="Atlas status",
+                preview="Atlas ships Friday.",
+                receivedDateTime="2026-11-01T00:00:00Z",
+            ).partial_metadata,
+            "source_time_qualified": False,
+            "source_time_state": "invalid",
+        },
+    )
+
+    result = WorkIQHydrator().hydrate(candidate, correlation_id="cid")
+
+    assert isinstance(result, Success)
+    assert result.value.route_metadata["received_at"] is None
+    assert result.value.retrieved_at is None
 
 
 def test_hydrate_is_deterministic() -> None:

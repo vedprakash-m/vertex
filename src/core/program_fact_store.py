@@ -1525,15 +1525,34 @@ class ProgramFactStore:
         as_of: datetime,
         valid_at: datetime | None = None,
         limit: int = 200,
+        require_history: bool = False,
+        entity_refs: tuple[str, ...] = (),
     ) -> tuple[ProgramFactRevision, ...]:
-        if not fact_types or limit < 1 or not self._db_path.exists():
+        if not fact_types or limit < 1:
+            return ()
+        if not self._db_path.exists():
+            if require_history:
+                raise ValueError("Long-horizon fact history is unavailable.")
             return ()
         placeholders = ", ".join("?" for _ in fact_types)
+        ref_clause = ""
+        ref_params: tuple[str, ...] = ()
+        if entity_refs:
+            ref_placeholders = ", ".join("?" for _ in entity_refs)
+            ref_clause = (
+                f"AND EXISTS ("
+                f"SELECT 1 FROM json_each(program_fact_revisions.entity_refs_json) "
+                f"WHERE json_each.value IN ({ref_placeholders})"
+                f") "
+            )
+            ref_params = entity_refs
         world_time = valid_at or as_of
         with open_program_db(self._db_path, read_only=True) as connection:
             if connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'program_fact_revisions'"
             ).fetchone() is None:
+                if require_history:
+                    raise ValueError("Long-horizon fact history is unavailable.")
                 return ()
             rows = connection.execute(
                 f"""
@@ -1544,13 +1563,14 @@ class ProgramFactStore:
                   AND recorded_at <= ?
                   AND (valid_from IS NULL OR valid_from <= ?)
                   AND (valid_until IS NULL OR valid_until > ?)
+                  {ref_clause}
                 ORDER BY recorded_at DESC, revision_id DESC
                 LIMIT ?
                 """,
                 (
                     self._program_id, FactReviewState.ACCEPTED.value, *fact_types,
                     _serialize_datetime(as_of), _serialize_datetime(world_time),
-                    _serialize_datetime(world_time), limit,
+                    _serialize_datetime(world_time), *ref_params, limit,
                 ),
             ).fetchall()
         return tuple(self._row_to_revision(row) for row in rows)

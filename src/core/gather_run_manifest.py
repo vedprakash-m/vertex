@@ -178,6 +178,7 @@ class ChannelOutcomeEntry:
     exact_target_status: str = "unknown"
     quarantine_status: str = "none"
     checkpoint_status: str = "unknown"
+    checkpoint_reseed_reasons: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,8 +289,9 @@ def _channel_outcome_hash_json(entry: ChannelOutcomeEntry) -> dict[str, Any]:
         ("exact_target_status", "unknown"),
         ("quarantine_status", "none"),
         ("checkpoint_status", "unknown"),
+        ("checkpoint_reseed_reasons", ()),
     ):
-        if payload[key] == default:
+        if payload[key] == _to_jsonable(default):
             payload.pop(key)
     return payload
 
@@ -594,6 +596,12 @@ def _manifest_from_payload(payload: dict[str, Any]) -> GatherRunManifest:
             exact_target_status=row.get("exact_target_status", "unknown"),
             quarantine_status=row.get("quarantine_status", "none"),
             checkpoint_status=row.get("checkpoint_status", "unknown"),
+            checkpoint_reseed_reasons=tuple(
+                (int(work_item_id), str(reason))
+                for work_item_id, reason in row.get(
+                    "checkpoint_reseed_reasons", ()
+                )
+            ),
         )
         for row in payload.get("channel_outcomes", [])
     )

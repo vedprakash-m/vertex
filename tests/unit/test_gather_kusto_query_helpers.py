@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.commands.gather_pipeline import kusto_query_helpers
+from src.core.integration_types import KustoResultColumn, KustoResultKind, KustoResultSchema, KustoResultSet
 from src.core.models_v2 import KustoQuery
 
 
@@ -105,6 +106,65 @@ def test_build_kusto_signals_emits_signal_and_query_state(legacy: bool) -> None:
     assert state["value_frozen_warning"] is (not legacy)
     assert state["history_contract_identity"]
     assert state["history_break_reason"] == "legacy_unverified"
+
+
+def test_build_kusto_signals_preserves_typed_result_schema() -> None:
+    query = _kusto_query()
+    schema = KustoResultSchema(
+        kind=KustoResultKind.TABLE,
+        columns=(
+            KustoResultColumn("Timestamp", "datetime"),
+            KustoResultColumn("P50", "real"),
+        ),
+        row_count=1,
+    )
+    result = KustoResultSet(
+        query_id=query.id,
+        rows=({"Timestamp": "2026-11-19T12:00:00Z", "P50": 4.2},),
+        observed_at=datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc),
+        row_count=1,
+        schema=schema,
+    )
+    state: dict[str, dict[str, object]] = {}
+
+    signals = kusto_query_helpers.build_kusto_signals(
+        queries=(query,),
+        program_id="acme",
+        as_of=result.observed_at,
+        executor=lambda _query: result,
+        query_state_sink=state,
+    )
+
+    assert len(signals) == 1
+    assert signals[0].metadata["result_kind"] == "table"
+    assert signals[0].metadata["result_columns"] == [
+        {"name": "Timestamp", "type_name": "datetime"},
+        {"name": "P50", "type_name": "real"},
+    ]
+    assert state[query.id]["result_kind"] == "table"
+
+
+def test_build_kusto_signals_does_not_emit_rejected_typed_rows() -> None:
+    query = _kusto_query()
+    execution = KustoResultSet(
+        query_id=query.id,
+        rows=({"Timestamp": "2026-11-19T12:00:00Z", "P50": 42.0},),
+        observed_at=datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc),
+        row_count=1,
+        is_partial=True,
+    )
+    states: dict[str, dict[str, object]] = {}
+
+    signals = kusto_query_helpers.build_kusto_signals(
+        queries=(query,),
+        program_id="acme",
+        as_of=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        executor=lambda selected: execution,
+        query_state_sink=states,
+    )
+    assert signals == ()
+    assert states[query.id]["is_degraded"] is True
+    assert "partial" in str(states[query.id]["last_error"]).lower()
 
 
 def test_build_kusto_signal_shares_across_all_configured_workstreams() -> None:

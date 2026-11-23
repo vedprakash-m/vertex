@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,6 +32,8 @@ from pathlib import Path
 from src.core._db import open_program_db_with_retry as open_program_db
 from src.core.unit_of_work import open_unit_of_work
 from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, LeaseHandle, get_workspace_lease_db_path
+
+_transition_unit_of_work = open_unit_of_work
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS outbox (
@@ -379,6 +382,7 @@ def record_outbox_receipt(
     receipt: dict[str, object],
     *,
     expected_status: str | None = None,
+    expected_entry: OutboxEntry | None = None,
 ) -> str:
     receipt_json = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     status = str(receipt.get("terminal_status") or "")
@@ -393,6 +397,18 @@ def record_outbox_receipt(
                 f"outbox row {outbox_id!r} is {row[0]!r}; "
                 f"receipt expects {expected_status!r}"
             )
+        if expected_entry is not None:
+            current = connection.execute(
+                "SELECT outbox_id, domain, correlation_id, payload_json, status, lease_owner, "
+                "lease_fencing_token, lease_expires_at, attempt_count, next_attempt_at, "
+                "remote_request_hash, remote_response_hash, failure_reason, created_at, updated_at "
+                "FROM outbox WHERE outbox_id = ?",
+                (outbox_id,),
+            ).fetchone()
+            if current is None or _entry_from_row(tuple(current)) != expected_entry:
+                raise OutboxError(
+                    f"outbox row {outbox_id!r} changed during reconciliation"
+                )
         _append_state_receipt(connection, outbox_id, status, recorded_at, receipt_json)
     return receipt_json
 
@@ -609,6 +625,8 @@ def _transition(
     success_receipt_json: str | None = None,
     reconciliation_receipt_json: str | None = None,
     compensation_operation: str | None = None,
+    workspace_lease: LeaseHandle | None = None,
+    programs_root: Path | None = None,
 ) -> OutboxEntry:
     now = _now()
     columns = dict(extra_columns or {})
@@ -617,8 +635,40 @@ def _transition(
     set_clause = ", ".join(f"{key} = ?" for key in columns)
     values = list(columns.values())
 
-    with open_program_db(db_path, durability="strict") as connection:
-        connection.execute("BEGIN IMMEDIATE")
+    has_fence = workspace_lease is not None and programs_root is not None
+    with ExitStack() as stack:
+        if has_fence:
+            assert workspace_lease is not None and programs_root is not None
+            transaction = stack.enter_context(
+                _transition_unit_of_work({
+                    "outbox": db_path,
+                    "fence": get_workspace_lease_db_path(
+                        workspace_lease.program_id, programs_root=programs_root
+                    ),
+                })
+            )
+            connection = transaction.connection
+        else:
+            connection = stack.enter_context(
+                open_program_db(db_path, durability="strict")
+            )
+            connection.execute("BEGIN IMMEDIATE")
+        if has_fence:
+            assert workspace_lease is not None
+            now = _now()
+            fence = connection.execute(
+                "SELECT owner, fencing_token, acquired_at, expires_at "
+                "FROM fence.workspace_lease WHERE mutation_domain = ?",
+                (workspace_lease.mutation_domain,),
+            ).fetchone()
+            if (
+                workspace_lease.mutation_domain != ACTUATION_DISPATCH_DOMAIN
+                or fence is None
+                or fence["owner"] != workspace_lease.owner
+                or int(fence["fencing_token"]) != workspace_lease.fencing_token
+                or _scheduling_timestamp(fence["expires_at"]) <= now
+            ):
+                raise LeaseNoLongerCurrent(outbox_id)
         row = connection.execute(
             "SELECT lease_owner, lease_fencing_token, status, domain, correlation_id, "
             "payload_json, attempt_count FROM outbox WHERE outbox_id = ?",
@@ -762,19 +812,33 @@ def mark_dispatched_with_workspace_lease(
 def mark_succeeded(
     db_path: Path, outbox_id: str, *, owner: str, fencing_token: int,
     remote_response_hash: str | None = None, success_receipt_json: str | None = None,
+    workspace_lease: LeaseHandle | None = None, programs_root: Path | None = None,
 ) -> OutboxEntry:
     return _transition(
         db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="succeeded",
         extra_columns={"remote_response_hash": remote_response_hash}, success_receipt_json=success_receipt_json,
+        workspace_lease=workspace_lease, programs_root=programs_root,
     )
 
 
-def mark_audited(db_path: Path, outbox_id: str, *, owner: str, fencing_token: int) -> OutboxEntry:
-    return _transition(db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="audited")
+def mark_audited(
+    db_path: Path, outbox_id: str, *, owner: str, fencing_token: int,
+    workspace_lease: LeaseHandle | None = None, programs_root: Path | None = None,
+) -> OutboxEntry:
+    return _transition(
+        db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="audited",
+        workspace_lease=workspace_lease, programs_root=programs_root,
+    )
 
 
-def mark_completed(db_path: Path, outbox_id: str, *, owner: str, fencing_token: int) -> OutboxEntry:
-    return _transition(db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="completed")
+def mark_completed(
+    db_path: Path, outbox_id: str, *, owner: str, fencing_token: int,
+    workspace_lease: LeaseHandle | None = None, programs_root: Path | None = None,
+) -> OutboxEntry:
+    return _transition(
+        db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="completed",
+        workspace_lease=workspace_lease, programs_root=programs_root,
+    )
 
 
 def mark_failed_retryable(
@@ -786,8 +850,15 @@ def mark_failed_retryable(
     )
 
 
-def mark_failed_terminal(db_path: Path, outbox_id: str, *, owner: str, fencing_token: int, reason: str) -> OutboxEntry:
-    return _transition(db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="failed_terminal", extra_columns={"failure_reason": reason})
+def mark_failed_terminal(
+    db_path: Path, outbox_id: str, *, owner: str, fencing_token: int, reason: str,
+    workspace_lease: LeaseHandle | None = None, programs_root: Path | None = None,
+) -> OutboxEntry:
+    return _transition(
+        db_path, outbox_id, owner=owner, fencing_token=fencing_token,
+        new_status="failed_terminal", extra_columns={"failure_reason": reason},
+        workspace_lease=workspace_lease, programs_root=programs_root,
+    )
 
 
 def mark_uncertain_remote_state(
@@ -798,6 +869,8 @@ def mark_uncertain_remote_state(
     fencing_token: int,
     reason: str,
     reconciliation_receipt_json: str | None = None,
+    workspace_lease: LeaseHandle | None = None,
+    programs_root: Path | None = None,
 ) -> OutboxEntry:
     return _transition(
         db_path,
@@ -807,6 +880,8 @@ def mark_uncertain_remote_state(
         new_status="uncertain_remote_state",
         extra_columns={"failure_reason": reason},
         reconciliation_receipt_json=reconciliation_receipt_json,
+        workspace_lease=workspace_lease,
+        programs_root=programs_root,
     )
 
 
@@ -834,6 +909,8 @@ def mark_compensation_required(
     fencing_token: int,
     reason: str,
     compensation_operation: str | None = None,
+    workspace_lease: LeaseHandle | None = None,
+    programs_root: Path | None = None,
 ) -> OutboxEntry:
     return _transition(
         db_path,
@@ -843,6 +920,8 @@ def mark_compensation_required(
         new_status="compensation_required",
         extra_columns={"failure_reason": reason},
         compensation_operation=compensation_operation,
+        workspace_lease=workspace_lease,
+        programs_root=programs_root,
     )
 
 
@@ -928,6 +1007,21 @@ def load_effect_outbox_id(db_path: Path, effect_id: str) -> str | None:
     return None if row is None else row[0]
 
 
+def has_effect_binding(db_path: Path, outbox_id: str) -> bool:
+    if not db_path.exists():
+        return False
+    with open_program_db(db_path, read_only=True) as connection:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox_effects'"
+        ).fetchone()
+        if table is None:
+            return False
+        return connection.execute(
+            "SELECT 1 FROM outbox_effects WHERE outbox_id = ? LIMIT 1",
+            (outbox_id,),
+        ).fetchone() is not None
+
+
 def bind_effect(db_path: Path, effect_id: str, outbox_id: str) -> str:
     """First binding wins; returns the outbox row that owns ``effect_id``."""
     with open_program_db(db_path, durability="strict") as connection:
@@ -1011,15 +1105,27 @@ def _reconcile_uncertain(
     params: tuple,
     receipt_json: str | None,
     state_receipt: dict[str, object] | None = None,
+    expected_entry: OutboxEntry,
 ) -> OutboxEntry:
     with open_program_db(db_path, durability="strict") as connection:
         connection.execute(_SUCCESS_RECEIPTS_SQL)
         connection.execute("BEGIN IMMEDIATE")
-        row = connection.execute("SELECT status FROM outbox WHERE outbox_id = ?", (outbox_id,)).fetchone()
+        row = connection.execute(
+            "SELECT outbox_id, domain, correlation_id, payload_json, status, lease_owner, "
+            "lease_fencing_token, lease_expires_at, attempt_count, next_attempt_at, "
+            "remote_request_hash, remote_response_hash, failure_reason, created_at, updated_at "
+            "FROM outbox WHERE outbox_id = ?",
+            (outbox_id,),
+        ).fetchone()
         if row is None:
             raise OutboxError(f"unknown outbox row {outbox_id!r}")
-        if row[0] != "uncertain_remote_state":
-            raise OutboxError(f"outbox row {outbox_id!r} is {row[0]!r}; marker reconciliation needs uncertain_remote_state")
+        current = _entry_from_row(tuple(row))
+        if current != expected_entry:
+            raise OutboxError(
+                f"outbox row {outbox_id!r} changed during reconciliation"
+            )
+        if current.status != "uncertain_remote_state":
+            raise OutboxError(f"outbox row {outbox_id!r} is {current.status!r}; marker reconciliation needs uncertain_remote_state")
         connection.execute(f"UPDATE outbox SET {set_sql}, updated_at = ? WHERE outbox_id = ?", (*params, _wire(_now()), outbox_id))
         if receipt_json is not None:
             connection.execute("INSERT INTO outbox_success_receipts (outbox_id, receipt_json) VALUES (?, ?)", (outbox_id, receipt_json))
@@ -1045,11 +1151,15 @@ def _reconcile_uncertain(
     return entry
 
 
-def mark_reconciled_confirmed(db_path: Path, outbox_id: str, *, reconciled_by: str, receipt_json: str) -> OutboxEntry:
+def mark_reconciled_confirmed(
+    db_path: Path, outbox_id: str, *, reconciled_by: str, receipt_json: str,
+    expected_entry: OutboxEntry,
+) -> OutboxEntry:
     """uncertain_remote_state -> completed, only after a marker lookup found the remote effect."""
     return _reconcile_uncertain(
         db_path, outbox_id, set_sql="status = 'completed', lease_owner = ?, failure_reason = NULL",
         params=(reconciled_by,), receipt_json=receipt_json,
+        expected_entry=expected_entry,
         state_receipt={
             **json.loads(receipt_json),
             "terminal_status": "completed",
@@ -1065,12 +1175,14 @@ def mark_reconciled_absent(
     reconciled_by: str,
     reason: str,
     state_receipt: dict[str, object] | None = None,
+    expected_entry: OutboxEntry,
 ) -> OutboxEntry:
     """uncertain_remote_state -> pending, only after a marker lookup verified the remote effect is absent."""
     return _reconcile_uncertain(
         db_path, outbox_id,
         set_sql="status = 'pending', lease_owner = NULL, lease_expires_at = NULL, next_attempt_at = NULL, failure_reason = ?",
         params=(f"{reason} (by {reconciled_by})",), receipt_json=None,
+        expected_entry=expected_entry,
         state_receipt=state_receipt or {
             "schema_version": "1",
             "outbox_id": outbox_id,

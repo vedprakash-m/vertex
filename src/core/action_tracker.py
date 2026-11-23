@@ -292,6 +292,32 @@ def update_action_status(
         note=note,
     )
     _sync_action_fact(program_id, _apply_status_update(current_action, update), recorded_at=update.updated_at, programs_root=programs_root)
+    existing_closure = any(
+        event.kind is LifecycleEventKind.CLOSURE
+        and event.occurred_at == update.updated_at
+        for event in load_action_lifecycle(
+            program_id,
+            action_id,
+            programs_root=programs_root,
+            as_of=update.updated_at,
+        )
+    )
+    if status_value in _RESOLVED_ACTION_STATUSES and not existing_closure:
+        from src.core.risk_register_engine import _write_lifecycle_event
+
+        _write_lifecycle_event(
+            program_id,
+            "action.lifecycle",
+            action_id,
+            LifecycleEventKind.CLOSURE,
+            actor=update.updated_by,
+            note=update.note,
+            effective=None,
+            next_review_at=None,
+            evidence_refs=(),
+            occurred_at=update.updated_at,
+            programs_root=programs_root,
+        )
     target = get_actions_path(program_id, programs_root)
     payload = json.dumps(_status_update_to_record(update), separators=(",", ":")) + os.linesep
     append_jsonl_line(target, payload, max_bytes=_ACTIONS_MAX_BYTES)

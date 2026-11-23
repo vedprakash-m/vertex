@@ -43,6 +43,7 @@ _BASE = {
 def _enqueue(root: Path, *, intent: str = "intent-1", effect_id: str | None = None):
     key = create_task_idempotency_key(program_id="fixture", org="org", project="project", operation_intent_id=intent)
     payload = json.dumps({
+        "program_id": "fixture",
         "operation": "create_task.v1",
         "operation_intent_id": intent,
         "proposal_id": "p",

@@ -69,6 +69,19 @@ class StudyEvaluationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class WeightedSavingsObservation:
+    baseline_minutes: float
+    saved_minutes: float
+    frequency_weight: float = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class WeightedSavingsResult:
+    saved_fraction: float
+    lcb_95_saved_fraction: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class DualLabelPair:
     item_id: str
     human_label: str
@@ -214,16 +227,70 @@ def evaluate_stratum_agreement(
     return tuple(results)
 
 
-def _bootstrap_lower_bound(ratios: list[float]) -> float:
-    # Resample whole matched operating cycles, preserving the pairing and
-    # the outcomes of failed workflows already reflected in each cycle.
-    rng = Random(0)
-    count = len(ratios)
-    means = sorted(
-        math.fsum(rng.choices(ratios, k=count)) / count
-        for _ in range(_BOOTSTRAP_RESAMPLES)
+def calculate_matched_cycle_savings(
+    cycles: tuple[tuple[WeightedSavingsObservation, ...], ...],
+    *,
+    resamples: int = _BOOTSTRAP_RESAMPLES,
+    seed: int = 0,
+    confidence_level: float = 0.95,
+) -> WeightedSavingsResult:
+    """Calculate weighted savings while resampling complete matched cycles."""
+    if not cycles or any(not cycle for cycle in cycles):
+        raise ValueError("At least one non-empty matched cycle is required.")
+    if isinstance(resamples, bool) or not isinstance(resamples, int) or resamples < 1:
+        raise ValueError("resamples must be a positive integer.")
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise ValueError("seed must be a nonnegative integer.")
+    if not math.isfinite(confidence_level) or not 0 < confidence_level < 1:
+        raise ValueError("confidence_level must be between 0 and 1.")
+
+    for cycle in cycles:
+        for observation in cycle:
+            if (
+                not math.isfinite(observation.baseline_minutes)
+                or observation.baseline_minutes <= 0
+            ):
+                raise ValueError("baseline_minutes must be finite and positive.")
+            if not math.isfinite(observation.saved_minutes):
+                raise ValueError("saved_minutes must be finite.")
+            if (
+                not math.isfinite(observation.frequency_weight)
+                or observation.frequency_weight <= 0
+            ):
+                raise ValueError("frequency_weight must be finite and positive.")
+
+    def saved_fraction(
+        sampled_cycles: tuple[tuple[WeightedSavingsObservation, ...], ...],
+    ) -> float:
+        observations = tuple(
+            observation
+            for cycle in sampled_cycles
+            for observation in cycle
+        )
+        weighted_baseline = math.fsum(
+            observation.baseline_minutes * observation.frequency_weight
+            for observation in observations
+        )
+        weighted_saved = math.fsum(
+            observation.saved_minutes * observation.frequency_weight
+            for observation in observations
+        )
+        return weighted_saved / weighted_baseline
+
+    point_estimate = saved_fraction(cycles)
+    lower_bound: float | None = None
+    if len(cycles) >= 2:
+        rng = Random(seed)
+        estimates = sorted(
+            saved_fraction(tuple(rng.choices(cycles, k=len(cycles))))
+            for _ in range(resamples)
+        )
+        rank = max(1, math.ceil((1 - confidence_level) * resamples))
+        lower_bound = estimates[rank - 1]
+    return WeightedSavingsResult(
+        saved_fraction=point_estimate,
+        lcb_95_saved_fraction=lower_bound,
     )
-    return means[_BOOTSTRAP_RESAMPLES // 20 - 1]
 
 
 def evaluate_matched_cycles(
@@ -233,8 +300,12 @@ def evaluate_matched_cycles(
     min_cycles: int = _DEFAULT_MIN_CYCLES,
     min_calendar_days: int = _DEFAULT_MIN_CALENDAR_DAYS,
     lcb_threshold: float = _DEFAULT_LCB_THRESHOLD,
+    bootstrap_resamples: int = _BOOTSTRAP_RESAMPLES,
+    bootstrap_seed: int = 0,
 ) -> StudyEvaluationResult:
     """Evaluate W6.1/W6.2 acceptance criteria including >=8 cycles, >=49 days, and 95% LCB > 0.80."""
+    if bootstrap_resamples < 1000:
+        raise ValueError("At least 1000 bootstrap resamples are required.")
     stratum_results = evaluate_stratum_agreement(strata)
     blockers: list[str] = [res.reason for res in stratum_results if not res.approved]
     if not strata:
@@ -253,7 +324,7 @@ def evaluate_matched_cycles(
             blocking_reasons=tuple(blockers),
         )
 
-    ratios: list[float] = []
+    weighted_cycles: list[tuple[WeightedSavingsObservation, ...]] = []
     ordered_cycles = sorted(cycles, key=lambda cycle: cycle.week_start)
     if len({cycle.cycle_id for cycle in cycles}) != cycle_count:
         blockers.append("Matched cycle IDs must be unique.")
@@ -271,10 +342,14 @@ def evaluate_matched_cycles(
                 f"Cycle {cycle.cycle_id!r} quality_adjusted_minutes_saved must be finite and at most baseline_minutes."
             )
         if not cycle.quality_passed:
-            ratios.append(0.0)
+            weighted_cycles.append(
+                (WeightedSavingsObservation(cycle.baseline_minutes, 0.0),)
+            )
             continue
         saved = cycle.baseline_minutes - cycle.assisted_minutes if adjusted is None else adjusted
-        ratios.append(saved / cycle.baseline_minutes)
+        weighted_cycles.append(
+            (WeightedSavingsObservation(cycle.baseline_minutes, saved),)
+        )
 
     elapsed_days = (ordered_cycles[-1].week_start - ordered_cycles[0].week_start).days
     if cycle_count < min_cycles:
@@ -282,10 +357,16 @@ def evaluate_matched_cycles(
     if elapsed_days < min_calendar_days:
         blockers.append(f"Elapsed study window is {elapsed_days} calendar days (< {min_calendar_days} required).")
 
-    mean_saved = math.fsum(ratios) / cycle_count
+    savings = calculate_matched_cycle_savings(
+        tuple(weighted_cycles),
+        resamples=bootstrap_resamples,
+        seed=bootstrap_seed,
+    )
+    mean_saved = savings.saved_fraction
     lcb_95: float | None = None
     if cycle_count >= 2:
-        lcb_95 = _bootstrap_lower_bound(ratios)
+        lcb_95 = savings.lcb_95_saved_fraction
+        assert lcb_95 is not None
         if lcb_95 <= lcb_threshold:
             blockers.append(
                 f"Quality-adjusted time saved 95% LCB is {lcb_95:.4f} (must exceed {lcb_threshold:.2f})."

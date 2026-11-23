@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
+from statistics import median
 from typing import Any, Iterable
 
 from src.core.exceptions import ConfigError
@@ -81,11 +82,7 @@ def plan_sprint(
     completed_sprints = tuple(
         sorted(completed_sprints, key=lambda sample: sample.iteration_path.casefold())
     )
-    point_capacity = (
-        None
-        if not completed_sprints
-        else _average_completed_points(completed_sprints) * capacity.available_hours / Decimal(80)
-    )
+    point_capacity = _point_capacity(completed_sprints, capacity.available_hours)
 
     selected: list[SprintPlanDecision] = []
     deferred: list[SprintPlanDeferral] = []
@@ -207,7 +204,7 @@ def _completed_points_from_snapshots(
     iteration_id: str | None,
 ) -> tuple[SprintCompletedPointsInput, ...]:
     del iteration_id
-    latest_by_sprint_item: dict[tuple[str, int], tuple[int, Decimal]] = {}
+    latest_by_sprint_item: dict[tuple[str, int], tuple[int, Decimal, str]] = {}
     for row in rows:
         iteration = str(row.get("IterationPath") or "").strip()
         if not iteration or iteration.casefold() == current_iteration_path.casefold():
@@ -218,15 +215,21 @@ def _completed_points_from_snapshots(
         points = _decimal_value(row.get("StoryPoints"))
         if points is None:
             points = _decimal_value(row.get("Effort"))
-        if item_id is None or date_sk is None or points is None or state not in TERMINAL_WORK_ITEM_STATES:
+        if item_id is None or date_sk is None or points is None:
             continue
         key = (iteration, item_id)
         previous = latest_by_sprint_item.get(key)
         if previous is None or date_sk >= previous[0]:
-            latest_by_sprint_item[key] = (date_sk, points)
+            latest_by_sprint_item[key] = (date_sk, points, state)
     totals: dict[str, Decimal] = {}
-    for (iteration, _item_id), (_date_sk, points) in latest_by_sprint_item.items():
+    latest_date_by_iteration: dict[str, int] = {}
+    for (iteration, _item_id), (date_sk, points, state) in latest_by_sprint_item.items():
+        if state not in TERMINAL_WORK_ITEM_STATES:
+            continue
         totals[iteration] = totals.get(iteration, Decimal(0)) + points
+        latest_date_by_iteration[iteration] = max(
+            date_sk, latest_date_by_iteration.get(iteration, date_sk)
+        )
     label = team_name or "project"
     return tuple(
         SprintCompletedPointsInput(
@@ -234,14 +237,25 @@ def _completed_points_from_snapshots(
             points,
             (f"ADO:sprint-points:{label}:{iteration}",),
         )
-        for iteration, points in sorted(totals.items(), key=lambda entry: entry[0].casefold())
+        for iteration, points in sorted(
+            totals.items(),
+            key=lambda entry: (
+                latest_date_by_iteration[entry[0]],
+                entry[0].casefold(),
+            ),
+        )[-3:]
     )
 
 
-def _average_completed_points(
+def _point_capacity(
     samples: tuple[SprintCompletedPointsInput, ...],
-) -> Decimal:
-    return sum((sample.story_points for sample in samples), Decimal(0)) / Decimal(len(samples))
+    available_hours: Decimal,
+) -> Decimal | None:
+    if not samples:
+        return None
+    if available_hours == 0:
+        return Decimal(0)
+    return median(sample.story_points for sample in samples)
 
 
 def _assert_acyclic(rows: tuple[tuple[int, tuple[int, ...]], ...]) -> None:

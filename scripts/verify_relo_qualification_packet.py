@@ -9,13 +9,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
-import random
 import sys
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.core.study_evaluator import (  # noqa: E402
+    WeightedSavingsObservation,
+    calculate_matched_cycle_savings,
+)
 
 
 SCHEMA_VERSION = "1"
@@ -329,18 +336,29 @@ def _verify_d7(
                 )
             )
         weighted_cycles = list(weighted_pairs_by_cycle.values())
-        savings = _frequency_weighted_savings(
-            [pair for cycle in weighted_cycles for pair in cycle]
+        shared_cycles = tuple(
+            tuple(
+                WeightedSavingsObservation(
+                    baseline_minutes=float(manual),
+                    saved_minutes=float(manual - vertex),
+                    frequency_weight=float(weight),
+                )
+                for manual, vertex, weight in cycle
+            )
+            for cycle in weighted_cycles
         )
-        lower_bound = _bootstrap_lower_bound(
-            weighted_cycles,
+        savings = calculate_matched_cycle_savings(
+            shared_cycles,
             resamples=bootstrap_parameters["resamples"],
             seed=bootstrap_parameters["seed"],
-            confidence_level=bootstrap_parameters["confidence_level"],
+            confidence_level=float(bootstrap_parameters["confidence_level"]),
         )
-        measurements["frequency_weighted_savings"] = _json_number(savings)
+        lower_bound = savings.lcb_95_saved_fraction
+        measurements["frequency_weighted_savings"] = _json_number(
+            savings.saved_fraction
+        )
         measurements["bootstrap_95_lower_bound"] = _json_number(lower_bound)
-        if lower_bound <= D7_THRESHOLD:
+        if lower_bound is None or lower_bound <= float(D7_THRESHOLD):
             failed_gates.append("bootstrap_lower_bound_strictly_above_0.80")
 
     classification = "owner_review" if not failed_gates else "not_qualified"
@@ -463,39 +481,6 @@ def _matched_pairs(
             else:
                 matched_pairs.append((manual, vertex))
     return matched_pairs
-
-
-def _frequency_weighted_savings(
-    pairs: list[tuple[Decimal, Decimal, Decimal]],
-) -> Decimal:
-    manual_total = sum((weight * manual for manual, _, weight in pairs), Decimal(0))
-    vertex_total = sum((weight * vertex for _, vertex, weight in pairs), Decimal(0))
-    if manual_total <= 0:
-        raise ValueError("manual weighted time must be positive")
-    return (manual_total - vertex_total) / manual_total
-
-
-def _bootstrap_lower_bound(
-    cycles: list[list[tuple[Decimal, Decimal, Decimal]]],
-    *,
-    resamples: int,
-    seed: int,
-    confidence_level: Decimal,
-) -> Decimal:
-    rng = random.Random(seed)
-    estimates: list[Decimal] = []
-    for _ in range(resamples):
-        sampled_cycles = [
-            cycles[rng.randrange(len(cycles))] for _ in cycles
-        ]
-        estimates.append(
-            _frequency_weighted_savings(
-                [pair for cycle in sampled_cycles for pair in cycle]
-            )
-        )
-    estimates.sort()
-    rank = max(1, math.ceil(float(Decimal(1) - confidence_level) * resamples))
-    return estimates[rank - 1]
 
 
 def _verify_economics(
@@ -749,9 +734,11 @@ def _valid_confidence(value: object) -> bool:
     return numeric is not None and Decimal(0) <= numeric <= Decimal(1)
 
 
-def _json_number(value: Decimal | None) -> float | int | None:
+def _json_number(value: Decimal | float | int | None) -> float | int | None:
     if value is None:
         return None
+    if isinstance(value, (int, float)):
+        return int(value) if value == int(value) else float(value)
     integral = value.to_integral_value()
     return int(integral) if value == integral else float(value)
 
