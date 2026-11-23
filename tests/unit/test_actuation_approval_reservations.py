@@ -1009,6 +1009,79 @@ def test_provider_success_requires_valid_remote_identity(
     assert "valid remote" in str(outcome.entry.failure_reason).lower()
 
 
+def test_provider_compensation_request_without_policy_becomes_uncertain(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "programs"
+    request = _request(operation="create_task.v1")
+    entry, _ = _enqueue(root, request)
+
+    outcome = dispatch_approved_actuation_intent(
+        program_id=_PROGRAM,
+        outbox_id=entry.outbox_id,
+        owner="worker",
+        programs_root=root,
+        preflight_fn=lambda retained: _preflight(request=request),
+        dispatch_fn=lambda retained: DispatchResult(
+            succeeded=True,
+            remote_id=42,
+            remote_rev=2,
+            compensation_required=True,
+            failure_reason="compensation requested",
+            reconciliation=synthetic_completed_reconciliation(
+                json.loads(retained.payload_json)["authorized_effect"],
+                remote_id=42,
+                remote_rev=2,
+            ),
+        ),
+        approval_policy_version=request.approval_policy_version,
+        scope_enabled=True,
+        rule_enabled=True,
+        now=_NOW,
+    )
+
+    assert outcome.status == "uncertain_remote_state"
+    assert "compensation" in str(outcome.entry.failure_reason).lower()
+
+
+def test_provider_compensation_request_uses_approved_offline_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "programs"
+    request = _request(operation="create_task.v1")
+    entry, _ = _enqueue(root, request)
+    monkeypatch.setattr(
+        "src.core.actuation_outbox.require_offline_compensation_operation",
+        lambda operation: "offline_compensation.v1",
+    )
+
+    outcome = dispatch_approved_actuation_intent(
+        program_id=_PROGRAM,
+        outbox_id=entry.outbox_id,
+        owner="worker",
+        programs_root=root,
+        preflight_fn=lambda retained: _preflight(request=request),
+        dispatch_fn=lambda retained: DispatchResult(
+            succeeded=True,
+            remote_id=42,
+            remote_rev=2,
+            compensation_required=True,
+            failure_reason="compensation requested",
+            reconciliation=synthetic_completed_reconciliation(
+                json.loads(retained.payload_json)["authorized_effect"],
+                remote_id=42,
+                remote_rev=2,
+            ),
+        ),
+        approval_policy_version=request.approval_policy_version,
+        scope_enabled=True,
+        rule_enabled=True,
+        now=_NOW,
+    )
+
+    assert outcome.status == "compensation_required"
+
+
 def test_revocation_of_completed_effect_does_not_fabricate_reconciliation(tmp_path: Path) -> None:
     root = tmp_path / "programs"
     request = _request(operation="create_task.v1")

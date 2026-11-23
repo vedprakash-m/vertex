@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sqlite3
+
+import pytest
 
 from src.core.context_compiler import (
     ContentOrigin,
@@ -330,3 +333,30 @@ def test_long_horizon_deduplicates_status_and_lifecycle_as_one_outcome(
     assert [(item.family, item.object_id, item.summary) for item in outcomes] == [
         ("action", "action-1", "Validated closure.")
     ]
+
+
+def test_long_horizon_revision_lookup_rejects_invalid_or_missing_history(
+    tmp_path: Path,
+) -> None:
+    store = ProgramFactStore("missing", db_root=tmp_path)
+    as_of = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    assert store.list_accepted_revisions_for_types((), as_of=as_of) == ()
+    assert store.list_accepted_revisions_for_types(
+        ("risk.entry",), as_of=as_of
+    ) == ()
+    with pytest.raises(ValueError, match="unavailable"):
+        store.list_accepted_revisions_for_types(
+            ("risk.entry",), as_of=as_of, require_history=True
+        )
+
+    with sqlite3.connect(tmp_path / "empty.sqlite3"):
+        pass
+    empty = ProgramFactStore("empty", db_root=tmp_path)
+    assert empty.list_accepted_revisions_for_types(
+        ("risk.entry",), as_of=as_of
+    ) == ()
+    with pytest.raises(ValueError, match="unavailable"):
+        empty.list_accepted_revisions_for_types(
+            ("risk.entry",), as_of=as_of, require_history=True
+        )

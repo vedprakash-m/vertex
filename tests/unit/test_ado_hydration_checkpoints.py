@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -108,6 +109,52 @@ def test_checkpoint_time_conversion_failure_is_explicit() -> None:
         checkpoint_module._validated_checkpoint_time(
             _BrokenDatetime(2026, 5, 25, tzinfo=timezone.utc)
         )
+
+
+def test_invalid_stored_checkpoint_json_is_ignored() -> None:
+    conn = _conn()
+    conn.execute("BEGIN")
+    advance_checkpoint(
+        conn,
+        CheckpointAdvance(
+            42,
+            HydrationSubresource.COMMENTS,
+            "1",
+            evidence_json=json.dumps(
+                {
+                    "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "subresource": "comments",
+                    "cursor": "1",
+                    "records": [],
+                    "pagination": {
+                        "total_fetched": 0,
+                        "page_count": 0,
+                        "is_truncated": False,
+                    },
+                }
+            ),
+        ),
+        provider_instance_id="default",
+        at=_AT,
+    )
+    invalid_payload = (
+        '{"schema_version":2,"subresource":"comments","cursor":"1",'
+        '"records":"bad","pagination":{}}'
+    )
+    conn.execute(
+        "UPDATE ado_hydration_evidence SET payload_json = ?",
+        (invalid_payload,),
+    )
+    conn.execute(
+        "UPDATE ado_hydration_checkpoints SET evidence_hash = ?",
+        (hashlib.sha256(invalid_payload.encode("utf-8")).hexdigest(),),
+    )
+    conn.commit()
+
+    checkpoint = read_checkpoints(conn, "default", (42,))[
+        (42, HydrationSubresource.COMMENTS)
+    ]
+    assert checkpoint.state == "unknown"
 
 
 def test_invalid_checkpoint_evidence_is_disclosed_and_cannot_be_read() -> None:
