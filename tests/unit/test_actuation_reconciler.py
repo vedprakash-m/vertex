@@ -14,8 +14,10 @@ from src.core.actuation_outbox import (
     outbox_db_path,
 )
 from src.core.actuation_reconciliation import (
+    AuthorizedEffect,
     ReconciliationDisposition,
     ReconciliationObservation,
+    _semantic_reconciliation_payload,
     reconcile_uncertain_effect,
     request_compensation,
 )
@@ -31,6 +33,7 @@ from src.core.ledger.durable_outbox_store import (
     mark_succeeded,
     mark_uncertain_remote_state,
 )
+from src.core._db import open_program_db_with_retry
 from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN
 from tests.support.actuation_reconciliation import synthetic_authorized_effect_document
 from tests.support.actuation_reconciliation import synthetic_completed_reconciliation
@@ -74,6 +77,58 @@ def _uncertain_create(programs_root: Path) -> tuple[str, Path]:
     )
     assert outcome.status == "uncertain_remote_state"
     return key, outbox_db_path("fixture", programs_root=programs_root)
+
+
+def test_reconciliation_semantic_payload_falls_back_to_authorized_value() -> None:
+    authorized = AuthorizedEffect.from_dict(
+        synthetic_authorized_effect_document(operation="add_comment.v1")
+    )
+
+    payload = _semantic_reconciliation_payload(
+        authorized,
+        {"desired_effect": []},
+    )
+
+    assert payload == authorized.desired_value
+
+
+@pytest.mark.parametrize(
+    "change", ["missing_effect", "missing_causal", "mismatched_effect"]
+)
+def test_uncertain_reconciliation_refuses_rebound_semantic_identity(
+    tmp_path: Path, change: str,
+) -> None:
+    key, db_path = _uncertain_create(tmp_path / "programs")
+    entry = load_entry(db_path, key)
+    assert entry is not None
+    payload = json.loads(entry.payload_json)
+    payload["target_identity"] = "origin1:retained"
+    payload["approved_remote_marker"] = "vertex-effect-retained"
+    payload["semantic_effect_id"] = "sek1:retained"
+    payload["causal_occurrence_id"] = "meeting:action-1"
+    if change == "missing_effect":
+        payload.pop("semantic_effect_id")
+    elif change == "missing_causal":
+        payload.pop("causal_occurrence_id")
+    with open_program_db_with_retry(db_path, durability="strict") as connection:
+        connection.execute(
+            "UPDATE outbox SET payload_json = ? WHERE outbox_id = ?",
+            (json.dumps(payload, sort_keys=True), key),
+        )
+
+    with pytest.raises(
+        OutboxError,
+        match="semantic effect identity|causal occurrence|semantic identity",
+    ):
+        reconcile_uncertain_effect(
+            db_path,
+            key,
+            reconciled_by="synthetic-provider",
+            provider_lookup=lambda _entry: ReconciliationObservation(
+                disposition=ReconciliationDisposition.ABSENT,
+                reason="must not be reached",
+            ),
+        )
 
 
 @pytest.mark.parametrize(

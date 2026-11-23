@@ -57,6 +57,7 @@ class MeetingAction:
     extraction_method: ExtractionMethod
     status: MeetingActionStatus = "staged"
     rejection_reason: str | None = None
+    approved_by: str | None = None
     # ADF-W2.11/W3.8 (ADR-0017): additive workflow-measurement timestamps.
     proposed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     decided_at: datetime | None = None
@@ -301,14 +302,20 @@ def approve_meeting_action(
     re-running the pipeline rather than overriding a rejection here)."""
     if action.status == "rejected":
         raise ValueError(f"MeetingAction {action.id!r} was rejected ({action.rejection_reason}) -- cannot approve.")
-    del approved_by  # not yet persisted anywhere (no reviewer-identity store for this type yet); accepted for API clarity/future audit trail.
+    if not approved_by.strip():
+        raise ValueError("MeetingAction approval requires a reviewer identity.")
     decided_at = datetime.now(timezone.utc)
     record_proposal_event(
         program_id=action.program_id, proposal_type="meeting_action", proposal_id=action.id,
         event="approved", programs_root=programs_root, at=decided_at, proposed_at=action.proposed_at,
         reviewed=reviewed,
     )
-    return replace(action, status="approved", decided_at=decided_at)
+    return replace(
+        action,
+        status="approved",
+        approved_by=approved_by.strip(),
+        decided_at=decided_at,
+    )
 
 
 def reject_meeting_action(

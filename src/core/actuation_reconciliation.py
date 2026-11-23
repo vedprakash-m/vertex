@@ -18,13 +18,19 @@ from src.core.audience_manifest import AudienceManifest, AudienceManifestEntry
 from src.core.ledger.durable_outbox_store import (
     OutboxEntry,
     OutboxError,
+    load_effect_outbox_id,
     load_entry,
     mark_compensation_required,
     mark_reconciled_absent,
     mark_reconciled_confirmed,
     record_outbox_receipt,
 )
-from src.core.operation_capabilities import OperationCapability, lookup_capability
+from src.core.operation_capabilities import (
+    OperationCapability,
+    lookup_capability,
+    normalize_semantic_payload,
+    semantic_effect_key,
+)
 
 ReconciliationStatus = Literal[
     "completed",
@@ -634,7 +640,48 @@ def _authorized_effect_for_entry(entry: OutboxEntry) -> AuthorizedEffect:
         raise OutboxError(
             "Retained authorized-effect evidence does not bind the outbox intent"
         )
+    retained_effect_id = payload.get("semantic_effect_id")
+    exact_effect_binding = (
+        str(payload.get("target_identity") or "").startswith("origin1:")
+        or isinstance(payload.get("approved_remote_marker"), str)
+    )
+    if retained_effect_id is not None or exact_effect_binding:
+        if not isinstance(retained_effect_id, str) or not retained_effect_id:
+            raise OutboxError(
+                "Effect reconciliation requires a retained semantic effect identity"
+            )
+        causal_occurrence_id = payload.get("causal_occurrence_id")
+        if not isinstance(causal_occurrence_id, str) or not causal_occurrence_id.strip():
+            raise OutboxError(
+                "Effect reconciliation requires a retained causal occurrence"
+            )
+        expected_effect_id = semantic_effect_key(
+            program_id=authorized.program_id,
+            provider=authorized.provider,
+            tenant=authorized.tenant_id,
+            project=authorized.project,
+            operation=authorized.operation,
+            target_identity=authorized.target_identity,
+            causal_occurrence_id=causal_occurrence_id,
+            payload=_semantic_reconciliation_payload(authorized, payload),
+        )
+        if retained_effect_id != expected_effect_id:
+            raise OutboxError(
+                "Retained authorized effect does not match its semantic identity"
+            )
     return authorized
+
+
+def _semantic_reconciliation_payload(
+    authorized: AuthorizedEffect, payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    desired = payload.get("desired_effect")
+    if isinstance(desired, Mapping):
+        return dict(desired)
+    try:
+        return normalize_semantic_payload(authorized.operation, payload)
+    except ValueError:
+        return dict(authorized.desired_value)
 
 
 def _reconciliation_binds_authorized_effect(
@@ -769,6 +816,26 @@ def reconcile_uncertain_effect(
     if entry.status != "uncertain_remote_state":
         raise OutboxError("Effect reconciliation applies only to an uncertain_remote_state row")
     _qualified_reconciliation_capability(entry)
+    _, retained_payload = _retained_operation(entry)
+    retained_effect_id = retained_payload.get("semantic_effect_id")
+    exact_effect_binding = (
+        str(retained_payload.get("target_identity") or "").startswith("origin1:")
+        or isinstance(retained_payload.get("approved_remote_marker"), str)
+    )
+    retained_authorized: AuthorizedEffect | None = None
+    if retained_effect_id is not None or exact_effect_binding:
+        if not isinstance(retained_effect_id, str) or not retained_effect_id:
+            raise OutboxError(
+                "Effect reconciliation requires a retained semantic effect identity"
+            )
+        retained_authorized = _authorized_effect_for_entry(entry)
+        if (
+            load_effect_outbox_id(db_path, str(retained_effect_id))
+            != entry.outbox_id
+        ):
+            raise OutboxError(
+                "Retained semantic effect is not bound to this outbox row"
+            )
 
     try:
         observation = provider_lookup(entry)
@@ -791,7 +858,7 @@ def reconcile_uncertain_effect(
             )
         else:
             try:
-                authorized = _authorized_effect_for_entry(entry)
+                authorized = retained_authorized or _authorized_effect_for_entry(entry)
             except OutboxError as error:
                 observation = ReconciliationObservation(
                     disposition=ReconciliationDisposition.INCONCLUSIVE,

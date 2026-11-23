@@ -4,6 +4,7 @@ reconciliation of uncertain effects, and the create-task-only dispatch allowlist
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,11 @@ from src.core.ledger.durable_outbox_store import (
     load_entry,
     load_reconciliation_receipt,
     load_success_receipt,
+)
+from src.core.operation_capabilities import (
+    approved_remote_marker,
+    create_target_identity,
+    semantic_effect_key,
 )
 from tests.support.actuation_reconciliation import (
     synthetic_authorized_effect_document,
@@ -516,6 +522,76 @@ def test_reconcile_failed_or_invalid_lookup_stays_uncertain(tmp_path: Path, look
     assert effect_state(load_entry(outbox_db_path("fixture", programs_root=root), key)) == "uncertain"
 
 
+def test_reconcile_refuses_an_unbound_retained_semantic_effect_before_lookup(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "programs"
+    intent = "intent-exact"
+    key = create_task_idempotency_key(
+        program_id="fixture",
+        org="org",
+        project="project",
+        operation_intent_id=intent,
+    )
+    payload: dict[str, object] = {
+        "program_id": "fixture",
+        "operation": "create_task.v1",
+        "operation_intent_id": intent,
+        "proposal_id": "p",
+        "org": "org",
+        "project": "project",
+        "causal_occurrence_id": "meeting:exact",
+        "title": "Synthetic",
+        "authorized_effect": synthetic_authorized_effect_document(
+            intent_id=intent
+        ),
+    }
+    effect_id = semantic_effect_key(
+        program_id="fixture",
+        provider="ado",
+        tenant="org",
+        project="project",
+        operation="create_task.v1",
+        target_identity="project:new",
+        causal_occurrence_id="meeting:exact",
+        payload={"title": "Synthetic"},
+    )
+    payload["semantic_effect_id"] = effect_id
+    payload["target_identity"] = "project:new"
+    enqueue_create_task_intent(
+        program_id="fixture",
+        idempotency_key=key,
+        operation_intent_id=intent,
+        proposal_id="p",
+        payload_json=json.dumps(payload),
+        programs_root=root,
+        effect_id=effect_id,
+        target_identity="project:new",
+    )
+    _dispatch(root, key, _timeout)
+    db_path = outbox_db_path("fixture", programs_root=root)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "DELETE FROM outbox_effects WHERE effect_id = ?",
+            (effect_id,),
+        )
+    calls: list[str] = []
+
+    with pytest.raises(OutboxError, match="not bound"):
+        reconcile_uncertain_create_task(
+            program_id="fixture",
+            idempotency_key=key,
+            reconciled_by="operator",
+            marker_lookup=lambda entry: calls.append(entry.outbox_id) or None,
+            programs_root=root,
+        )
+
+    retained = load_entry(db_path, key)
+    assert retained is not None
+    assert retained.status == "uncertain_remote_state"
+    assert calls == []
+
+
 def test_reconcile_refuses_non_uncertain_rows(tmp_path: Path) -> None:
     root = tmp_path / "programs"
     key, _ = _enqueue(root)
@@ -524,3 +600,80 @@ def test_reconcile_refuses_non_uncertain_rows(tmp_path: Path) -> None:
             program_id="fixture", idempotency_key=key, reconciled_by="op",
             marker_lookup=lambda entry: 1, programs_root=root,
         )
+
+
+def test_qualified_create_reconciliation_uses_retained_desired_effect(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "programs"
+    intent = "intent-qualified-create"
+    causal_occurrence_id = "meeting:qualified-create"
+    desired = {"title": "Synthetic qualified create"}
+    target = create_target_identity(
+        provider="ado",
+        tenant="org",
+        project="project",
+        causal_occurrence_id=causal_occurrence_id,
+        payload=desired,
+    )
+    effect_id = semantic_effect_key(
+        program_id="fixture",
+        provider="ado",
+        tenant="org",
+        project="project",
+        operation="create_task.v1",
+        target_identity=target,
+        causal_occurrence_id=causal_occurrence_id,
+        payload=desired,
+    )
+    authorized = synthetic_authorized_effect_document(intent_id=intent)
+    authorized["target_identity"] = target
+    authorized["desired_value"] = desired
+    marker = approved_remote_marker(
+        operation="create_task.v1",
+        semantic_effect_key=effect_id,
+    )
+    payload = {
+        "program_id": "fixture",
+        "operation": "create_task.v1",
+        "operation_intent_id": intent,
+        "proposal_id": "proposal-qualified",
+        "org": "org",
+        "project": "project",
+        "target_identity": target,
+        "causal_occurrence_id": causal_occurrence_id,
+        "desired_effect": desired,
+        "approved_remote_marker": marker,
+        "semantic_effect_id": effect_id,
+        "authorized_effect": authorized,
+    }
+    key = create_task_idempotency_key(
+        program_id="fixture",
+        org="org",
+        project="project",
+        operation_intent_id=intent,
+    )
+    enqueue_create_task_intent(
+        program_id="fixture",
+        idempotency_key=key,
+        operation_intent_id=intent,
+        proposal_id="proposal-qualified",
+        payload_json=json.dumps(payload),
+        programs_root=root,
+        effect_id=effect_id,
+        target_identity=target,
+    )
+    _dispatch(root, key, _timeout)
+
+    outcome = reconcile_uncertain_create_task(
+        program_id="fixture",
+        idempotency_key=key,
+        reconciled_by="operator",
+        marker_lookup=lambda _entry: 77,
+        reconciliation=synthetic_completed_reconciliation(
+            authorized, remote_id=77
+        ),
+        programs_root=root,
+    )
+
+    assert outcome.status == "completed"

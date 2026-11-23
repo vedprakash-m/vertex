@@ -21,6 +21,12 @@ from src.core.actuation_outbox import create_task_idempotency_key, enqueue_creat
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.ledger.durable_outbox_store import OutboxEntry
 from src.core.meeting_action import MeetingAction
+from src.core.operation_capabilities import (
+    approved_remote_marker,
+    create_target_identity,
+    normalize_semantic_payload,
+    semantic_effect_key,
+)
 
 _MAX_TITLE_LENGTH = 255
 
@@ -52,6 +58,10 @@ def route_meeting_action_to_ado_proposal(
             "only a reviewed and approved action may be routed to an ADO proposal (Section 11.4's "
             "golden workflow requires reviewed actions before ADO proposal)."
         )
+    if not action.approved_by or action.decided_at is None:
+        raise MeetingActionRoutingError(
+            f"MeetingAction {action.id!r} lacks retained approval identity or decision time"
+        )
 
     operation_intent_id = f"meeting-action:{action.id}"
     idempotency_key = create_task_idempotency_key(
@@ -61,6 +71,83 @@ def route_meeting_action_to_ado_proposal(
         operation_intent_id=operation_intent_id,
     )
     payload = _build_payload(action, area_path=area_path, iteration_path=iteration_path)
+    causal_occurrence_id = f"meeting-action:{action.id}"
+    payload.update(
+        {
+            "program_id": action.program_id,
+            "operation": "create_task.v1",
+            "operation_intent_id": operation_intent_id,
+            "proposal_id": action.id,
+            "org": org,
+            "project": project,
+            "causal_occurrence_id": causal_occurrence_id,
+        }
+    )
+    desired_effect = normalize_semantic_payload("create_task.v1", payload)
+    target_identity = create_target_identity(
+        provider="ado",
+        tenant=org,
+        project=project,
+        causal_occurrence_id=causal_occurrence_id,
+        payload=desired_effect,
+    )
+    effect_id = semantic_effect_key(
+        program_id=action.program_id,
+        provider="ado",
+        tenant=org,
+        project=project,
+        operation="create_task.v1",
+        target_identity=target_identity,
+        causal_occurrence_id=causal_occurrence_id,
+        payload=desired_effect,
+    )
+    payload["target_identity"] = target_identity
+    payload["semantic_effect_id"] = effect_id
+    effect_marker = approved_remote_marker(
+        operation="create_task.v1",
+        semantic_effect_key=effect_id,
+    )
+    if effect_marker is None:
+        raise MeetingActionRoutingError(
+            f"MeetingAction {action.id!r} operation has no approved remote marker"
+        )
+    payload["approved_remote_marker"] = effect_marker
+    payload["tags"] = f"vertex-intent-{operation_intent_id}; {effect_marker}"
+    desired_value = {
+        path: value
+        for path, value in (
+            ("System.Title", payload["title"]),
+            ("System.Description", payload["description"]),
+            ("System.AssignedTo", payload.get("assigned_to")),
+            ("System.AreaPath", payload.get("area_path")),
+            ("System.IterationPath", payload.get("iteration_path")),
+            ("System.Tags", payload["tags"]),
+        )
+        if value
+    }
+    payload["authorized_effect"] = {
+        "program_id": action.program_id,
+        "intent_id": operation_intent_id,
+        "approval_id": f"meeting-action-approval:{action.id}",
+        "provider": "ado",
+        "tenant_id": org,
+        "project": project,
+        "operation": "create_task.v1",
+        "target_identity": target_identity,
+        "desired_value": desired_value,
+        "execution_principal": action.approved_by,
+        "audience_manifest": {
+            "generated_at": action.decided_at.isoformat(),
+            "program_id": action.program_id,
+            "entries": [],
+        },
+        "intended_recipients": [],
+        "preflight_revision": 1,
+        "precondition_observed_at": action.decided_at.isoformat(),
+        "evidence_version": "meeting-action-approval.v1",
+        "policy_version": "meeting-action-routing.v1",
+        "rollback_mechanism": "none",
+    }
     return enqueue_create_task_intent(
         program_id=action.program_id,
         idempotency_key=idempotency_key,
@@ -68,6 +155,8 @@ def route_meeting_action_to_ado_proposal(
         proposal_id=action.id,
         payload_json=json.dumps(payload, sort_keys=True),
         programs_root=programs_root,
+        effect_id=effect_id,
+        target_identity=target_identity,
     )
 
 

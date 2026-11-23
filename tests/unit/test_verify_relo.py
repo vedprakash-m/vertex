@@ -1395,6 +1395,130 @@ def _write_goal_traceability_spec(tmp_path, rows=_GOAL_ROWS, *, objective_rows=N
     return spec
 
 
+def _write_complete_traceability_spec(tmp_path):
+    evidence = tmp_path / "tests" / "unit" / "test_verify_relo.py"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("# synthetic evidence\n", encoding="utf-8")
+    spec = _write_goal_traceability_spec(tmp_path)
+    content = spec.read_text(encoding="utf-8")
+    content = content.replace(
+        "## 19. Traceability\n",
+        "## 16. Gates\n"
+        "| **RELO-QG-01 — First** | check |\n"
+        "| **RELO-QG-02 — Second** | check |\n"
+        "## 19. Traceability\n",
+    )
+    content += (
+        "### 19.2 Requirement-to-delivery traceability\n"
+        "| Requirement | Work items | Gate | Primary test/evidence | Phase |\n"
+        "|---|---|---|---|---|\n"
+        "| RELO-FR-01 | W0.1 | QG-01 | `tests/unit/test_verify_relo.py` | RELO-0 |\n"
+        "| RELO-FR-02 | W0.2 | QG-02 | declared contract evidence | RELO-0 |\n"
+        "| RELO-NFR-01 | W0.1 | QG-01 | declared safety evidence | RELO-0 |\n"
+    )
+    spec.write_text(content, encoding="utf-8")
+    return spec
+
+
+def test_complete_bidirectional_traceability_maps_every_canonical_obligation(tmp_path) -> None:
+    result = lint_specification(_write_complete_traceability_spec(tmp_path))
+
+    assert result.passed is True, result.detail
+
+
+@pytest.mark.parametrize(
+    ("removed_header", "expected"),
+    [
+        ("| ID | Goal |", "goal"),
+        ("| ID | Objective | Required evidence |", "objective"),
+        ("| Goal | Objectives | Primary requirements/workstreams |", "goal mapping"),
+        (
+            "| Requirement | Work items | Gate | Primary test/evidence | Phase |",
+            "requirement mapping",
+        ),
+    ],
+)
+def test_complete_traceability_refuses_missing_mapping_tables(
+    tmp_path, removed_header, expected,
+) -> None:
+    spec = _write_complete_traceability_spec(tmp_path)
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace(removed_header, "| Removed |"),
+        encoding="utf-8",
+    )
+
+    result = lint_specification(spec)
+
+    assert result.passed is False
+    assert expected in result.detail
+
+
+@pytest.mark.parametrize(("column", "placeholder"), [
+    ("gate", "TBD"),
+    ("evidence", "Pending"),
+])
+def test_complete_traceability_rejects_missing_delivery_mapping(
+    tmp_path, column, placeholder,
+) -> None:
+    spec = _write_complete_traceability_spec(tmp_path)
+    row = (
+        "| RELO-FR-01 | W0.1 | QG-01 | "
+        "`tests/unit/test_verify_relo.py` | RELO-0 |"
+    )
+    replacement = {
+        "gate": (
+            "| RELO-FR-01 | W0.1 | TBD | "
+            "`tests/unit/test_verify_relo.py` | RELO-0 |"
+        ),
+        "evidence": "| RELO-FR-01 | W0.1 | QG-01 | Pending | RELO-0 |",
+    }[column]
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace(row, replacement),
+        encoding="utf-8",
+    )
+
+    result = lint_specification(spec)
+
+    assert result.passed is False
+    assert f"missing {column}" in result.detail
+    assert placeholder not in result.detail
+
+
+def test_complete_traceability_rejects_stale_test_mapping(tmp_path) -> None:
+    spec = _write_complete_traceability_spec(tmp_path)
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace(
+            "`tests/unit/test_verify_relo.py`",
+            "`tests/unit/test_removed_relo_contract.py`",
+        ),
+        encoding="utf-8",
+    )
+
+    result = lint_specification(spec)
+
+    assert result.passed is False
+    assert "stale test/evidence path" in result.detail
+    assert "test_removed_relo_contract.py" not in result.detail
+
+
+def test_complete_traceability_rejects_incorrect_work_phase_mapping(tmp_path) -> None:
+    spec = _write_complete_traceability_spec(tmp_path)
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace(
+            "| RELO-FR-01 | W0.1 | QG-01 | "
+            "`tests/unit/test_verify_relo.py` | RELO-0 |",
+            "| RELO-FR-01 | W0.1 | QG-01 | "
+            "`tests/unit/test_verify_relo.py` | RELO-1 |",
+        ),
+        encoding="utf-8",
+    )
+
+    result = lint_specification(spec)
+
+    assert result.passed is False
+    assert "work-item phase mismatch" in result.detail
+
+
 @pytest.mark.parametrize(("original", "replacement"), [
     (
         "| RELO-W0.1 | first | evidence |\n",

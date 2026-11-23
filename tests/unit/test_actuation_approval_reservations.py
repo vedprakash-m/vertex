@@ -393,6 +393,28 @@ def test_payload_edit_after_approval_fails_closed(tmp_path: Path) -> None:
     ) is None
 
 
+def test_approved_payload_refuses_rebound_retained_semantic_effect(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "programs"
+    request = _request()
+    payload = json.loads(request.payload_json)
+    payload["semantic_effect_id"] = "sek1:rebound"
+    request = replace(
+        request,
+        payload_json=json.dumps(payload, sort_keys=True),
+    )
+    approval = _approve(root, request)
+
+    with pytest.raises(OutboxError, match="semantic effect does not match"):
+        enqueue_approved_actuation_intent(
+            root,
+            request=request,
+            approval=approval,
+            now=_NOW,
+        )
+
+
 def test_payload_identity_fields_must_match_the_request(tmp_path: Path) -> None:
     request = replace(
         _request(),

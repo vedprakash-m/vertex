@@ -157,7 +157,12 @@ def test_load_proposals_filters_by_status(tmp_path: Path) -> None:
 def test_re_staging_same_id_supersedes_prior_status_without_losing_history(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     staged = _meeting_action(id="action-1")
-    approved = _meeting_action(id="action-1", status="approved", decided_at=datetime(2026, 7, 2, tzinfo=timezone.utc))
+    approved = _meeting_action(
+        id="action-1",
+        status="approved",
+        approved_by="pm@example.com",
+        decided_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
 
     stage_proposal("acme", "meeting_action", staged, programs_root=programs_root)
     stage_proposal("acme", "meeting_action", approved, programs_root=programs_root)
@@ -169,6 +174,32 @@ def test_re_staging_same_id_supersedes_prior_status_without_losing_history(tmp_p
     # The raw JSONL file still has both appended lines (append-only history).
     raw_path = programs_root / "acme" / "journal" / "ai_review_proposals.jsonl"
     assert len(raw_path.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_approved_meeting_action_round_trip_retains_reviewer_identity(
+    tmp_path: Path,
+) -> None:
+    programs_root = tmp_path / "programs"
+    approved = _meeting_action(
+        status="approved",
+        approved_by="pm@example.com",
+        decided_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+
+    stage_proposal(
+        "acme",
+        "meeting_action",
+        approved,
+        programs_root=programs_root,
+    )
+    loaded = load_proposals(
+        "acme",
+        proposal_type="meeting_action",
+        programs_root=programs_root,
+    )
+
+    assert loaded == (approved,)
+    assert loaded[0].approved_by == "pm@example.com"
 
 
 def test_load_proposals_without_type_filter_returns_all_five_types(tmp_path: Path) -> None:

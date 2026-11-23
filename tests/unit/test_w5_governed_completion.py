@@ -62,7 +62,11 @@ from tests.support.actuation_reconciliation import (
     synthetic_authorized_effect_document,
     synthetic_completed_reconciliation,
 )
-from src.m365.ado_writer import _authorized_create_effect, _build_create_task_patch
+from src.m365.ado_writer import (
+    _authorized_create_effect,
+    _authorized_create_effect_binding,
+    _build_create_task_patch,
+)
 
 
 _NOW = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
@@ -438,13 +442,64 @@ def test_approved_create_uses_canonical_origin_target_identity() -> None:
         tenant="contoso",
         project="One",
         causal_occurrence_id="meeting:action-1",
-        payload=desired,
+        payload=normalize_semantic_payload("create_task.v1", fields),
     )
     fields["authorized_effect"]["desired_value"] = desired
     fields["approved_remote_marker"] = "vertex-effect-qualified"
 
     authorized = _authorized_create_effect(fields)
     assert authorized.target_identity == fields["authorized_effect"]["target_identity"]
+
+
+def test_approved_create_binding_falls_back_to_retained_intent() -> None:
+    fields = {
+        "program_id": _PROGRAM,
+        "operation_intent_id": "intent-1",
+        "org": "contoso",
+        "project": "One",
+        "title": "Synthetic",
+        "tags": "vertex-intent-intent-1",
+        "authorized_effect": synthetic_authorized_effect_document(
+            program_id=_PROGRAM,
+            intent_id="intent-1",
+            tenant_id="contoso",
+            project="One",
+        ),
+    }
+    fields["authorized_effect"]["target_identity"] = "One:new"
+    fields["authorized_effect"]["desired_value"] = {
+        item["path"].removeprefix("/fields/"): item["value"]
+        for item in _build_create_task_patch(fields)
+    }
+
+    _, effect_id = _authorized_create_effect_binding(fields)
+
+    assert effect_id.startswith("sek1:")
+
+
+def test_approved_create_marker_refuses_missing_causal_occurrence() -> None:
+    fields = {
+        "program_id": _PROGRAM,
+        "operation_intent_id": "intent-1",
+        "org": "contoso",
+        "project": "One",
+        "title": "Synthetic",
+        "tags": "vertex-intent-intent-1; vertex-effect-qualified",
+        "approved_remote_marker": "vertex-effect-qualified",
+        "authorized_effect": synthetic_authorized_effect_document(
+            program_id=_PROGRAM,
+            intent_id="intent-1",
+            tenant_id="contoso",
+            project="One",
+        ),
+    }
+    fields["authorized_effect"]["desired_value"] = {
+        item["path"].removeprefix("/fields/"): item["value"]
+        for item in _build_create_task_patch(fields)
+    }
+
+    with pytest.raises(ValueError, match="causal occurrence is missing"):
+        _authorized_create_effect_binding(fields)
 
 
 def test_audited_restart_completes_from_receipt_without_provider_callback(

@@ -33,7 +33,12 @@ from src.core.actuation_reconciliation import (
     reconcile_effect,
 )
 from src.core.ledger.durable_outbox_store import OutboxError, load_entry, load_success_receipt
-from src.core.operation_capabilities import create_target_identity
+from src.core.operation_capabilities import (
+    approved_remote_marker,
+    create_target_identity,
+    normalize_semantic_payload,
+    semantic_effect_key,
+)
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, open_locked_proposal_manifest, read_proposal_manifest_from_handle, write_proposal_manifest_to_handle
 from src.core.exceptions import AuthError, ConfigError, CredentialExpired, MutationOutcomeUnknown, QueryError, QueryTimeoutError, StateError
@@ -319,6 +324,31 @@ class ADOWriter:
                     "authorized_effect": task_data.get("authorized_effect"),
                 }
             )
+            try:
+                authorized_effect, effect_id = _authorized_create_effect_binding({
+                    **task_data,
+                    "program_id": proposal.program_id,
+                    "org": self._client.organization,
+                    "project": self._client.project,
+                    "operation_intent_id": operation_intent_id,
+                    "tags": remote_tags,
+                    "causal_occurrence_id": entry.reason,
+                    "approved_remote_marker": approved_marker,
+                })
+            except ValueError as error:
+                return replace(
+                    entry,
+                    entry_status="failed",
+                    operation_intent_id=operation_intent_id,
+                    status_reason=(
+                        f"Create reconciliation requires qualified authorization: {error}"
+                    ),
+                )
+            retained_payload = json.loads(outbox_payload_json)
+            assert isinstance(retained_payload, dict)
+            retained_payload["semantic_effect_id"] = effect_id
+            retained_payload["target_identity"] = authorized_effect.target_identity
+            outbox_payload_json = json.dumps(retained_payload)
 
             # Search-before-create/retry: only when a prior attempt was
             # persisted (attempted_at set). A never-attempted entry has
@@ -354,24 +384,6 @@ class ADOWriter:
                             entry, entry_status="failed",
                             status_reason="Retained create intent is missing or changed; reconciliation required before recovery.",
                         )
-                try:
-                    authorized_effect = _authorized_create_effect({
-                        **task_data,
-                        "program_id": proposal.program_id,
-                        "org": self._client.organization,
-                        "project": self._client.project,
-                        "operation_intent_id": operation_intent_id,
-                        "tags": remote_tags,
-                        "causal_occurrence_id": entry.reason,
-                        "approved_remote_marker": approved_marker,
-                    })
-                except ValueError as error:
-                    return replace(
-                        entry,
-                        entry_status="failed",
-                        operation_intent_id=operation_intent_id,
-                        status_reason=f"Create reconciliation requires qualified authorization: {error}",
-                    )
                 try:
                     existing_id, existing_rev, remote_fields = self._search_existing_create(
                         operation_intent_id=operation_intent_id,
@@ -524,24 +536,6 @@ class ADOWriter:
                     )
                     return adopted_entry
 
-            try:
-                _authorized_create_effect({
-                    **task_data,
-                    "program_id": proposal.program_id,
-                    "org": self._client.organization,
-                    "project": self._client.project,
-                    "operation_intent_id": operation_intent_id,
-                    "tags": remote_tags,
-                    "causal_occurrence_id": entry.reason,
-                    "approved_remote_marker": approved_marker,
-                })
-            except ValueError as error:
-                return replace(
-                    entry,
-                    entry_status="failed",
-                    operation_intent_id=operation_intent_id,
-                    status_reason=f"Create intent is not qualified for outbox dispatch: {error}",
-                )
             # ADF-W1.2: persist attempted_at + operation_intent_id BEFORE
             # dispatch. If the process dies or the response is lost after
             # this point but the server committed the write, the next apply
@@ -564,6 +558,8 @@ class ADOWriter:
                 proposal_id=proposal.id,
                 payload_json=outbox_payload_json,
                 programs_root=self._programs_root,
+                effect_id=effect_id,
+                target_identity=authorized_effect.target_identity,
             )
             if enqueued.outbox_id != idempotency_key:
                 try:
@@ -1016,7 +1012,7 @@ class ADOWriter:
                 ),
             )
         try:
-            authorized_effect = _authorized_create_effect(fields)
+            authorized_effect, _ = _authorized_create_effect_binding(fields)
         except ValueError as error:
             return DispatchResult(
                 succeeded=False,
@@ -1235,7 +1231,7 @@ def _authorized_create_effect(fields: dict[str, Any]) -> AuthorizedEffect:
             tenant=str(fields.get("org") or ""),
             project=str(fields.get("project") or ""),
             causal_occurrence_id=causal_occurrence_id,
-            payload=desired_value,
+            payload=normalize_semantic_payload("create_task.v1", fields),
         )
     else:
         expected_target = f"{fields.get('project')}:new"
@@ -1247,6 +1243,41 @@ def _authorized_create_effect(fields: dict[str, Any]) -> AuthorizedEffect:
     if preflight.status == "failed_terminal":
         raise ValueError("; ".join(preflight.mismatches))
     return authorized
+
+
+def _authorized_create_effect_binding(
+    fields: dict[str, Any],
+) -> tuple[AuthorizedEffect, str]:
+    authorized = _authorized_create_effect(fields)
+    causal_occurrence_id = fields.get("causal_occurrence_id")
+    retained_marker = fields.get("approved_remote_marker")
+    if not isinstance(causal_occurrence_id, str) or not causal_occurrence_id.strip():
+        if retained_marker is not None:
+            raise ValueError("authorized effect causal occurrence is missing")
+        fallback_intent = fields.get("operation_intent_id")
+        if not isinstance(fallback_intent, str) or not fallback_intent.strip():
+            raise ValueError("authorized effect causal occurrence is missing")
+        causal_occurrence_id = fallback_intent
+    effect_id = semantic_effect_key(
+        program_id=authorized.program_id,
+        provider=authorized.provider,
+        tenant=authorized.tenant_id,
+        project=authorized.project,
+        operation=authorized.operation,
+        target_identity=authorized.target_identity,
+        causal_occurrence_id=causal_occurrence_id,
+        payload=normalize_semantic_payload("create_task.v1", fields),
+    )
+    if retained_marker is not None:
+        expected_marker = approved_remote_marker(
+            operation=authorized.operation,
+            semantic_effect_key=effect_id,
+        )
+        if retained_marker != expected_marker:
+            raise ValueError(
+                "approved remote marker does not bind the retained semantic effect"
+            )
+    return authorized, effect_id
 
 
 def _completed_create_receipt_binds(

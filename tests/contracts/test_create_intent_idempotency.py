@@ -38,8 +38,17 @@ from src.core.ado_proposal import (
 from src.core.exceptions import AuthError, ConfigError, QueryError, StateError
 from src.core.integration_types import PaginationOutcome
 from src.core.ledger.event_log import read_events
-from src.core.ledger.durable_outbox_store import load_entry, load_success_receipt
-from src.core.operation_capabilities import create_target_identity
+from src.core.ledger.durable_outbox_store import (
+    load_effect_outbox_id,
+    load_entry,
+    load_success_receipt,
+)
+from src.core.operation_capabilities import (
+    approved_remote_marker,
+    create_target_identity,
+    normalize_semantic_payload,
+    semantic_effect_key,
+)
 from src.m365.ado_writer import ADOWriter, _build_create_task_patch
 
 
@@ -448,7 +457,29 @@ def test_approved_marker_is_retained_in_create_payload(
     proposal, manifest_path = _proposal(programs_root)
     entry = proposal.entries[0]
     task = json.loads(entry.proposed_value)
-    marker = "vertex-effect-" + ("a" * 64)
+    semantic_desired = normalize_semantic_payload("create_task.v1", task)
+    semantic_target = create_target_identity(
+        provider="ado",
+        tenant="contoso",
+        project="One",
+        causal_occurrence_id=entry.reason,
+        payload=semantic_desired,
+    )
+    semantic = semantic_effect_key(
+        program_id=proposal.program_id,
+        provider="ado",
+        tenant="contoso",
+        project="One",
+        operation="create_task.v1",
+        target_identity=semantic_target,
+        causal_occurrence_id=entry.reason,
+        payload=semantic_desired,
+    )
+    marker = approved_remote_marker(
+        operation="create_task.v1",
+        semantic_effect_key=semantic,
+    )
+    assert marker is not None
     remote_tags = f"vertex-intent-{entry.operation_intent_id}; {marker}"
     desired = {
         item["path"].removeprefix("/fields/"): item["value"]
@@ -456,13 +487,7 @@ def test_approved_marker_is_retained_in_create_payload(
     }
     task["approved_remote_marker"] = marker
     task["authorized_effect"]["desired_value"] = desired
-    task["authorized_effect"]["target_identity"] = create_target_identity(
-        provider="ado",
-        tenant="contoso",
-        project="One",
-        causal_occurrence_id=entry.reason,
-        payload=desired,
-    )
+    task["authorized_effect"]["target_identity"] = semantic_target
     proposal = replace(
         proposal,
         entries=(replace(entry, proposed_value=json.dumps(task)),),
@@ -491,6 +516,65 @@ def test_approved_marker_is_retained_in_create_payload(
     assert retained["approved_remote_marker"] == marker
     assert marker in str(retained["tags"])
     assert "vertex-intent-" in str(retained["tags"])
+    db_path = outbox_db_path(proposal.program_id, programs_root=programs_root)
+    outbox_id = result.proposal.entries[0].outbox_id
+    assert isinstance(outbox_id, str)
+    retained_entry = load_entry(db_path, outbox_id)
+    assert retained_entry is not None
+    assert load_effect_outbox_id(db_path, semantic) == retained_entry.outbox_id
+
+
+def test_stale_approved_marker_refuses_before_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    entry = proposal.entries[0]
+    task = json.loads(entry.proposed_value)
+    marker = "vertex-effect-" + ("a" * 64)
+    remote_tags = f"vertex-intent-{entry.operation_intent_id}; {marker}"
+    desired = {
+        item["path"].removeprefix("/fields/"): item["value"]
+        for item in _build_create_task_patch({**task, "tags": remote_tags})
+    }
+    task["approved_remote_marker"] = marker
+    task["authorized_effect"]["desired_value"] = desired
+    task["authorized_effect"]["target_identity"] = create_target_identity(
+        provider="ado",
+        tenant="contoso",
+        project="One",
+        causal_occurrence_id=entry.reason,
+        payload=normalize_semantic_payload(
+            "create_task.v1", {**task, "tags": remote_tags}
+        ),
+    )
+    proposal = replace(
+        proposal,
+        entries=(replace(entry, proposed_value=json.dumps(task)),),
+    )
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    writer = ADOWriter(
+        _fake_client(_FakeADOBackend(), lose_first_response=False),
+        programs_root=programs_root,
+    )
+    calls: list[object] = []
+    monkeypatch.setattr(
+        writer,
+        "_dispatch_create_task_outbox_entry",
+        lambda retained: calls.append(retained),
+    )
+
+    result = writer.apply_manifest(
+        manifest_path,
+        applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+
+    assert result.failed_count == 1
+    assert calls == []
+    assert "semantic effect" in (
+        result.proposal.entries[0].status_reason or ""
+    ).lower()
 
 
 def test_malformed_wiql_blocks_lost_response_reconciliation(tmp_path: Path) -> None:

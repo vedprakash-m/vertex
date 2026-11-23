@@ -254,6 +254,33 @@ def _require_retained_dispatchable_operation(
         and payload["operation_intent_id"]
         else None
     )
+    retained_effect_id = payload.get("semantic_effect_id")
+    exact_effect_binding = (
+        str(payload.get("target_identity") or "").startswith("origin1:")
+        or isinstance(payload.get("approved_remote_marker"), str)
+    )
+    if retained_effect_id is not None or exact_effect_binding:
+        retained_owner = (
+            load_effect_outbox_id(db_path, retained_effect_id)
+            if isinstance(retained_effect_id, str) and retained_effect_id
+            else None
+        )
+        if (
+            not isinstance(retained_effect_id, str)
+            or not retained_effect_id
+            or retained_owner != entry.outbox_id
+            or (
+                semantic_effect_id is not None
+                and retained_effect_id != semantic_effect_id
+            )
+            or (
+                semantic_effect_id is None
+                and not isinstance(payload.get("approved_remote_marker"), str)
+            )
+        ):
+            raise OutboxError(
+                "Retained semantic effect identity is missing, changed or unbound"
+            )
     semantic_owner = (
         load_effect_outbox_id(db_path, semantic_effect_id)
         if semantic_effect_id is not None
@@ -448,7 +475,11 @@ def _semantic_effect_id(
                 or payload.get("operation_intent_id")
                 or fallback_causal_occurrence_id
             ),
-            payload=normalize_semantic_payload(operation, payload),
+            payload=(
+                payload["desired_effect"]
+                if isinstance(payload.get("desired_effect"), dict)
+                else normalize_semantic_payload(operation, payload)
+            ),
         )
     except (TypeError, ValueError):
         return None

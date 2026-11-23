@@ -207,6 +207,7 @@ def lint_specification(path: Path) -> CheckResult:
         if missing_requirements:
             findings.append(f"missing requirement traceability row(s): {', '.join(missing_requirements)}")
     findings.extend(_goal_traceability_findings(content, work_ids))
+    findings.extend(_complete_traceability_findings(path, visible_content, work_ids))
     findings.extend(_problem_registry_findings(path, visible_content))
     findings.extend(_compaction_archive_findings(path, visible_content))
     findings.extend(_semantic_traceability_findings(path, visible_content))
@@ -523,6 +524,269 @@ def _goal_traceability_findings(content: str, work_ids: set[str]) -> list[str]:
             "missing goal requirement traceability row(s): "
             + ", ".join(missing_requirements)
         )
+    return findings
+
+
+def _phase_references(value: str) -> set[str]:
+    single = re.fullmatch(r"RELO-([0-6])", value)
+    if single is not None:
+        return {f"RELO-{single[1]}"}
+    listed = re.fullmatch(r"RELO-([0-6])((?:/[0-6])+)", value)
+    if listed is not None:
+        return {
+            f"RELO-{number}"
+            for number in (listed[1], *listed[2][1:].split("/"))
+        }
+    ranged = re.fullmatch(r"RELO-([0-6])[-–]([0-6])", value)
+    if ranged is None or int(ranged[1]) > int(ranged[2]):
+        return set()
+    return {
+        f"RELO-{number}"
+        for number in range(int(ranged[1]), int(ranged[2]) + 1)
+    }
+
+
+def _work_item_phases(spec_path: Path, visible_content: str) -> dict[str, str]:
+    phases: dict[str, str] = {}
+    for section_number in range(1, 8):
+        rows = _markdown_table_rows(
+            _traceability_section(
+                visible_content, f"11.{section_number}", phase_heading=True,
+            ),
+            ("ID", "Work item"),
+        )
+        for row in rows or []:
+            cells = _markdown_table_cells(row)
+            match = re.fullmatch(
+                r"(?:\*\*(RELO-W\d+\.\d+[a-z]?)\*\*|"
+                r"(RELO-W\d+\.\d+[a-z]?))",
+                cells[0] if cells else "",
+            )
+            if match is not None:
+                phases[match.group(1) or match.group(2)] = f"RELO-{section_number - 1}"
+    try:
+        ledger = yaml.safe_load(
+            (_spec_repo_root(spec_path) / "governance" / "relo-work-packages.yaml")
+            .read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return phases
+    cards = ledger.get("work_items") if isinstance(ledger, dict) else None
+    if isinstance(cards, list):
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            identifier = card.get("id")
+            phase = card.get("phase")
+            if (
+                isinstance(identifier, str)
+                and isinstance(phase, str)
+                and re.fullmatch(r"RELO-[0-6]", phase)
+            ):
+                phases.setdefault(identifier, phase)
+    return phases
+
+
+def _traceability_mapping_missing(value: str) -> bool:
+    normalized = re.sub(r"[*`]", "", value).strip().lower().rstrip(".")
+    return normalized in {
+        "", "-", "—", "n/a", "na", "none", "no gate", "no evidence",
+        "pending", "tbd", "unassigned",
+    }
+
+
+def _stale_evidence_paths(
+    spec_path: Path, evidence: str,
+) -> bool:
+    repo_root = _spec_repo_root(spec_path).resolve()
+    for match in re.finditer(r"`((?:tests|scripts)/[^`]+?\.(?:py|yaml|json))(?:::[^`]+)?`", evidence):
+        prefix = evidence[max(0, match.start() - 24):match.start()]
+        if re.search(r"\bplanned\b", prefix, re.IGNORECASE):
+            continue
+        target = (repo_root / match.group(1)).resolve()
+        if not target.is_relative_to(repo_root) or not target.is_file():
+            return True
+    return False
+
+
+def _complete_traceability_findings(
+    spec_path: Path, visible_content: str, work_ids: set[str],
+) -> list[str]:
+    strict_complete_traceability = (
+        "### 3.2 Goals" in visible_content
+        and "### 3.3 Objectives" in visible_content
+        and "### 19.1 Goal and objective traceability" in visible_content
+        and "### 19.2 Requirement-to-delivery traceability" in visible_content
+    )
+    if not strict_complete_traceability:
+        return []
+    goal_rows = _markdown_table_rows(
+        _traceability_section(visible_content, "19.1"),
+        ("Goal", "Objectives", "Primary requirements/workstreams"),
+        exact=True,
+    )
+    requirement_rows = _markdown_table_rows(
+        _traceability_section(visible_content, "19.2"),
+        ("Requirement", "Work items", "Gate", "Primary test/evidence", "Phase"),
+        exact=True,
+    )
+    goal_definition_rows = _markdown_table_rows(
+        _traceability_section(visible_content, "3.2"), ("ID", "Goal"),
+    )
+    objective_definition_rows = _markdown_table_rows(
+        _traceability_section(visible_content, "3.3"),
+        ("ID", "Objective", "Required evidence"),
+    )
+    missing_tables = [
+        name
+        for name, rows in (
+            ("goal mapping", goal_rows),
+            ("requirement mapping", requirement_rows),
+            ("goal definition", goal_definition_rows),
+            ("objective definition", objective_definition_rows),
+        )
+        if rows is None
+    ]
+    if missing_tables:
+        return [
+            f"{name} traceability table is missing or malformed"
+            for name in missing_tables
+        ]
+    assert goal_rows is not None
+    assert requirement_rows is not None
+    assert goal_definition_rows is not None
+    assert objective_definition_rows is not None
+
+    goals = set(_traceability_definition_ids(goal_definition_rows, r"RELO-G\d+"))
+    objectives = set(
+        _traceability_definition_ids(objective_definition_rows, r"RELO-O\d+"),
+    )
+    requirements: set[str] = set()
+    for section_number, pattern in (
+        ("5.5", r"RELO-FR-\d+"), ("5.6", r"RELO-NFR-\d+"),
+    ):
+        requirements.update(_traceability_definition_ids(
+            _markdown_table_rows(
+                _traceability_section(visible_content, section_number),
+                ("ID", "Requirement"),
+            ),
+            pattern,
+        ))
+    missing_definitions = [
+        name
+        for name, values in (
+            ("canonical goal", goals),
+            ("canonical objective", objectives),
+            ("canonical requirement", requirements),
+        )
+        if not values
+    ]
+    if missing_definitions:
+        return [
+            f"{name} traceability definitions are missing"
+            for name in missing_definitions
+        ]
+
+    features_section = _traceability_section(visible_content, "8") or ""
+    features = set(re.findall(
+        r"^###\s+8\.\d+\s+(RELO-F\d+)\b",
+        features_section,
+        re.MULTILINE,
+    ))
+    work_phases = _work_item_phases(spec_path, visible_content)
+    findings: list[str] = []
+    complete_requirements: set[str] = set()
+    row_counts: dict[str, int] = {}
+    for row in requirement_rows:
+        cells = _markdown_table_cells(row)
+        if cells is None or len(cells) != 5 or not all(cells):
+            continue
+        requirement = cells[0]
+        if requirement not in requirements:
+            continue
+        row_counts[requirement] = row_counts.get(requirement, 0) + 1
+        complete = True
+        if _traceability_mapping_missing(cells[2]):
+            findings.append(f"{requirement}: requirement mapping is missing gate")
+            complete = False
+        if _traceability_mapping_missing(cells[3]):
+            findings.append(f"{requirement}: requirement mapping is missing evidence")
+            complete = False
+        if _stale_evidence_paths(spec_path, cells[3]):
+            findings.append(f"{requirement}: requirement mapping has stale test/evidence path")
+            complete = False
+        try:
+            references = _traceability_references(cells[1], work_ids)
+        except ValueError:
+            complete = False
+            references = set()
+        declared_phases = _phase_references(cells[4])
+        actual_phases = {
+            work_phases[reference]
+            for reference in references
+            if reference in work_phases
+        }
+        if (
+            not declared_phases
+            or not actual_phases
+            or any(reference not in work_phases for reference in references)
+            or declared_phases != actual_phases
+        ):
+            findings.append(f"{requirement}: requirement mapping has work-item phase mismatch")
+            complete = False
+        if complete:
+            complete_requirements.add(requirement)
+    for requirement in sorted(requirements - complete_requirements):
+        if requirement not in row_counts:
+            findings.append(f"{requirement}: canonical requirement has no complete delivery mapping")
+    for requirement, count in sorted(row_counts.items()):
+        if count != 1:
+            findings.append(f"{requirement}: duplicate canonical traceability requirement row")
+            complete_requirements.discard(requirement)
+
+    goal_requirements: dict[str, set[str]] = {}
+    objective_goals: dict[str, set[str]] = {}
+    for row in goal_rows:
+        cells = _markdown_table_cells(row)
+        if cells is None or len(cells) != 3 or not all(cells):
+            continue
+        goal_match = re.fullmatch(
+            r"(?:\*\*(RELO-G\d+)\*\*|(RELO-G\d+))", cells[0],
+        )
+        if goal_match is None:
+            continue
+        goal = goal_match.group(1) or goal_match.group(2)
+        if goal not in goals:
+            continue
+        try:
+            goal_references = _traceability_references(
+                " ".join(cells[1:]),
+                requirements | objectives | work_ids | features,
+                goal_targets=True,
+            )
+        except ValueError:
+            continue
+        mapped_requirements = goal_references & requirements
+        goal_requirements.setdefault(goal, set()).update(mapped_requirements)
+        for objective in goal_references & objectives:
+            objective_goals.setdefault(objective, set()).add(goal)
+    for goal in sorted(goals):
+        if not goal_requirements.get(goal):
+            findings.append(f"{goal}: canonical goal is not mapped to a delivery requirement")
+        elif goal_requirements[goal] - complete_requirements:
+            findings.append(f"{goal}: canonical goal has an incomplete delivery mapping")
+    for objective in sorted(objectives):
+        owners = objective_goals.get(objective, set())
+        reachable = {
+            requirement
+            for goal in owners
+            for requirement in goal_requirements.get(goal, set())
+            if requirement in complete_requirements
+        }
+        if not owners or not reachable:
+            findings.append(
+                f"{objective}: canonical objective has no complete bidirectional mapping",
+            )
     return findings
 
 

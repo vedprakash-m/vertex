@@ -472,6 +472,27 @@ def _authorized_payload_failure(
     return None
 
 
+def _retained_approval_payload(
+    request: ActuationAdmissionRequest,
+    approval: ActuationApproval,
+) -> str:
+    payload = dict(_canonical_payload(request.payload_json))
+    retained = payload.get("semantic_effect_id")
+    if retained is not None and retained != approval.semantic_effect_key:
+        raise OutboxError(
+            "Approved payload semantic effect does not match the retained approval"
+        )
+    payload["semantic_effect_id"] = approval.semantic_effect_key
+    payload["target_identity"] = request.target_identity
+    payload["causal_occurrence_id"] = request.causal_occurrence_id
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
 def enqueue_approved_actuation_intent(
     db_path: Path,
     *,
@@ -489,6 +510,7 @@ def enqueue_approved_actuation_intent(
     if approval.payload_sha256 != _payload_hash(request.payload_json):
         raise OutboxError("Approval payload hash does not match the retained payload")
     marker = _request_marker(request)
+    retained_payload_json = _retained_approval_payload(request, approval)
 
     with open_program_db(db_path, durability="strict") as connection:
         connection.executescript(_SCHEMA_SQL + _APPROVAL_SCHEMA_SQL)
@@ -550,7 +572,7 @@ def enqueue_approved_actuation_intent(
                 or int(admission["approval_revision"]) != approval.revision
                 or admission["semantic_effect_key"] != approval.semantic_effect_key
                 or admission["payload_sha256"] != approval.payload_sha256
-                or existing["payload_json"] != request.payload_json
+                or existing["payload_json"] != retained_payload_json
             ):
                 raise OutboxError("Existing provider request has different approval or payload identity")
             return _entry_from_row(tuple(existing))
@@ -610,7 +632,7 @@ def enqueue_approved_actuation_intent(
             ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
             """,
             (
-                outbox_id, ACTUATION_DISPATCH_DOMAIN, outbox_id, request.payload_json,
+                outbox_id, ACTUATION_DISPATCH_DOMAIN, outbox_id, retained_payload_json,
                 now_wire, now_wire,
             ),
         )
@@ -999,13 +1021,31 @@ def _admission_failure(
         return "Evidence snapshot has expired", "cancelled"
     if observation.evidence_snapshot_id != approval["evidence_snapshot_id"]:
         return "Evidence snapshot is not the approved snapshot", "cancelled"
-    if _payload_hash(entry.payload_json) != admission["payload_sha256"]:
-        return "Retained payload hash does not match approval", "cancelled"
-    if approval["payload_sha256"] != admission["payload_sha256"]:
-        return "Approval payload identity changed", "cancelled"
     if approval["semantic_effect_key"] != admission["semantic_effect_key"]:
         return "Approval semantic effect changed", "cancelled"
     payload = _canonical_payload(entry.payload_json)
+    retained_semantic = payload.pop("semantic_effect_id", None)
+    retained_target = payload.pop("target_identity", None)
+    retained_causal = payload.pop("causal_occurrence_id", None)
+    if retained_semantic != admission["semantic_effect_key"]:
+        return "Retained payload semantic effect identity is missing or changed", "cancelled"
+    if retained_target != admission["target_identity"]:
+        return "Retained target identity is missing or changed", "cancelled"
+    if retained_causal != admission["causal_occurrence_id"]:
+        return "Retained causal occurrence is missing or changed", "cancelled"
+    approved_payload_json = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    if (
+        _payload_hash(entry.payload_json) != admission["payload_sha256"]
+        and _payload_hash(approved_payload_json) != admission["payload_sha256"]
+    ):
+        return "Retained payload hash does not match approval", "cancelled"
+    if approval["payload_sha256"] != admission["payload_sha256"]:
+        return "Approval payload identity changed", "cancelled"
     desired = payload.get("desired_effect")
     program_id = payload.get("program_id")
     if not isinstance(desired, Mapping):

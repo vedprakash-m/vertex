@@ -275,6 +275,7 @@ def _meeting_action_to_record(action: MeetingAction) -> dict[str, Any]:
         "extraction_method": action.extraction_method,
         "status": action.status,
         "rejection_reason": action.rejection_reason,
+        "approved_by": action.approved_by,
         "proposed_at": _iso(action.proposed_at),
         "decided_at": _iso(action.decided_at),
     }
@@ -294,6 +295,7 @@ def _meeting_action_from_record(record: dict[str, Any]) -> MeetingAction:
         extraction_method=record["extraction_method"],  # type: ignore[arg-type]
         status=record.get("status", "staged"),  # type: ignore[arg-type]
         rejection_reason=record.get("rejection_reason"),
+        approved_by=record.get("approved_by"),
         proposed_at=_parse_datetime(record["proposed_at"]) if record.get("proposed_at") else datetime.now(timezone.utc),
         decided_at=_parse_optional_datetime(record.get("decided_at")),
     )
