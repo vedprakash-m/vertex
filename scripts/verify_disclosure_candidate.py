@@ -238,9 +238,12 @@ def _load_push_ref_commits(
         )
         if metadata_rev.returncode != 0:
             raise _SelectionError("INPUT_UNAVAILABLE")
-        metadata_commits.extend(
+        new_commits = tuple(
             line.strip() for line in metadata_rev.stdout.splitlines() if line.strip()
         )
+        commits[:] = [commit for commit in commits if commit not in outgoing]
+        commits.extend(new_commits)
+        metadata_commits.extend(new_commits)
     return tuple(dict.fromkeys(commits)), tuple(dict.fromkeys(metadata_commits))
 
 
